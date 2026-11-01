@@ -1,8 +1,5 @@
 name: OpenEMR synthetic SOAP workflow
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/openemr-soap.yml'
   workflow_dispatch:
   schedule:
     - cron: "0 18 * * 0"
@@ -15,7 +12,6 @@ env:
   MUGIURUSHI_SOURCE_REVISION: ${{ github.sha }}
 jobs:
   soap:
-    if: github.event_name != 'pull_request' || github.head_ref == 'codex/openemr-patient-separation-demo' || github.head_ref == 'codex/openemr-two-patients'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -49,20 +45,12 @@ jobs:
       - name: Enable the OS sandbox for pinned Chromium
         run: bash .github/scripts/chromium-sandbox.sh
       - name: Save and reload four SOAP fields, stop the DB and retry
-        if: github.event_name != 'pull_request' || github.head_ref != 'codex/openemr-two-patients'
         run: |
           umask 077
           printf '%s' '{"username":"eel-operator","password":"eel-pass-trial"}' > "$RUNNER_TEMP/openemr-secrets.json"
           EEL_BROWSER_SECRETS_FILE="$RUNNER_TEMP/openemr-secrets.json" node tools/openemr-soap-smoke.mjs
       - name: Select a versioned SOAP recipe and execute it through the browser UI
-        if: github.event_name != 'pull_request' || github.head_ref != 'codex/openemr-two-patients'
         run: npm run test:browser-handoff -- --live
-      - name: Save patient A and compare patient B before and after
-        if: github.event_name == 'pull_request' && github.head_ref == 'codex/openemr-two-patients'
-        run: |
-          umask 077
-          printf '%s' '{"username":"eel-operator","password":"eel-pass-trial"}' > "$RUNNER_TEMP/openemr-secrets.json"
-          EEL_BROWSER_SECRETS_FILE="$RUNNER_TEMP/openemr-secrets.json" node tools/openemr-two-patients-smoke.mjs
       - name: Keep synthetic SOAP workflow evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -72,8 +60,6 @@ jobs:
             evaluations/ci-openemr-soap/**/*.json
             evaluations/ci-openemr-soap/**/*.png
             evaluations/ci-openemr-soap/**/*.log
-            evaluations/ci-openemr-two-patients/**/*.json
-            evaluations/ci-openemr-two-patients/**/*.png
             test-results/browser-handoff-*.png
             test-results/browser-handoff-live.json
           if-no-files-found: ignore
@@ -90,7 +76,6 @@ jobs:
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   manual-trial:
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
