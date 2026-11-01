@@ -105,6 +105,7 @@ pub enum Expectation {
     Contains,
     NotContains,
     Equal,
+    NotEqual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +115,11 @@ pub struct DatabaseRelation {
     pub left_column: usize,
     pub right: String,
     pub right_column: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub left_before: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -380,7 +386,7 @@ pub fn validate(
             .as_ref()
             .is_some_and(|t| !t.is_empty() && t.len() <= 1024);
         match (check.method, check.expect) {
-            (CheckMethod::DatabaseRelation, Expectation::Equal)
+            (CheckMethod::DatabaseRelation, Expectation::Equal | Expectation::NotEqual)
                 if check.text.is_none() && check.target.is_none() && check.relation.is_some() => {}
             (CheckMethod::ExitCode, Expectation::Zero | Expectation::Nonzero)
                 if check.text.is_none() => {}
@@ -1010,7 +1016,14 @@ pub fn describe(check: &TrialCheck, spec: &TrialSpec) -> String {
         CheckMethod::BrowserText => format!("画面の文字列に{text}{has}"),
         CheckMethod::BrowserResponse => format!("ブラウザが受け取ったHTTP応答に{text}{has}"),
         CheckMethod::DatabaseRows => format!("DBから直接読み出した行に{text}{has}"),
-        CheckMethod::DatabaseRelation => "DBから読み出した2つの行の指定した列が一致する".into(),
+        CheckMethod::DatabaseRelation => format!(
+            "DBから読み出した2つの行の指定した列が{}",
+            if check.expect == Expectation::Equal {
+                "一致する"
+            } else {
+                "一致しない"
+            }
+        ),
         CheckMethod::ContainerLog => format!("コンテナのログに{text}{has}"),
         CheckMethod::DatabaseQuery => {
             format!("基盤がデータベースを直接読み出した結果に{text}{has}")

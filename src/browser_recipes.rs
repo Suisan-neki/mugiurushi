@@ -6,6 +6,10 @@ pub fn catalog() -> io::Result<Value> {
     let normal: Value =
         serde_json::from_str(include_str!("../examples/openemr-browser/soap-recipe.json"))
             .map_err(io::Error::other)?;
+    let two_patients: Value = serde_json::from_str(include_str!(
+        "../examples/openemr-browser/soap-two-patients-recipe.json"
+    ))
+    .map_err(io::Error::other)?;
     let mut stopped = normal.clone();
     stopped["trial"]["fault"] = json!("database_stopped");
     let actions = stopped["browser"]["actions"]
@@ -32,12 +36,22 @@ pub fn catalog() -> io::Result<Value> {
             "OpenEMR：SOAPの保存直前にDBを停止",
             stopped,
         ),
+        (
+            "openemr-soap-two-patients",
+            "OpenEMR：患者Aの保存と患者Bへの影響",
+            two_patients,
+        ),
     ] {
         let parsed: crate::execution::Recipe =
             serde_json::from_value(recipe.clone()).map_err(io::Error::other)?;
         crate::execution::validate_recipe(&parsed)?;
+        let origin = if id == "openemr-soap-two-patients" {
+            "examples/openemr-browser/soap-two-patients-recipe.json"
+        } else {
+            "examples/openemr-browser/soap-recipe.json"
+        };
         recipes.push(json!({"id":id,"title":title,"recipe":recipe,
-            "origin":"examples/openemr-browser/soap-recipe.json",
+            "origin":origin,
             "note":"架空の患者と診療記録で試します。Gitの参照版と、実行するイメージのコードが同一であることは未確認です。"}));
     }
     Ok(json!({"schema_version":1,"recipes":recipes}))

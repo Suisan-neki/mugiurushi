@@ -52,7 +52,6 @@ fn validates_declarative_steps_and_rejects_remote_navigation_and_sql_identifiers
     assert!(!sql.contains("DELETE"));
     assert!(sql.contains("CONVERT(0x"));
 }
-
 #[test]
 fn response_wait_requires_a_click_and_registered_watch() {
     let mut value = serde_json::to_value(spec()).unwrap();
@@ -66,6 +65,7 @@ fn response_wait_requires_a_click_and_registered_watch() {
     let invalid: BrowserSpec = serde_json::from_value(value).unwrap();
     assert!(validate(&invalid, &containers()).is_err());
 }
+
 #[test]
 fn absent_and_failed_reads_do_not_pass_negative_expectations() {
     let mut p = phase();
@@ -248,6 +248,46 @@ fn relation_requires_existing_distinct_probes_and_columns() {
         .unwrap();
     check.relation.as_mut().unwrap().right_column = 100;
     assert!(mugiurushi::execution::validate_recipe(&recipe).is_err());
+}
+
+#[test]
+fn relation_can_compare_recorded_before_and_after_values() {
+    let mut check: TrialCheck = serde_json::from_value(json!({
+        "id":"unchanged", "scope":"患者B", "method":"database_relation", "expect":"equal",
+        "relation":{"left":"b", "left_column":0, "left_before":true, "right":"b", "right_column":0}
+    }))
+    .unwrap();
+    let mut p = phase();
+    let read = |text: &str| DatabaseRead {
+        id: "b".into(),
+        performed: true,
+        exit_code: Some(0),
+        text: text.into(),
+        detail: String::new(),
+    };
+    p.database_reads_before.push(read("old\n"));
+    p.database_reads.push(read("old\n"));
+    assert_eq!(evaluate(&check, Some(&p), "").0, Observed::Pass);
+    p.database_reads[0].text = "new\n".into();
+    assert_eq!(evaluate(&check, Some(&p), "").0, Observed::Fail);
+    check.expect = Expectation::NotEqual;
+    assert_eq!(evaluate(&check, Some(&p), "").0, Observed::Pass);
+    p.database_reads_before.clear();
+    assert_eq!(evaluate(&check, Some(&p), "").0, Observed::NotObserved);
+}
+
+#[test]
+fn two_patient_recipe_is_bounded_and_valid() {
+    let recipe: mugiurushi::execution::Recipe = serde_json::from_str(include_str!(
+        "../examples/openemr-browser/soap-two-patients-recipe.json"
+    ))
+    .unwrap();
+    mugiurushi::execution::validate_recipe(&recipe).unwrap();
+    let browser = recipe.browser.unwrap();
+    let b = browser.database.iter().find(|q| q.id == "soap-b").unwrap();
+    assert!(b.before_actions);
+    assert_eq!(b.match_value.as_deref(), Some("B-{{test_value}}"));
+    assert!(query(b, "EEL-TEST-123").contains("422d45454c2d544553542d313233"));
 }
 
 #[test]

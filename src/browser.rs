@@ -103,6 +103,13 @@ pub struct DatabaseProbe {
     pub table: String,
     pub match_column: String,
     pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_value: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub before_actions: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,7 +232,7 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
             .bytes()
             .all(|b| b.is_ascii_digit() || b == b'.')
         || spec.actions.is_empty()
-        || spec.actions.len() + spec.preparation.len() > 64
+        || spec.actions.len() + spec.preparation.len() > 96
         || spec.responses.len() > 16
         || spec.database.len() > 16
         || spec.http_reads.len() > 16
@@ -323,6 +330,11 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
             || q.columns.is_empty()
             || q.columns.len() > 16
             || !q.columns.iter().all(|c| sql_identifier(c))
+            || q.match_value.as_ref().is_some_and(|value| {
+                value.len() > 512
+                    || value.contains('\0')
+                    || !value.contains(crate::trial::TEST_VALUE)
+            })
         {
             return Err(invalid(
                 "DBの読取先は試験用DBと英数字・下線の識別子で指定してください",
@@ -362,7 +374,11 @@ pub fn query(q: &DatabaseProbe, test_value: &str) -> String {
         .map(|c| format!("`{c}`"))
         .collect::<Vec<_>>()
         .join(",");
-    let hex = test_value
+    let match_value = q.match_value.as_deref().map_or_else(
+        || test_value.to_owned(),
+        |value| crate::trial::substitute(value, test_value),
+    );
+    let hex = match_value
         .as_bytes()
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -595,8 +611,13 @@ pub fn evaluate(
         let Some(relation) = &check.relation else {
             return missing();
         };
-        let column = |id: &str, index: usize| -> Option<Option<String>> {
-            let read = phase.database_reads.iter().find(|q| q.id == id)?;
+        let column = |id: &str, index: usize, before: bool| -> Option<Option<String>> {
+            let reads = if before {
+                &phase.database_reads_before
+            } else {
+                &phase.database_reads
+            };
+            let read = reads.iter().find(|q| q.id == id)?;
             if !read.performed || read.exit_code != Some(0) {
                 return None;
             }
@@ -614,8 +635,8 @@ pub fn evaluate(
             Some(Some(value.to_owned()))
         };
         return match (
-            column(&relation.left, relation.left_column),
-            column(&relation.right, relation.right_column),
+            column(&relation.left, relation.left_column, relation.left_before),
+            column(&relation.right, relation.right_column, false),
         ) {
             (None, _) | (_, None) => (
                 Observed::NotObserved,
@@ -625,10 +646,23 @@ pub fn evaluate(
                 Observed::Fail,
                 "照合に必要なDBの行が見つからなかった".into(),
             ),
-            (Some(Some(left)), Some(Some(right))) if left == right => {
-                (Observed::Pass, "指定したDBの行の値は一致した".into())
+            (Some(Some(left)), Some(Some(right))) => {
+                let equal = left == right;
+                let observed = if equal == (check.expect == Expectation::Equal) {
+                    Observed::Pass
+                } else {
+                    Observed::Fail
+                };
+                (
+                    observed,
+                    if equal {
+                        "指定したDBの行の値は一致した"
+                    } else {
+                        "指定したDBの行の値は一致しなかった"
+                    }
+                    .into(),
+                )
             }
-            _ => (Observed::Fail, "指定したDBの行の値は一致しなかった".into()),
         };
     }
     let Some(target) = check.target.as_deref() else {

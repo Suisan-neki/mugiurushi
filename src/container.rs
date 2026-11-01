@@ -176,6 +176,8 @@ pub struct ContainerPhase {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub database_reads: Vec<crate::browser::DatabaseRead>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub database_reads_before: Vec<crate::browser::DatabaseRead>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_reads: Vec<crate::http_probe::HttpRead>,
     pub detail: String,
 }
@@ -1320,6 +1322,7 @@ impl Session {
             http: None,
             browser: None,
             database_reads: vec![],
+            database_reads_before: vec![],
             http_reads: vec![],
             detail: if leftovers.is_empty() {
                 "試行用のコンテナ・ネットワーク・ボリュームをこの試行だけで使っている".into()
