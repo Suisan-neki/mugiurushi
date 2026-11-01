@@ -1,8 +1,5 @@
 name: OpenEMR synthetic SOAP workflow
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/openemr-soap.yml'
   workflow_dispatch:
   schedule:
     - cron: "0 18 * * 0"
@@ -15,7 +12,6 @@ env:
   MUGIURUSHI_SOURCE_REVISION: ${{ github.sha }}
 jobs:
   soap:
-    if: github.event_name != 'pull_request' || github.head_ref == 'codex/openemr-patient-separation-demo'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -80,7 +76,6 @@ jobs:
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   manual-trial:
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
