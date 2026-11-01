@@ -73,6 +73,7 @@ pub enum CheckMethod {
     BrowserCanvas,
     ServerHttp,
     DatabaseRows,
+    DatabaseRelation,
 }
 impl CheckMethod {
     /// 誰の観測かを示す。対象の報告と基盤の読み出しを同じ扱いにしない。
@@ -90,6 +91,7 @@ impl CheckMethod {
             Self::BrowserText => "試験用ブラウザで読み出した表示の文字列",
             Self::BrowserResponse => "試験操作中にブラウザが受け取ったHTTP応答",
             Self::DatabaseRows => "基盤が試験値に一致するDBの行を直接読み出した結果",
+            Self::DatabaseRelation => "基盤が読み出したDBの行どうしの対応",
             Self::DatabaseQuery => "基盤がデータベースを直接読み出した結果",
         }
     }
@@ -102,6 +104,16 @@ pub enum Expectation {
     Nonzero,
     Contains,
     NotContains,
+    Equal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseRelation {
+    pub left: String,
+    pub left_column: usize,
+    pub right: String,
+    pub right_column: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +129,8 @@ pub struct TrialCheck {
     /// コンテナのログを見るときに、対象のコンテナ名。省略時は全てのログ。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<DatabaseRelation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,6 +380,8 @@ pub fn validate(
             .as_ref()
             .is_some_and(|t| !t.is_empty() && t.len() <= 1024);
         match (check.method, check.expect) {
+            (CheckMethod::DatabaseRelation, Expectation::Equal)
+                if check.text.is_none() && check.target.is_none() && check.relation.is_some() => {}
             (CheckMethod::ExitCode, Expectation::Zero | Expectation::Nonzero)
                 if check.text.is_none() => {}
             (CheckMethod::ExitCode, _) => {
@@ -373,7 +389,8 @@ pub fn validate(
                     "終了コードの条件は0か0以外を選び、文字列は指定しません",
                 ));
             }
-            (_, Expectation::Contains | Expectation::NotContains) if text_ok => {}
+            (method, Expectation::Contains | Expectation::NotContains)
+                if method != CheckMethod::DatabaseRelation && text_ok && check.relation.is_none() => {}
             _ => {
                 return Err(invalid(
                     "出力・保存先・読み出しの条件には、含む・含まないと1024バイト以内の文字列が必要です",
@@ -400,6 +417,7 @@ pub fn validate(
                 | CheckMethod::BrowserText
                 | CheckMethod::BrowserResponse
                 | CheckMethod::DatabaseRows
+                | CheckMethod::DatabaseRelation
         ) && !has_containers
         {
             return Err(invalid(
@@ -764,7 +782,7 @@ pub fn evaluate(spec: &TrialSpec, test_value: &str, out: &Outputs) -> Vec<CheckR
                     }
                     None => (Observed::NotObserved, "コンテナの記録がない".into()),
                 },
-                CheckMethod::BrowserCanvas | CheckMethod::ServerHttp | CheckMethod::BrowserText | CheckMethod::BrowserResponse | CheckMethod::DatabaseRows =>
+                CheckMethod::BrowserCanvas | CheckMethod::ServerHttp | CheckMethod::BrowserText | CheckMethod::BrowserResponse | CheckMethod::DatabaseRows | CheckMethod::DatabaseRelation =>
                     crate::browser::evaluate(check, out.containers, &text),
                 CheckMethod::DatabaseQuery => {
                     match out.containers.and_then(|c| c.database_query.as_deref()) {
@@ -990,6 +1008,7 @@ pub fn describe(check: &TrialCheck, spec: &TrialSpec) -> String {
         CheckMethod::BrowserText => format!("画面の文字列に{text}{has}"),
         CheckMethod::BrowserResponse => format!("ブラウザが受け取ったHTTP応答に{text}{has}"),
         CheckMethod::DatabaseRows => format!("DBから直接読み出した行に{text}{has}"),
+        CheckMethod::DatabaseRelation => "DBから読み出した2つの行の指定した列が一致する".into(),
         CheckMethod::ContainerLog => format!("コンテナのログに{text}{has}"),
         CheckMethod::DatabaseQuery => {
             format!("基盤がデータベースを直接読み出した結果に{text}{has}")

@@ -223,6 +223,7 @@ fn check(
         expect,
         text: text.map(Into::into),
         target: None,
+        relation: None,
     }
 }
 const SERVE: &[&str] = &["serve", PORT, "received"];

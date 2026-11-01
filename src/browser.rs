@@ -581,6 +581,38 @@ pub fn evaluate(
     let Some(phase) = phase else {
         return missing();
     };
+    if check.method == CheckMethod::DatabaseRelation {
+        let Some(relation) = &check.relation else {
+            return missing();
+        };
+        let column = |id: &str, index: usize| -> Option<Option<String>> {
+            let read = phase.database_reads.iter().find(|q| q.id == id)?;
+            if !read.performed || read.exit_code != Some(0) {
+                return None;
+            }
+            let mut rows = read.text.lines();
+            let Some(row) = rows.next() else {
+                return Some(None);
+            };
+            if rows.next().is_some() {
+                return None;
+            }
+            let value = row.split('\t').nth(index)?;
+            if value.is_empty() || value == "NULL" {
+                return None;
+            }
+            Some(Some(value.to_owned()))
+        };
+        return match (
+            column(&relation.left, relation.left_column),
+            column(&relation.right, relation.right_column),
+        ) {
+            (None, _) | (_, None) => (Observed::NotObserved, "DBの読取失敗、複数行、欠落した列またはNULLにより対応を確認できない".into()),
+            (Some(None), _) | (_, Some(None)) => (Observed::Fail, "照合に必要なDBの行が見つからなかった".into()),
+            (Some(Some(left)), Some(Some(right))) if left == right => (Observed::Pass, "指定したDBの行の値は一致した".into()),
+            _ => (Observed::Fail, "指定したDBの行の値は一致しなかった".into()),
+        };
+    }
     let Some(target) = check.target.as_deref() else {
         return missing();
     };

@@ -176,6 +176,7 @@ fn check(
         expect,
         text: text.map(Into::into),
         target: None,
+        relation: None,
     }
 }
 fn saved(fault: TrialFault, readback: bool) -> TrialSpec {
