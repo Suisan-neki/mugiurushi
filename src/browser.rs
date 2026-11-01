@@ -607,9 +607,17 @@ pub fn evaluate(
             column(&relation.left, relation.left_column),
             column(&relation.right, relation.right_column),
         ) {
-            (None, _) | (_, None) => (Observed::NotObserved, "DBの読取失敗、複数行、欠落した列またはNULLにより対応を確認できない".into()),
-            (Some(None), _) | (_, Some(None)) => (Observed::Fail, "照合に必要なDBの行が見つからなかった".into()),
-            (Some(Some(left)), Some(Some(right))) if left == right => (Observed::Pass, "指定したDBの行の値は一致した".into()),
+            (None, _) | (_, None) => (
+                Observed::NotObserved,
+                "DBの読取失敗、複数行、欠落した列またはNULLにより対応を確認できない".into(),
+            ),
+            (Some(None), _) | (_, Some(None)) => (
+                Observed::Fail,
+                "照合に必要なDBの行が見つからなかった".into(),
+            ),
+            (Some(Some(left)), Some(Some(right))) if left == right => {
+                (Observed::Pass, "指定したDBの行の値は一致した".into())
+            }
             _ => (Observed::Fail, "指定したDBの行の値は一致しなかった".into()),
         };
     }

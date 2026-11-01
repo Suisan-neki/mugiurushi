@@ -390,7 +390,9 @@ pub fn validate(
                 ));
             }
             (method, Expectation::Contains | Expectation::NotContains)
-                if method != CheckMethod::DatabaseRelation && text_ok && check.relation.is_none() => {}
+                if method != CheckMethod::DatabaseRelation
+                    && text_ok
+                    && check.relation.is_none() => {}
             _ => {
                 return Err(invalid(
                     "出力・保存先・読み出しの条件には、含む・含まないと1024バイト以内の文字列が必要です",

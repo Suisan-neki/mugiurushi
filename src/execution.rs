@@ -365,8 +365,12 @@ pub fn validate_recipe(recipe: &Recipe) -> io::Result<()> {
                 CheckMethod::DatabaseRelation => recipe.browser.as_ref().is_some_and(|b| {
                     check.relation.as_ref().is_some_and(|r| {
                         r.left != r.right
-                            && b.database.iter().any(|q| q.id == r.left && r.left_column < q.columns.len())
-                            && b.database.iter().any(|q| q.id == r.right && r.right_column < q.columns.len())
+                            && b.database
+                                .iter()
+                                .any(|q| q.id == r.left && r.left_column < q.columns.len())
+                            && b.database
+                                .iter()
+                                .any(|q| q.id == r.right && r.right_column < q.columns.len())
                     })
                 }),
                 _ => true,

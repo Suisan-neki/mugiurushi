@@ -103,10 +103,15 @@ fn database_relation_distinguishes_matches_mismatches_and_missing_observations()
     let relation: TrialCheck = serde_json::from_value(json!({
         "id":"identity", "scope":"患者との対応", "method":"database_relation", "expect":"equal",
         "relation":{"left":"patient", "left_column":1, "right":"soap", "right_column":1}
-    })).unwrap();
+    }))
+    .unwrap();
     let mut p = phase();
     let read = |id: &str, text: &str| DatabaseRead {
-        id: id.into(), performed: true, exit_code: Some(0), text: text.into(), detail: String::new(),
+        id: id.into(),
+        performed: true,
+        exit_code: Some(0),
+        text: text.into(),
+        detail: String::new(),
     };
     p.database_reads = vec![read("patient", "patient\t42\n"), read("soap", "soap\t42\n")];
     assert_eq!(evaluate(&relation, Some(&p), "").0, Observed::Pass);
@@ -219,8 +224,14 @@ fn relation_requires_existing_distinct_probes_and_columns() {
     let mut recipe: mugiurushi::execution::Recipe =
         serde_json::from_str(include_str!("../examples/openemr-browser/soap-recipe.json")).unwrap();
     mugiurushi::execution::validate_recipe(&recipe).unwrap();
-    let check = recipe.trial.as_mut().unwrap().checks.iter_mut()
-        .find(|c| c.method == CheckMethod::DatabaseRelation).unwrap();
+    let check = recipe
+        .trial
+        .as_mut()
+        .unwrap()
+        .checks
+        .iter_mut()
+        .find(|c| c.method == CheckMethod::DatabaseRelation)
+        .unwrap();
     check.relation.as_mut().unwrap().right_column = 100;
     assert!(mugiurushi::execution::validate_recipe(&recipe).is_err());
 }
