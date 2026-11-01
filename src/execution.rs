@@ -362,6 +362,17 @@ pub fn validate_recipe(recipe: &Recipe) -> io::Result<()> {
                         .iter()
                         .any(|q| Some(q.id.as_str()) == check.target.as_deref())
                 }),
+                CheckMethod::DatabaseRelation => recipe.browser.as_ref().is_some_and(|b| {
+                    check.relation.as_ref().is_some_and(|r| {
+                        r.left != r.right
+                            && b.database
+                                .iter()
+                                .any(|q| q.id == r.left && r.left_column < q.columns.len())
+                            && b.database
+                                .iter()
+                                .any(|q| q.id == r.right && r.right_column < q.columns.len())
+                    })
+                }),
                 _ => true,
             };
             if !valid {

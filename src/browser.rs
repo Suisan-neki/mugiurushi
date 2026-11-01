@@ -80,6 +80,8 @@ pub struct Step {
     pub id: String,
     #[serde(flatten)]
     pub action: Action,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_response: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -236,6 +238,14 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
     for s in spec.preparation.iter().chain(&spec.actions) {
         if !id(&s.id) || !ids.insert(&s.id) {
             return Err(invalid("ブラウザの手順には重複しない識別子が必要です"));
+        }
+        if s.wait_response.as_ref().is_some_and(|watch| {
+            !matches!(s.action, Action::Click { .. })
+                || !spec.responses.iter().any(|response| response.id == *watch)
+        }) {
+            return Err(invalid(
+                "応答を待つ手順は、登録済みの応答先を指定したクリック操作にしてください",
+            ));
         }
         let valid = match &s.action {
             Action::Goto { path: p } => path(p),
@@ -581,6 +591,46 @@ pub fn evaluate(
     let Some(phase) = phase else {
         return missing();
     };
+    if check.method == CheckMethod::DatabaseRelation {
+        let Some(relation) = &check.relation else {
+            return missing();
+        };
+        let column = |id: &str, index: usize| -> Option<Option<String>> {
+            let read = phase.database_reads.iter().find(|q| q.id == id)?;
+            if !read.performed || read.exit_code != Some(0) {
+                return None;
+            }
+            let mut rows = read.text.lines();
+            let Some(row) = rows.next() else {
+                return Some(None);
+            };
+            if rows.next().is_some() {
+                return None;
+            }
+            let value = row.split('\t').nth(index)?;
+            if value.is_empty() || value == "NULL" {
+                return None;
+            }
+            Some(Some(value.to_owned()))
+        };
+        return match (
+            column(&relation.left, relation.left_column),
+            column(&relation.right, relation.right_column),
+        ) {
+            (None, _) | (_, None) => (
+                Observed::NotObserved,
+                "DBの読取失敗、複数行、欠落した列またはNULLにより対応を確認できない".into(),
+            ),
+            (Some(None), _) | (_, Some(None)) => (
+                Observed::Fail,
+                "照合に必要なDBの行が見つからなかった".into(),
+            ),
+            (Some(Some(left)), Some(Some(right))) if left == right => {
+                (Observed::Pass, "指定したDBの行の値は一致した".into())
+            }
+            _ => (Observed::Fail, "指定したDBの行の値は一致しなかった".into()),
+        };
+    }
     let Some(target) = check.target.as_deref() else {
         return missing();
     };

@@ -929,7 +929,9 @@ function previewBox(check, f, exec) {
       disclosure('ログインと準備の手順', browserSteps(recipe.browser.preparation)),
       disclosure('試験中の操作', browserSteps(recipe.browser.actions)),
       h('h4', {}, '判定の条件'), h('ul', { class: 'items' }, recipe.trial.checks.map(c => h('li', {},
-        `${c.scope}：${METHODS.find(m => m[0] === c.method)?.[1] || c.method}（${c.target}）に「${c.text}」を${c.expect === 'not_contains' ? '含まない' : '含む'}`))),
+        c.method === 'database_relation' && c.relation
+          ? `${c.scope}：DBから読み取った${c.relation.left_before ? '操作前の' : ''}${c.relation.left}の${recipe.browser.database.find(q => q.id === c.relation.left)?.columns[c.relation.left_column] || '指定列'}と、操作後の${c.relation.right}の${recipe.browser.database.find(q => q.id === c.relation.right)?.columns[c.relation.right_column] || '指定列'}が${c.expect === 'not_equal' ? '一致しない' : '一致する'}`
+          : `${c.scope}：${METHODS.find(m => m[0] === c.method)?.[1] || c.method}（${c.target}）に「${c.text}」を${c.expect === 'not_contains' ? '含まない' : '含む'}`))),
       h('p', {}, '表示・HTTP応答・DBの直接読取を別々に記録します。試行ごとに新しい架空の値を使い、待ち受けは127.0.0.1に限定します。終了後にコンテナと試験データを削除します。'));
   }
   const commit = check.source?.commit;

@@ -38,7 +38,7 @@ const label=text=>({locator:{by:'label',text}}),css=selector=>({locator:{by:'css
 const input=(id,text,key)=>({id,action:'fill',target:label(text),value:{source:'secret',key}});
 const spec={service:'web',tls:false,start_path:'/',expected_version:version,
  preparation:[input('user','利用者','user'),input('password','パスワード','password'),{id:'login',action:'click',target:css('#login')},{id:'ready',action:'read_text',target:css('#ready')},{id:'expand',action:'expand',target:css('#expand'),content:css('#note')},{id:'already-expanded',action:'expand',target:css('#expand'),content:css('#note')}],
- actions:[{id:'value',action:'fill',target:label('試験値'),value:{source:'literal',value:'{{test_value}}'}},{id:'save',action:'click',target:css('#save')},{id:'message',action:'read_text',target:css('#result[data-done=true]')},{id:'canvas',action:'read_canvas',target:css('#pixels'),min_levels:64,min_pixels:100}],
+ actions:[{id:'value',action:'fill',target:label('試験値'),value:{source:'literal',value:'{{test_value}}'}},{id:'save',action:'click',target:css('#save'),wait_response:'save'},{id:'message',action:'read_text',target:css('#result[data-done=true]')},{id:'canvas',action:'read_canvas',target:css('#pixels'),min_levels:64,min_pixels:100}],
  responses:[{id:'save',path:'/save',method:'POST',contains:'保存しました'},{id:'frame',path:'/frame',method:'GET',payload:'dicom_frame'}],database:[]};
 const secretsPath=join(temp,'secrets.json');await writeFile(secretsPath,JSON.stringify({user:'synthetic-operator-secret',password:'synthetic-password-secret'}),{mode:0o600});
 const live=new Set();

@@ -145,6 +145,30 @@
         "target": "soap-save",
         "expect": "contains",
         "text": "status=200"
+      },
+      {
+        "id": "patient-visit-identity",
+        "scope": "患者と受診の対応",
+        "method": "database_relation",
+        "expect": "equal",
+        "relation": {
+          "left": "patient",
+          "left_column": 2,
+          "right": "visit",
+          "right_column": 1
+        }
+      },
+      {
+        "id": "patient-soap-identity",
+        "scope": "患者とSOAPの対応",
+        "method": "database_relation",
+        "expect": "equal",
+        "relation": {
+          "left": "patient",
+          "left_column": 2,
+          "right": "soap-identity",
+          "right_column": 1
+        }
       }
     ]
   },
@@ -738,7 +762,8 @@
             "selector": ".patientCurrentEncounter a[data-bind=\"click: refreshEncounter\"]"
           },
           "frames": []
-        }
+        },
+        "wait_response": "visit-reload"
       },
       {
         "id": "expand-soap-readback",

@@ -31,6 +31,7 @@ fn check(method: CheckMethod, expect: Expectation, target: &str) -> TrialCheck {
         expect,
         text: Some("test".into()),
         target: Some(target.into()),
+        relation: None,
     }
 }
 #[test]
@@ -50,6 +51,20 @@ fn validates_declarative_steps_and_rejects_remote_navigation_and_sql_identifiers
     let sql = query(&original.database[0], "x'; DELETE FROM patient; --");
     assert!(!sql.contains("DELETE"));
     assert!(sql.contains("CONVERT(0x"));
+}
+
+#[test]
+fn response_wait_requires_a_click_and_registered_watch() {
+    let mut value = serde_json::to_value(spec()).unwrap();
+    value["actions"][0] = json!({"id":"send","action":"click","target":{"locator":{"by":"css","selector":"#send"}},"wait_response":"save"});
+    let valid: BrowserSpec = serde_json::from_value(value.clone()).unwrap();
+    validate(&valid, &containers()).unwrap();
+    value["actions"][0]["wait_response"] = json!("unknown");
+    let invalid: BrowserSpec = serde_json::from_value(value.clone()).unwrap();
+    assert!(validate(&invalid, &containers()).is_err());
+    value["actions"][0] = json!({"id":"show","action":"read_text","target":{"locator":{"by":"css","selector":"#message"}},"wait_response":"save"});
+    let invalid: BrowserSpec = serde_json::from_value(value).unwrap();
+    assert!(validate(&invalid, &containers()).is_err());
 }
 #[test]
 fn absent_and_failed_reads_do_not_pass_negative_expectations() {
@@ -95,6 +110,36 @@ fn absent_and_failed_reads_do_not_pass_negative_expectations() {
         .0,
         Observed::Pass
     );
+}
+
+#[test]
+fn database_relation_distinguishes_matches_mismatches_and_missing_observations() {
+    let relation: TrialCheck = serde_json::from_value(json!({
+        "id":"identity", "scope":"患者との対応", "method":"database_relation", "expect":"equal",
+        "relation":{"left":"patient", "left_column":1, "right":"soap", "right_column":1}
+    }))
+    .unwrap();
+    let mut p = phase();
+    let read = |id: &str, text: &str| DatabaseRead {
+        id: id.into(),
+        performed: true,
+        exit_code: Some(0),
+        text: text.into(),
+        detail: String::new(),
+    };
+    p.database_reads = vec![read("patient", "patient\t42\n"), read("soap", "soap\t42\n")];
+    assert_eq!(evaluate(&relation, Some(&p), "").0, Observed::Pass);
+    p.database_reads[1].text = "soap\t43\n".into();
+    assert_eq!(evaluate(&relation, Some(&p), "").0, Observed::Fail);
+    p.database_reads[1].text.clear();
+    assert_eq!(evaluate(&relation, Some(&p), "").0, Observed::Fail);
+    p.database_reads[1].exit_code = Some(1);
+    assert_eq!(evaluate(&relation, Some(&p), "").0, Observed::NotObserved);
+    p.database_reads[1].exit_code = Some(0);
+    for text in ["soap\tNULL\n", "soap\t42\nsoap\t42\n", "soap\n"] {
+        p.database_reads[1].text = text.into();
+        assert_eq!(evaluate(&relation, Some(&p), "").0, Observed::NotObserved);
+    }
 }
 #[test]
 fn display_does_not_establish_database_success_and_mixed_http_responses_are_unknown() {
@@ -186,6 +231,23 @@ fn validates_the_pinned_openemr_recipe_without_running_it() {
         serde_json::from_str(include_str!("../examples/openemr-browser/recipe.json")).unwrap();
     mugiurushi::execution::validate_recipe(&recipe).unwrap();
     assert_eq!(recipe.browser.as_ref().unwrap().database.len(), 2);
+}
+
+#[test]
+fn relation_requires_existing_distinct_probes_and_columns() {
+    let mut recipe: mugiurushi::execution::Recipe =
+        serde_json::from_str(include_str!("../examples/openemr-browser/soap-recipe.json")).unwrap();
+    mugiurushi::execution::validate_recipe(&recipe).unwrap();
+    let check = recipe
+        .trial
+        .as_mut()
+        .unwrap()
+        .checks
+        .iter_mut()
+        .find(|c| c.method == CheckMethod::DatabaseRelation)
+        .unwrap();
+    check.relation.as_mut().unwrap().right_column = 100;
+    assert!(mugiurushi::execution::validate_recipe(&recipe).is_err());
 }
 
 #[test]

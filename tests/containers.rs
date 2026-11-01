@@ -149,6 +149,7 @@ fn check(
             Some(text.into())
         },
         target: None,
+        relation: None,
     }
 }
 
