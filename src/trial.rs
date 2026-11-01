@@ -336,8 +336,8 @@ pub fn validate(
     has_containers: bool,
     relative: impl Fn(&str) -> io::Result<()>,
 ) -> io::Result<()> {
-    if spec.schema_version != 1 || spec.checks.is_empty() || spec.checks.len() > 16 {
-        return Err(invalid("判定条件は1〜16件で指定してください"));
+    if spec.schema_version != 1 || spec.checks.is_empty() || spec.checks.len() > 32 {
+        return Err(invalid("判定条件は1〜32件で指定してください"));
     }
     if let Some(storage) = &spec.storage {
         relative(storage)?;
