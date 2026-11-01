@@ -814,6 +814,45 @@
           }
         },
         "wait_response": "soap-save"
+      },
+      {
+        "id": "b-expand-soap",
+        "action": "expand",
+        "target": {
+          "frames": [
+            "iframe[name=enc]",
+            "iframe[src*=\"forms.php\"]"
+          ],
+          "locator": {
+            "by": "css",
+            "selector": ".form-holder[id^=\"soap~\"] a[id^=aid_]"
+          }
+        },
+        "content": {
+          "frames": [
+            "iframe[name=enc]",
+            "iframe[src*=\"forms.php\"]"
+          ],
+          "locator": {
+            "by": "css",
+            "selector": ".form-holder[id^=\"soap~\"] .form-detail .collapse"
+          }
+        }
+      },
+      {
+        "id": "b-soap-summary",
+        "action": "read_text",
+        "target": {
+          "frames": [
+            "iframe[name=enc]",
+            "iframe[src*=\"forms.php\"]"
+          ],
+          "locator": {
+            "by": "css",
+            "selector": ".form-holder[id^=\"soap~\"]"
+          }
+        },
+        "contains": "B-{{test_value}}"
       }
     ],
     "actions": [
