@@ -364,10 +364,12 @@ pub fn validate_recipe(recipe: &Recipe) -> io::Result<()> {
                 }),
                 CheckMethod::DatabaseRelation => recipe.browser.as_ref().is_some_and(|b| {
                     check.relation.as_ref().is_some_and(|r| {
-                        r.left != r.right
-                            && b.database
-                                .iter()
-                                .any(|q| q.id == r.left && r.left_column < q.columns.len())
+                        (r.left != r.right || r.left_before)
+                            && b.database.iter().any(|q| {
+                                q.id == r.left
+                                    && r.left_column < q.columns.len()
+                                    && (!r.left_before || q.before_actions)
+                            })
                             && b.database
                                 .iter()
                                 .any(|q| q.id == r.right && r.right_column < q.columns.len())
@@ -1063,6 +1065,16 @@ pub fn execute_with_dependencies(
         }
         _ => None,
     };
+    // 準備が完了した場合だけ、操作前の状態を保存する。取得できない場合は空のまま残す。
+    let database_reads_before = match (&recipe.browser, session.as_ref(), browser.as_ref()) {
+        (Some(spec), Some(session), Some(browser)) if browser.prepared() => spec
+            .database
+            .iter()
+            .filter(|q| q.before_actions)
+            .map(|q| session.read_database(q, &test_value))
+            .collect(),
+        _ => vec![],
+    };
     let mut fault = match &recipe.trial {
         Some(spec) => Some(crate::trial::apply_fault(spec, &work)?),
         None => None,
@@ -1324,6 +1336,7 @@ pub fn execute_with_dependencies(
         phase.http = http_result.clone();
         phase.browser = browser_report;
         phase.database_reads = database_reads;
+        phase.database_reads_before = database_reads_before;
         phase.http_reads = http_reads;
     }
     let leftovers = match session.as_mut() {
