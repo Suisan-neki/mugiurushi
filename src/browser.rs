@@ -243,7 +243,9 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
             !matches!(s.action, Action::Click { .. })
                 || !spec.responses.iter().any(|response| response.id == *watch)
         }) {
-            return Err(invalid("応答を待つ手順は、登録済みの応答先を指定したクリック操作にしてください"));
+            return Err(invalid(
+                "応答を待つ手順は、登録済みの応答先を指定したクリック操作にしてください",
+            ));
         }
         let valid = match &s.action {
             Action::Goto { path: p } => path(p),

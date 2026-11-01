@@ -63,6 +63,8 @@ try {
   await page.getByRole('button', { name: '次へ：判定の条件を確認する', exact: true }).click();
   await page.getByRole('button', { name: '実行前に確認する', exact: true }).click();
   assert.match(await page.locator('#trial-body').innerText(), /soap-subjective/);
+  assert.match(await page.locator('#trial-body').innerText(), /患者とSOAPの対応：DBから読み取った/);
+  assert.doesNotMatch(await page.locator('#trial-body').innerText(), /undefined/);
   assert.equal((await view()).workspace.evidence.length, 0);
   await mkdir(output, { recursive: true }); await page.screenshot({ path: join(output, 'browser-handoff-confirm.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
