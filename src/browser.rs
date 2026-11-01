@@ -80,6 +80,8 @@ pub struct Step {
     pub id: String,
     #[serde(flatten)]
     pub action: Action,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_response: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -236,6 +238,12 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
     for s in spec.preparation.iter().chain(&spec.actions) {
         if !id(&s.id) || !ids.insert(&s.id) {
             return Err(invalid("ブラウザの手順には重複しない識別子が必要です"));
+        }
+        if s.wait_response.as_ref().is_some_and(|watch| {
+            !matches!(s.action, Action::Click { .. })
+                || !spec.responses.iter().any(|response| response.id == *watch)
+        }) {
+            return Err(invalid("応答を待つ手順は、登録済みの応答先を指定したクリック操作にしてください"));
         }
         let valid = match &s.action {
             Action::Goto { path: p } => path(p),

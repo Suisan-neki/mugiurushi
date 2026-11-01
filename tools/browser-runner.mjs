@@ -57,7 +57,13 @@ async function steps(list,phase){
   try{const options={timeout:remaining()};
    if(step.action==='goto'){const url=new URL(replace(step.path),request.origin);if(url.origin!==request.origin)throw Error('操作先のオリジンが不一致');await page.goto(url.href,{...options,waitUntil:'domcontentloaded'});}
    else if(step.action==='fill'){const value=step.value.source==='secret'?secrets[step.value.key]:replace(step.value.value);if(typeof value!=='string')throw Error('試験用の認証情報が未設定');const locator=target(step.target);if(step.value.source==='secret')masks.push(locator);await locator.fill(value,options);}
-   else if(step.action==='click'){await target(step.target).click(options);}
+   else if(step.action==='click'){
+    if(step.wait_response){
+     const watch=spec.responses.find(item=>item.id===step.wait_response);if(!watch)throw Error('待機する応答が未設定');
+     const response=page.waitForResponse(r=>{const u=new URL(r.url());return request.origins.includes(u.origin)&&u.pathname===watch.path&&r.request().method()===watch.method;},options);
+     await Promise.all([response,target(step.target).click(options)]);
+    }else await target(step.target).click(options);
+   }
    else if(step.action==='expand'){const content=target(step.content);await target(step.target).waitFor({...options,state:'visible'});if(!await content.isVisible())await target(step.target).click(options);await content.waitFor({...options,state:'visible'});}
    else if(step.action==='dismiss'){if(phase!=='preparation')throw Error('案内を閉じる操作は準備中だけ利用できる');await dismiss(step,r);}
    else if(step.action==='select'){await target(step.target).selectOption(replace(step.value),options);}

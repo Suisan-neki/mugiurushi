@@ -52,6 +52,20 @@ fn validates_declarative_steps_and_rejects_remote_navigation_and_sql_identifiers
     assert!(!sql.contains("DELETE"));
     assert!(sql.contains("CONVERT(0x"));
 }
+
+#[test]
+fn response_wait_requires_a_click_and_registered_watch() {
+    let mut value = serde_json::to_value(spec()).unwrap();
+    value["actions"][0] = json!({"id":"send","action":"click","target":{"locator":{"by":"css","selector":"#send"}},"wait_response":"save"});
+    let valid: BrowserSpec = serde_json::from_value(value.clone()).unwrap();
+    validate(&valid, &containers()).unwrap();
+    value["actions"][0]["wait_response"] = json!("unknown");
+    let invalid: BrowserSpec = serde_json::from_value(value.clone()).unwrap();
+    assert!(validate(&invalid, &containers()).is_err());
+    value["actions"][0] = json!({"id":"show","action":"read_text","target":{"locator":{"by":"css","selector":"#message"}},"wait_response":"save"});
+    let invalid: BrowserSpec = serde_json::from_value(value).unwrap();
+    assert!(validate(&invalid, &containers()).is_err());
+}
 #[test]
 fn absent_and_failed_reads_do_not_pass_negative_expectations() {
     let mut p = phase();

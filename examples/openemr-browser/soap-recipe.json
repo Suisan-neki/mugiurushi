@@ -762,7 +762,8 @@
             "selector": ".patientCurrentEncounter a[data-bind=\"click: refreshEncounter\"]"
           },
           "frames": []
-        }
+        },
+        "wait_response": "visit-reload"
       },
       {
         "id": "expand-soap-readback",
