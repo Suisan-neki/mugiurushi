@@ -148,6 +148,7 @@ pub fn proposed_check(
         rule: Rule::ManualOnly,
         dependencies: vec![],
         questions: vec![],
+        aspects: vec![],
     })
 }
 

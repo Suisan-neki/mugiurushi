@@ -25,6 +25,7 @@ pub fn workspace() -> Workspace {
             rule: Rule::ReportedAssertion,
             dependencies: vec!["report-save".into(), "environment".into()],
             questions: vec![],
+            aspects: vec![],
         },
         Check {
             id: "later-view".into(),
@@ -36,6 +37,7 @@ pub fn workspace() -> Workspace {
             rule: Rule::ManualOnly,
             dependencies: vec![],
             questions: vec![],
+            aspects: vec![],
         },
     ];
     w
@@ -89,6 +91,19 @@ pub fn import(path: &Path, trace: ReportedTrace) -> WorkspaceView {
         },
     )
     .unwrap()
+}
+/// 「記録を読み出せる」の一つの部分を、報告観測 `readback` に対応づける宣言。
+pub fn readback_aspects(check_id: &str) -> Change {
+    Change::SetAspects {
+        check_id: check_id.into(),
+        aspects: vec![mugiurushi::coverage::Aspect {
+            id: "readback-part".into(),
+            text: "保存した記録を読み出せる".into(),
+            origin: "合成の記入者".into(),
+            observation: Some(mugiurushi::coverage::ObservationKind::ReportedObservation),
+            trial_checks: vec!["readback".into()],
+        }],
+    }
 }
 pub fn import_pass(path: &Path) -> WorkspaceView {
     import(path, trace(&[ObservationOutcome::Pass]))

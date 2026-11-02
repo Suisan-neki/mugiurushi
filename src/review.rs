@@ -170,6 +170,7 @@ fn handle_request(
             "browser-screenshot",
             "architecture",
             "understand",
+            "observation-kinds",
         ];
         if app.is_some() {
             routes.extend(["prepare", "ai", "system-diagram", "browser-recipes"]);
@@ -347,6 +348,15 @@ fn handle_request(
         };
     }
     match (request.method.as_str(), api_path) {
+        ("GET", "/api/v1/observation-kinds") => json(
+            stream,
+            200,
+            &serde_json::json!({
+                "schema_version": 1,
+                "kinds": crate::coverage::catalog(),
+                "note": "基盤が判定に使える観測の種類と、記録だけの種類、未対応の種類。確認項目の各部分に対応づける",
+            }),
+        ),
         ("GET", "/api/v1/profiles") => json(
             stream,
             200,

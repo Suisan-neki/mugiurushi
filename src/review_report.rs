@@ -203,6 +203,7 @@ pub fn build(workspace: Workspace) -> io::Result<Report> {
         limits: vec![
             "この資料は記載した事例版の確認結果です。システム全体の安全性や医療業務への適合を保証するものではありません。",
             "確認できていない範囲と、観測していないことによる判定不能を残しています。",
+            "判定は選んだ試験条件の結果です。確認項目のどの部分を確かめたかは、登録した対応づけの範囲に限ります。",
             "原文ログ・入力データ・認証情報・画面写真は含めません。条件文・構成の説明・質問・判断理由に記入された情報は含まれるため、共有前に内容を確認してください。",
             "元の事例は更新される可能性があります。根拠IDと試行IDを使い、同じ事例版の記録で照合してください。",
             "人による試用の感想は自己申告です。自動試験の判定や合意とは区別します。試用先URLと内部の実行条件は省き、手順として記入した条件を含めます。共有前に試用者番号・操作・感想も確認してください。",
@@ -327,6 +328,23 @@ pub fn html(report: &Report) -> io::Result<String> {
             check.definition.version,
             escape(&check.definition.origin)
         ));
+        out.push_str(&format!(
+            "<h4>確認項目のどの部分を確かめたか</h4><p>{}</p>",
+            escape(&check.current.coverage.summary)
+        ));
+        if !check.current.coverage.aspects.is_empty() {
+            out.push_str("<ul>");
+            for aspect in &check.current.coverage.aspects {
+                out.push_str(&format!(
+                    "<li>{}：{}（観測の種類：{}。{}）</li>",
+                    escape(&aspect.text),
+                    escape(&aspect.status_label),
+                    escape(&aspect.observation_label),
+                    escape(&aspect.detail)
+                ));
+            }
+            out.push_str("</ul>");
+        }
         out.push_str("<h4>追加で確かめること</h4>");
         out.push_str(&format!(
             "<p>{}</p><p>{}</p>",

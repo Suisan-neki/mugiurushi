@@ -1,0 +1,558 @@
+//! 確認項目のどの部分を試験が確かめたかの対応づけを、架空の小さな記録アプリで確かめる。
+//! 試験の合否（判定条件がすべて通ったか）と、確認項目に答えたかを分ける。
+mod support;
+use mugiurushi::{
+    coverage::{Aspect, AspectStatus, CoverageStatus, ObservationKind},
+    execution::*,
+    model::*,
+    recording::*,
+    trial::*,
+    workspace::*,
+};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+const NOTES: &str = r#"import sys, os
+def main(argv):
+    directory, command = argv[1], argv[2]
+    path = os.path.join(directory, "notes")
+    if command == "add":
+        with open(path, "a") as f:
+            f.write(argv[3] + "\n")
+        print("saved " + argv[3])
+        return 0
+    if command == "claim":
+        print("saved " + argv[3])
+        return 0
+    if command == "list":
+        with open(path) as f:
+            sys.stdout.write(f.read())
+        return 0
+    return 2
+sys.exit(main(sys.argv))
+"#;
+
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("gitを起動できる");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().into()
+}
+
+struct Fixture {
+    directory: PathBuf,
+    root: PathBuf,
+    case: PathBuf,
+}
+impl Fixture {
+    /// 相談文は保存先ではなく外部送信に関するもの。試験は保存だけを扱う。
+    fn new(check_text: &str) -> Self {
+        let directory = new_run_directory(&std::env::temp_dir().join("evidence-coverage-tests"))
+            .unwrap()
+            .0;
+        let root = directory.join("repo");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.name", "Synthetic test"]);
+        git(&root, &["config", "user.email", "test@example.invalid"]);
+        git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/notes.git",
+            ],
+        );
+        fs::write(root.join("notes.py"), NOTES).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "v1"]);
+        let commit = git(&root, &["rev-parse", "HEAD"]);
+        let case = directory.join("case");
+        let mut workspace = empty_workspace("coverage".into(), "対応づけの合成試験".into());
+        workspace.checks.push(Check {
+            id: "concern".into(),
+            version: 1,
+            text: check_text.into(),
+            origin: "合成の相談".into(),
+            source: Some(CodeReference {
+                repository: "example/notes".into(),
+                commit: commit.clone(),
+                path: "notes.py".into(),
+                line: 1,
+                end_line: 1,
+            }),
+            observation: None,
+            rule: Rule::ManualOnly,
+            dependencies: vec![],
+            questions: vec![],
+            aspects: vec![],
+        });
+        initialize(&case, workspace, "合成の記入者", "相談の登録").unwrap();
+        let fixture = Self {
+            directory,
+            root,
+            case,
+        };
+        fixture.apply(Change::ConfigureObservation {
+            check_id: "concern".into(),
+            criterion: Criterion {
+                assertion: "eel.trial".into(),
+                subject: "concern".into(),
+            },
+        });
+        fixture
+    }
+    fn apply(&self, action: Change) -> WorkspaceView {
+        change(
+            &self.case,
+            ChangeRequest {
+                expected_revision: load(&self.case).unwrap().revision,
+                actor: "合成の記入者".into(),
+                reason: "試験".into(),
+                action,
+            },
+        )
+        .unwrap()
+    }
+    fn recipe(&self, command: &str, spec: TrialSpec) -> Recipe {
+        Recipe {
+            schema_version: 1,
+            check_id: "concern".into(),
+            source: load(&self.case).unwrap().checks[0].source.clone().unwrap(),
+            runtime: Runtime::Python3,
+            entrypoint: "notes.py".into(),
+            args: vec![".".into(), command.into(), TEST_VALUE.into()],
+            input: serde_json::json!({}),
+            criterion: Criterion {
+                assertion: "eel.trial".into(),
+                subject: "concern".into(),
+            },
+            timeout_ms: 5000,
+            trial: Some(spec),
+            launch: Default::default(),
+            python: None,
+            server: None,
+            containers: None,
+            http: None,
+            browser: None,
+        }
+    }
+    fn run(&self, command: &str, spec: TrialSpec) -> WorkspaceView {
+        support::run_external(
+            &self.case,
+            &self.root,
+            self.recipe(command, spec),
+            "合成の記入者".into(),
+            "保存の試験".into(),
+        )
+        .unwrap()
+    }
+    fn release(&self) -> std::io::Result<WorkspaceView> {
+        change(
+            &self.case,
+            ChangeRequest {
+                expected_revision: load(&self.case).unwrap().revision,
+                actor: "合成の確認者".into(),
+                reason: "採用の判断".into(),
+                action: Change::Decide {
+                    role: Role::Developer,
+                    action: DecisionKind::Release,
+                    check_ids: vec!["concern".into()],
+                    change_reference: None,
+                    confidence: None,
+                    elapsed_ms: None,
+                },
+            },
+        )
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn check(id: &str, scope: &str, method: CheckMethod, expect: Expectation) -> TrialCheck {
+    TrialCheck {
+        id: id.into(),
+        scope: scope.into(),
+        method,
+        expect,
+        text: Some(TEST_VALUE.into()),
+        target: None,
+        relation: None,
+    }
+}
+/// 保存の試験: 標準出力の受付表示、基盤による保存先の読み出し、別プロセスでの読み直し。
+fn storage_trial(fault: TrialFault) -> TrialSpec {
+    TrialSpec {
+        schema_version: 1,
+        recovery: None,
+        fault,
+        storage: Some("notes".into()),
+        readback: Some(Readback {
+            launch: Default::default(),
+            entrypoint: "notes.py".into(),
+            args: vec![".".into(), "list".into()],
+        }),
+        checks: vec![
+            check(
+                "accepted",
+                "受付",
+                CheckMethod::Stdout,
+                Expectation::Contains,
+            ),
+            check(
+                "written",
+                "書き込み",
+                CheckMethod::StoredFile,
+                Expectation::Contains,
+            ),
+            check(
+                "readback",
+                "後からの読み出し",
+                CheckMethod::ReadbackOutput,
+                Expectation::Contains,
+            ),
+        ],
+    }
+}
+fn aspect(id: &str, text: &str, kind: Option<ObservationKind>, links: &[&str]) -> Aspect {
+    Aspect {
+        id: id.into(),
+        text: text.into(),
+        origin: "合成の記入者".into(),
+        observation: kind,
+        trial_checks: links.iter().map(|s| s.to_string()).collect(),
+    }
+}
+fn status(view: &WorkspaceView, id: &str) -> AspectStatus {
+    view.checks[0]
+        .coverage
+        .aspects
+        .iter()
+        .find(|a| a.id == id)
+        .unwrap_or_else(|| panic!("{id}"))
+        .status
+}
+
+/// 相談と無関係な保存試験が通っても、何を確かめたか未登録なら相談は未通過のまま。
+#[test]
+fn passing_storage_trial_does_not_answer_an_unrelated_concern() {
+    let f = Fixture::new("診療データが意図しない外部へ送信されない");
+    let v = f.run("add", storage_trial(TrialFault::Normal));
+    assert_eq!(v.checks[0].verdict, Verdict::Satisfied, "試験自体は通る");
+    assert!(
+        !v.checks[0].verification_passed,
+        "試験の合否と相談への答えを分ける"
+    );
+    assert_eq!(v.checks[0].coverage.status, CoverageStatus::NotDeclared);
+    assert!(!v.verification_passed);
+    assert_eq!(
+        f.release().unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert!(matches!(v.checks[0].next.kind, ActionKind::LinkAspects));
+
+    // 外部送信の部分を登録しても、基盤はその観測に未対応と示し、通過にはならない。
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![
+            aspect(
+                "external",
+                "試験用ネットワークの外へ送信されない",
+                Some(ObservationKind::ExternalDestination),
+                &[],
+            ),
+            aspect(
+                "payload",
+                "送信内容に診療データが含まれない",
+                Some(ObservationKind::NetworkPayload),
+                &[],
+            ),
+            aspect(
+                "traffic",
+                "接続の集計に外部宛がない",
+                Some(ObservationKind::TrafficSummary),
+                &[],
+            ),
+        ],
+    });
+    assert_eq!(v.checks[0].verdict, Verdict::Satisfied);
+    assert!(!v.checks[0].verification_passed);
+    assert_eq!(v.checks[0].coverage.status, CoverageStatus::NotCovered);
+    assert_eq!(status(&v, "external"), AspectStatus::Unsupported);
+    assert_eq!(status(&v, "payload"), AspectStatus::Unsupported);
+    assert_eq!(status(&v, "traffic"), AspectStatus::NotJudged);
+    assert_eq!(v.checks[0].coverage.remaining.len(), 3);
+    assert!(f.release().is_err());
+    assert!(
+        v.workspace.checks[0].version == 2,
+        "対応づけの登録は条件の版を変えない（観測設定で2になった版のまま）"
+    );
+    assert!(v.checks[0].evidence[0].applicable);
+}
+
+/// 相談と試験が対応し、必要な観測が得られた場合だけ通過する。未定・未対応づけの部分は残る。
+#[test]
+fn declared_parts_pass_only_when_each_linked_check_was_observed() {
+    let f = Fixture::new("追加したメモは保存され、後から読み出せる");
+    f.run("add", storage_trial(TrialFault::Normal));
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![
+            aspect(
+                "stored",
+                "保存先に書き込まれる",
+                Some(ObservationKind::StoredFile),
+                &["written"],
+            ),
+            aspect(
+                "later",
+                "後から読み出せる",
+                Some(ObservationKind::ReadbackOutput),
+                &["readback"],
+            ),
+        ],
+    });
+    assert_eq!(v.checks[0].coverage.status, CoverageStatus::Covered);
+    assert!(v.checks[0].verification_passed);
+    assert!(v.verification_passed);
+    assert!(f.release().is_ok());
+
+    // 観測方法が未定の部分、判定条件を選んでいない部分、コード読取だけの部分は観測済みにならない。
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![
+            aspect(
+                "stored",
+                "保存先に書き込まれる",
+                Some(ObservationKind::StoredFile),
+                &["written"],
+            ),
+            aspect("undefined", "保存先の暗号化", None, &[]),
+            aspect(
+                "unlinked",
+                "後から読み出せる",
+                Some(ObservationKind::ReadbackOutput),
+                &[],
+            ),
+            aspect(
+                "inspected",
+                "保存処理がSQLで書く",
+                Some(ObservationKind::CodeInspection),
+                &[],
+            ),
+        ],
+    });
+    assert_eq!(v.checks[0].coverage.status, CoverageStatus::Partial);
+    assert_eq!(status(&v, "stored"), AspectStatus::Observed);
+    assert_eq!(status(&v, "undefined"), AspectStatus::Undefined);
+    assert_eq!(status(&v, "unlinked"), AspectStatus::Unlinked);
+    assert_eq!(status(&v, "inspected"), AspectStatus::NotJudged);
+    assert!(!v.checks[0].verification_passed);
+    assert!(f.release().is_err());
+
+    // 判定条件の観測方法が宣言と違う対応づけは、文章が合っていても観測済みにしない。
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![aspect(
+            "stored",
+            "保存先に書き込まれる",
+            Some(ObservationKind::StoredFile),
+            &["accepted"],
+        )],
+    });
+    assert_eq!(status(&v, "stored"), AspectStatus::MethodMismatch);
+    assert!(!v.checks[0].verification_passed);
+}
+
+/// 読み出せなかった（観測なし）と、読み出した結果が期待と異なる（保存されていない）を分ける。
+#[test]
+fn unreadable_storage_and_missing_record_are_different_statuses() {
+    let f = Fixture::new("追加したメモは保存される");
+    f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![
+            aspect(
+                "accepted",
+                "受付の表示が出る",
+                Some(ObservationKind::Stdout),
+                &["accepted"],
+            ),
+            aspect(
+                "stored",
+                "保存先に書き込まれる",
+                Some(ObservationKind::StoredFile),
+                &["written"],
+            ),
+        ],
+    });
+    let v = f.run("add", storage_trial(TrialFault::SkipStateRead));
+    assert_eq!(v.checks[0].verdict, Verdict::Unknown);
+    assert_eq!(status(&v, "accepted"), AspectStatus::Observed);
+    assert_eq!(status(&v, "stored"), AspectStatus::NotObserved);
+    assert_eq!(v.checks[0].coverage.status, CoverageStatus::Partial);
+
+    // 表示は成功と言うが、保存先に記録がない: 表示とDB（保存先）が食い違う。
+    let v = f.run("claim", storage_trial(TrialFault::Normal));
+    assert_eq!(v.checks[0].verdict, Verdict::NotSatisfied);
+    assert_eq!(status(&v, "accepted"), AspectStatus::Observed);
+    assert_eq!(status(&v, "stored"), AspectStatus::Contradicted);
+    assert!(!v.checks[0].verification_passed);
+    assert!(v.checks[0].coverage.remaining[0].contains("期待と異なる"));
+}
+
+/// 試験や版を変えた後、古い試行の観測を現在の答えとして流用しない。
+#[test]
+fn old_observations_are_not_reused_after_the_trial_or_version_changes() {
+    let f = Fixture::new("追加したメモは保存され、後から読み出せる");
+    f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![
+            aspect(
+                "stored",
+                "保存先に書き込まれる",
+                Some(ObservationKind::StoredFile),
+                &["written"],
+            ),
+            aspect(
+                "later",
+                "後から読み出せる",
+                Some(ObservationKind::ReadbackOutput),
+                &["readback"],
+            ),
+        ],
+    });
+    let v = f.run("add", storage_trial(TrialFault::Normal));
+    assert_eq!(v.checks[0].coverage.status, CoverageStatus::Covered);
+
+    // 読み直しを含まない試験へ変えると、前の試行の読み直しは答えに使わない。
+    let mut narrower = storage_trial(TrialFault::Normal);
+    narrower.readback = None;
+    narrower.checks.retain(|c| c.id != "readback");
+    let v = f.run("add", narrower);
+    assert_eq!(v.checks[0].verdict, Verdict::Satisfied);
+    assert_eq!(status(&v, "stored"), AspectStatus::Observed);
+    assert_eq!(status(&v, "later"), AspectStatus::NotInTrial);
+    assert_eq!(v.checks[0].coverage.status, CoverageStatus::Partial);
+    assert!(!v.checks[0].verification_passed);
+
+    // 参照する版を変えると、試行は適用できず、どの部分も観測済みにしない。
+    let mut other = v.workspace.checks[0].source.clone().unwrap();
+    other.commit = "b".repeat(40);
+    let v = f.apply(Change::BindSource {
+        check_id: "concern".into(),
+        source: other,
+    });
+    assert_eq!(v.checks[0].verdict, Verdict::Unknown);
+    assert_eq!(status(&v, "stored"), AspectStatus::NoEvidence);
+    assert_eq!(status(&v, "later"), AspectStatus::NoEvidence);
+    assert_eq!(v.checks[0].coverage.status, CoverageStatus::NotCovered);
+}
+
+/// 不正な対応づけは拒否し、事例を変えない。未回答の条件があれば試験が通っても判定しない。
+#[test]
+fn invalid_links_are_rejected_and_unanswered_conditions_stay_unknown() {
+    let f = Fixture::new("追加したメモは保存される");
+    let before = load(&f.case).unwrap().revision;
+    for aspects in [
+        vec![aspect(
+            "a",
+            "判定に使えない種類へ対応づける",
+            Some(ObservationKind::NetworkPayload),
+            &["written"],
+        )],
+        vec![aspect(
+            "a",
+            "種類が未定なのに対応づける",
+            None,
+            &["written"],
+        )],
+        vec![
+            aspect("a", "重複", None, &[]),
+            aspect("a", "重複", None, &[]),
+        ],
+        vec![aspect("bad id", "識別子が不正", None, &[])],
+        vec![aspect("a", " ", None, &[])],
+    ] {
+        assert!(
+            change(
+                &f.case,
+                ChangeRequest {
+                    expected_revision: before,
+                    actor: "合成の記入者".into(),
+                    reason: "不正な対応づけ".into(),
+                    action: Change::SetAspects {
+                        check_id: "concern".into(),
+                        aspects,
+                    },
+                },
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(load(&f.case).unwrap().revision, before);
+    assert!(
+        change(
+            &f.case,
+            ChangeRequest {
+                expected_revision: before,
+                actor: "合成の記入者".into(),
+                reason: "存在しない確認項目".into(),
+                action: Change::SetAspects {
+                    check_id: "missing".into(),
+                    aspects: vec![],
+                },
+            },
+        )
+        .is_err()
+    );
+    f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![aspect(
+            "stored",
+            "保存先に書き込まれる",
+            Some(ObservationKind::StoredFile),
+            &["written"],
+        )],
+    });
+    f.apply(Change::AddQuestion {
+        check_id: "concern".into(),
+        question: Question {
+            id: "where".into(),
+            text: "本番の保存先はどこか".into(),
+            answer: None,
+            origin: None,
+        },
+    });
+    let v = f.run("add", storage_trial(TrialFault::Normal));
+    assert_eq!(
+        v.checks[0].verdict,
+        Verdict::Unknown,
+        "条件が未回答なら判定しない"
+    );
+    assert_eq!(status(&v, "stored"), AspectStatus::Observed);
+    assert!(!v.checks[0].verification_passed);
+    let saved = serde_json::to_value(load(&f.case).unwrap()).unwrap();
+    assert_eq!(
+        saved["checks"][0]["aspects"][0]["observation"],
+        "stored_file"
+    );
+    assert_eq!(
+        saved["checks"][0]["aspects"][0]["trial_checks"][0],
+        "written"
+    );
+}

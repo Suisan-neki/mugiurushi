@@ -123,6 +123,7 @@ fn general_case_starts_without_generated_domain_requirements() {
                 rule: Rule::ManualOnly,
                 dependencies: vec![],
                 questions: vec![],
+                aspects: vec![],
             },
         },
     );
@@ -228,6 +229,17 @@ fn unknown_and_failed_checks_block_release_without_relabelling_the_observation()
     assert!(!failed.checks[0].verification_passed);
     assert!(release().is_err());
     let passed = import(&case, &support::trace(&[ObservationOutcome::Pass]), "save");
+    assert_eq!(passed.checks[0].verdict, Verdict::Satisfied);
+    assert!(
+        !passed.checks[0].verification_passed,
+        "試行が通っても、確認項目のどの部分を確かめたか未登録なら通過にしない"
+    );
+    assert_eq!(
+        passed.checks[0].coverage.status,
+        mugiurushi::coverage::CoverageStatus::NotDeclared
+    );
+    assert!(release().is_err());
+    let passed = apply(&case, support::readback_aspects("save"));
     assert!(passed.checks[0].verification_passed);
     assert!(
         !passed.verification_passed,
@@ -245,11 +257,12 @@ fn unknown_and_failed_checks_block_release_without_relabelling_the_observation()
     let mut workspace = support::workspace();
     workspace.checks.truncate(1);
     initialize(&passed_case, workspace, "合成の作成者", "一条件の確認").unwrap();
-    let passed = import(
+    import(
         &passed_case,
         &support::trace(&[ObservationOutcome::Pass]),
         "save",
     );
+    let passed = apply(&passed_case, support::readback_aspects("save"));
     assert!(passed.verification_passed);
     assert!(
         change(
