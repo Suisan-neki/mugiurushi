@@ -715,6 +715,7 @@ function browserPresetPicker(check) {
   if (!presets.length) return null;
   return h('section', { class: 'box', 'aria-label': '同梱のブラウザ試験' }, h('h3', {}, 'ブラウザで試す内容を選ぶ'),
     h('p', {}, '架空の患者を登録し、SOAPの保存・再表示とDBの値を別々に確認します。選択しただけでは実行しません。'),
+    h('p', { class: 'note' }, '用意された試験です。相談内容に適した試験かどうかは自動で確認していません。確認できる範囲と不足を選択前に確かめてください。'),
     presets.map(p => {
       const s = p.recipe.source, different = check.source?.commit !== s.commit;
       return h('div', { class: 'box', 'data-browser-preset': p.id }, h('h4', {}, p.title),
@@ -923,6 +924,8 @@ function previewBox(check, f, exec) {
     const recipe = browserRecipeForCheck(check, f);
     return h('div', { class: 'box' }, h('h4', {}, '実行する内容'),
       h('p', {}, `対象: ${recipe.source.repository} ${recipe.source.commit}`),
+      h('p', {}, h('strong', {}, '確認項目: '), check.text),
+      h('p', { class: 'note' }, '以下はこの試験で判定する条件です。条件がすべて通っても、確認項目の全体を確かめたことにはなりません。'),
       h('p', {}, `ブラウザ: Chromium ${recipe.browser.expected_version}。故障: ${FAULT_LABEL[recipe.trial.fault]}`),
       h('p', { class: 'note' }, '参照したGitコミットと実行イメージのコードが同一であることは未確認です。'),
       h('h4', {}, '実行するイメージ'), h('ul', { class: 'items' }, recipe.containers.services.map(s => h('li', {}, s.image))),
@@ -1025,6 +1028,7 @@ function browserEvidence(trace) {
   const probes = browser.database || [], reads = phase?.database_reads || [], before = phase?.database_reads_before || [];
   const responses = phase?.browser?.responses || [];
   const watches = browser.responses || [];
+  const incompleteText = (phase?.browser?.steps || []).filter(s => !s.completed && typeof s.text === 'string');
   const readStatus = read => !read ? '記録なし' : !read.performed ? '読み取りを実行できなかった' : read.exit_code == null ? '読み取りの終了状態は記録されていない' : read.exit_code !== 0 ? '読み取りに失敗した' : '読み取りが正常終了した';
   const readDetail = read => h('div', {}, h('p', {}, readStatus(read)),
     read?.detail ? h('p', {}, read.detail) : null,
@@ -1033,6 +1037,7 @@ function browserEvidence(trace) {
   return h('section', { class: 'box', 'data-browser-evidence': '' },
     h('h4', {}, 'ブラウザ操作とDBの読み取り'),
     h('p', { class: 'note' }, '試験設定で指定した対象と、実際に取得した記録を示します。記録がない場合は、成功・失敗のどちらとも判断できません。'),
+    incompleteText.length ? observationTable('操作が未完了となった後の表示（参考）', ['手順', '記録した表示', '詳細'], incompleteText.map(s => [s.id, h('pre', { class: 'output' }, s.text || '（空の表示）'), s.detail || '詳細なし'])) : null,
     watches.length ? observationTable('操作中のHTTP応答', ['観測ID', '指定した操作', '取得した応答'], watches.map(w => {
       const found = responses.filter(r => r.watch === w.id);
       return [w.id, `${w.method} ${w.path}`, found.length ? found.map(r => `HTTP ${r.status}${r.request_step ? `（操作 ${r.request_step}）` : ''}`).join('、') : '記録なし'];
@@ -1116,11 +1121,12 @@ function renderResult() {
     field({ label: '確認項目', control: pick }),
     concern ? h('p', { 'data-result-concern': '' }, h('strong', {}, 'もとの不安・疑問: '), concern.text) : null,
     h('p', {}, h('strong', {}, '検証する動作: '), check.text, `（条件の版 ${check.version}）`),
+    h('p', { class: 'note', 'data-coverage-note': '' }, '判定は選択した試験条件の結果です。試験がこの確認項目の全体を確かめたかどうかは自動で判断していません。'),
     unanswered.length ? h('section', { 'data-result-questions': '' }, h('h3', {}, '記録した未回答の質問'),
       h('p', { class: 'note' }, '相談や確認項目に残した質問です。試験結果を見て、回答が分かったか確認してください。'),
       h('ul', { class: 'items' }, unanswered.map(q => h('li', {}, q.text))),
       button('質問を確認する', () => goto('expect-edit'), 'text')) : null,
-    h('h3', { class: 'dads-u-std-20B-150' }, '現在の判定'),
+    h('h3', { class: 'dads-u-std-20B-150' }, '選択した試験条件の判定'),
     verdictBox(cv.verdict, cv.reason, h('p', {}, h('strong', {}, '次に確認すること: '), cv.next.text)),
     h('p', { class: 'note' }, '現在の判定は、最新の試行だけから決めます。最新の試行で観測が足りないときに、前の試行の成功で補いません。'),
     h('h3', { class: 'dads-u-std-20B-150' }, `試行の記録（${evidence.length} 件、新しい順）`),

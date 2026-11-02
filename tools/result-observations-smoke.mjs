@@ -15,7 +15,7 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
     recipe: structuredClone(recipe), mode: 'local', runtime_version: '合成の実行環境', runtime_path: 'synthetic', exit_code: 1,
     stdout_excerpt: '', stderr_excerpt: '', trial: {},
     containers: { egress: 'blocked', egress_confirmed: true, traffic_note: '合成の記録。mysqlの中継ログは一部未観測。',
-      browser: { responses: [{ watch: 'soap-save', status: 200, request_step: 'save-soap' }] },
+      browser: { responses: [{ watch: 'soap-save', status: 200, request_step: 'save-soap' }], steps: [{ id: 'unexpected-display', completed: false, text: '<img src=x onerror=alert(1)>', detail: '待機終了後に記録した' }] },
       database_reads: [
         { id: 'patient', performed: true, exit_code: null, detail: '終了状態不明' },
         { id: 'visit', performed: true, exit_code: 0, detail: '出力の記録なし' },
@@ -68,6 +68,9 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   try {
     await reload();
     assert.match(await page.locator('[data-result-concern]').innerText(), /診療記録の保存先が不安/);
+    assert.match(await page.locator('[data-coverage-note]').innerText(), /全体を確かめたかどうかは自動で判断していません/);
+    assert.match(await browserEvidence.innerText(), /操作が未完了となった後の表示/);
+    assert.equal(await browserEvidence.locator('img').count(), 0);
     assert.match(await page.locator('[data-result-questions]').innerText(), /想定した保存先はどこか/);
     assert.doesNotMatch(await page.locator('[data-result-questions]').innerText(), /回答済みの質問/);
     assert.match(await browserEvidence.innerText(), /mysql \/ openemr \/ form_soap/);
