@@ -1126,7 +1126,7 @@ function renderResult() {
       h('p', { class: 'note' }, '相談や確認項目に残した質問です。試験結果を見て、回答が分かったか確認してください。'),
       h('ul', { class: 'items' }, unanswered.map(q => h('li', {}, q.text))),
       button('質問を確認する', () => goto('expect-edit'), 'text')) : null,
-    h('h3', { class: 'dads-u-std-20B-150' }, '選択した試験条件の判定'),
+    h('h3', { class: 'dads-u-std-20B-150' }, '現在の判定（選択した試験条件）'),
     verdictBox(cv.verdict, cv.reason, h('p', {}, h('strong', {}, '次に確認すること: '), cv.next.text)),
     h('p', { class: 'note' }, '現在の判定は、最新の試行だけから決めます。最新の試行で観測が足りないときに、前の試行の成功で補いません。'),
     h('h3', { class: 'dads-u-std-20B-150' }, `試行の記録（${evidence.length} 件、新しい順）`),
