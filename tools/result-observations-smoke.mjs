@@ -40,6 +40,12 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   workspaceCheck.questions = [{ id: 'unknown-1', text: '想定した保存先はどこか', answer: null }, { id: 'answered-1', text: '回答済みの質問', answer: '回答済み' }];
   caseView.workspace.statements.push({ id: 'synthetic-concern', text: '診療記録の保存先が不安', kind: 'unanswered', role: 'developer', origin: '{}', check_ids: [], confirmations: [] });
   check.evidence = [evidence]; check.verdict = 'not_satisfied'; check.reason = evidence.observed.reason;
+  // 確認項目のどの部分を確かめたかは、試験の判定とは別の合成記録。
+  check.coverage = { status: 'partial', observed: 1, declared: 3, summary: '登録した3件のうち1件を観測した。残りは未確認', remaining: ['外部へ送信されない: 基盤が観測できない（試験用ネットワークの外にある送信先の特定は基盤が観測できない）', '<img src=x onerror=alert(1)>: 期待と異なる観測（判定条件 soap-plan（DB照合）: 期待と異なる）'], aspects: [
+    { id: 'p1', text: '主訴がDBに保存される', origin: 'AIの整理案（合成）', observation: 'database_rows', observation_label: '基盤が試験値に一致する試験用DBの行を直接読み出した結果', support: 'judged', trial_checks: ['soap-subjective'], status: 'observed', status_label: '観測した', detail: '判定条件 soap-subjective（DB照合）: 期待どおり' },
+    { id: 'p2', text: '外部へ送信されない', origin: '記入者（合成）', observation: 'external_destination', observation_label: '試験用ネットワークの外にある送信先の特定', support: 'unsupported', trial_checks: [], status: 'unsupported', status_label: '基盤が観測できない', detail: '試験用ネットワークの外にある送信先の特定は基盤が観測できない' },
+    { id: 'p3', text: '<img src=x onerror=alert(1)>', origin: '記入者（合成）', observation: 'database_rows', observation_label: '基盤が試験値に一致する試験用DBの行を直接読み出した結果', support: 'judged', trial_checks: ['soap-plan'], status: 'contradicted', status_label: '期待と異なる観測', detail: '判定条件 soap-plan（DB照合）: 期待と異なる' },
+  ] };
   caseView.verification_passed = false;
   caseView.workspace.evidence = [raw];
   raw.execution.trial.recovery = {
@@ -68,7 +74,13 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   try {
     await reload();
     assert.match(await page.locator('[data-result-concern]').innerText(), /診療記録の保存先が不安/);
-    assert.match(await page.locator('[data-coverage-note]').innerText(), /全体を確かめたかどうかは自動で判断していません/);
+    assert.match(await page.locator('[data-coverage-note]').innerText(), /一部を観測した: 登録した3件のうち1件を観測した/);
+    const coverage = page.locator('[data-coverage]');
+    assert.equal(await coverage.locator('img').count(), 0);
+    assert.equal(await coverage.locator('[data-aspect-status="observed"]').count(), 1);
+    assert.match(await coverage.locator('[data-aspect-status="unsupported"]').innerText(), /麦漆では観測できない/);
+    assert.match(await coverage.locator('[data-aspect-status="contradicted"]').innerText(), /期待と異なる観測/);
+    assert.match(await coverage.innerText(), /未確認として残る部分: 2 件/);
     assert.match(await browserEvidence.innerText(), /操作が未完了となった後の表示/);
     assert.equal(await browserEvidence.locator('img').count(), 0);
     assert.match(await page.locator('[data-result-questions]').innerText(), /想定した保存先はどこか/);

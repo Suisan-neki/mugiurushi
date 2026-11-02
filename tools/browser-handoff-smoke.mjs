@@ -71,6 +71,27 @@ try {
   assert.match(await targets.innerText(), /書き込み先を確認したことにはなりません/);
   assert.doesNotMatch(await page.locator('#trial-body').innerText(), /undefined/);
   assert.equal((await view()).workspace.evidence.length, 0);
+  // 確認項目のどの部分をこの試験で確かめるかは、人が観測の種類と判定条件IDで登録する。文章の一致では決めない。
+  const editor = page.getByRole('region', { name: '確認項目のどの部分をこの試験で確かめるか' });
+  assert.match(await editor.innerText(), /まだ登録されていません/);
+  assert.equal((await view()).workspace.checks[0].aspects.length, 0);
+  await editor.getByRole('button', { name: '確かめたい部分を追加する' }).click();
+  await editor.locator('[data-aspect] textarea').first().fill('SOAPの主訴が試験用DBの form_soap に保存される');
+  await editor.locator('[data-aspect] select').first().selectOption('database_rows');
+  await editor.locator('[data-aspect] input[type=checkbox][value="soap-subjective"]').check();
+  await editor.getByRole('button', { name: '確かめたい部分を追加する' }).click();
+  await editor.locator('[data-aspect] textarea').nth(1).fill('診療データが意図しない外部へ送信されない');
+  await editor.locator('[data-aspect] select').nth(1).selectOption('external_destination');
+  assert.match(await editor.locator('[data-aspect]').nth(1).innerText(), /麦漆では観測できない/);
+  assert.match(await editor.locator('[data-uncovered]').innerText(), /外部へ送信されない/);
+  await editor.getByRole('button', { name: '対応づけを保存する' }).click();
+  await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
+  v = await view();
+  assert.deepEqual(v.workspace.checks[0].aspects.map(a => [a.observation, a.trial_checks]), [['database_rows', ['soap-subjective']], ['external_destination', []]]);
+  assert.equal(v.workspace.checks[0].version, 2, '対応づけの登録は条件の版を変えない（レシピの版への切り替えで2になった版のまま）');
+  assert.equal(v.checks[0].coverage.status, 'not_covered');
+  assert.deepEqual(v.checks[0].coverage.aspects.map(a => a.status), ['no_evidence', 'unsupported']);
+  assert.equal(v.workspace.evidence.length, 0);
   await mkdir(output, { recursive: true }); await page.screenshot({ path: join(output, 'browser-handoff-confirm.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), '390px幅で横にはみ出さない');
@@ -95,6 +116,11 @@ try {
     assert.match(evidence.execution.containers.database_query, /応答は 1$/);
     assert.match(await page.locator('#result-body').innerText(), /ブラウザの実行: 記録した操作が完了した/);
     assert(evidence.execution.trial.results.every(r => r.observed === 'pass'));
+    const live = v.checks.find(c => c.check_id === 'soap-dialogue-check');
+    assert.equal(live.verdict, 'satisfied');
+    assert.equal(live.verification_passed, false, '外部送信の部分は観測できないため、試験が通っても確認項目は未通過');
+    assert.deepEqual(live.coverage.aspects.map(a => a.status), ['observed', 'unsupported']);
+    assert.match(await page.locator('[data-coverage-note]').innerText(), /一部を観測した/);
     const actual = evidence.execution.recipe;
     const normalized = value => {
       if (Array.isArray(value)) return value.map(normalized);
@@ -104,7 +130,7 @@ try {
       return value;
     };
     assert.deepEqual(normalized(actual.browser), normalized(original.browser));
-    await writeFile(join(output, 'browser-handoff-live.json'), JSON.stringify({ source: actual.source, run_id: evidence.manifest.correlation.run_id, verdict: v.checks.find(c => c.check_id === 'soap-dialogue-check').verdict, human_evaluation: 'not_conducted' }, null, 2));
+    await writeFile(join(output, 'browser-handoff-live.json'), JSON.stringify({ source: actual.source, run_id: evidence.manifest.correlation.run_id, verdict: live.verdict, verification_passed: live.verification_passed, coverage: live.coverage.status, human_evaluation: 'not_conducted' }, null, 2));
     // 再読込後の再試験は、保存したブラウザ手順を復元する。
     await page.reload(); await page.locator('#result:not([hidden]) [data-evidence]').first().waitFor();
     assert.equal(new URL(await page.locator('#back-to-system').getAttribute('href'), url).searchParams.get('ref'), before);
@@ -127,7 +153,7 @@ try {
     assert.doesNotMatch(preview, /undefined/);
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ checks: ['版の相違を表示', '明示操作による参照先変更', '相談の出所を保持', '確認まで実行しない', 'ブラウザ手順・入力・観測先を保持', ...(live ? ['画面から実OpenEMRを起動・保存・再表示・DB照合', '再読込後にブラウザ設定へ戻る'] : [])], actual_target_execution: live ? 'OpenEMR' : 'not_conducted' }));
+  console.log(JSON.stringify({ checks: ['版の相違を表示', '明示操作による参照先変更', '相談の出所を保持', '確認まで実行しない', 'ブラウザ手順・入力・観測先を保持', '確かめる部分を観測の種類と判定条件IDで登録', ...(live ? ['画面から実OpenEMRを起動・保存・再表示・DB照合', '再読込後にブラウザ設定へ戻る'] : [])], actual_target_execution: live ? 'OpenEMR' : 'not_conducted' }));
 } catch (error) {
   await mkdir(output, { recursive: true });
   const page = browser?.contexts()[0]?.pages()[0];

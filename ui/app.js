@@ -363,7 +363,7 @@ function renderDialogue() {
     summary.append(basis);
   }
   for (const [label, values] of [['まだ分からないこと', record.unknowns], ['あなたが報告した結果', record.reported_observations], ['未実施の改善案', record.improvement_ideas]]) if (values.length) summary.append(el('h4', {}, label), el('ul', {}, values.map(v => el('li', {}, v))));
-  if (record.test_plan.length) summary.append(el('h4', {}, 'まだ実行していない検証案'), el('ol', {}, record.test_plan.map(step => el('li', {}, el('p', {}, step.operation), el('p', {}, `期待：${step.expected}`), el('p', {}, `記録するもの：${step.observe}`)))));
+  if (record.test_plan.length) summary.append(el('h4', {}, 'まだ実行していない検証案'), el('p', { className: 'note' }, 'AIの案です。検証内容を記録すると「確かめたい部分」の下書きとして残り、検証画面で人が観測の種類と判定条件を選ぶまで未確認のままです。'), el('ol', {}, record.test_plan.map(step => el('li', {}, el('p', {}, step.operation), el('p', {}, `期待：${step.expected}`), el('p', {}, `記録するもの：${step.observe}`)))));
   root.append(summary);
   if (record.expectation) {
     const linked = [...state.view.workspace.statements].reverse().find(s => meta(s)?.dialogue_id === dialogue.thread_id && checkFor(s));
@@ -413,6 +413,11 @@ async function handoffDialogue(dialogue, expectation) {
     check = checkFor(statement);
   }
   if (!check) throw Error('検証内容を確認できませんでした。');
+  // AIの検証案は「確かめたい部分」の下書きとして引き継ぐ。観測の種類と判定条件は、検証画面で人が選ぶまで未定のまま。
+  if (!(check.aspects || []).length && record.test_plan.length) {
+    const aspects = record.test_plan.slice(0, 32).map((step, n) => ({ id: `plan-${n + 1}`, text: `${step.expected}（操作: ${step.operation}。観測の案: ${step.observe}）`.slice(0, 2000), origin: `AIの整理案（対話 ${dialogue.thread_id.slice(0, 12)}・${dialogue.turn}往復目）。観測の種類と判定条件は未選択`, observation: null, trial_checks: [] }));
+    await change({ op: 'set_aspects', check_id: check.id, aspects }, 'AIの検証案を、確かめたい部分の下書きとして確認項目に残した');
+  }
   location.assign(workbenchLink('検証の設定へ進む', check, origin, 'trial').href);
 }
 $('ask-concern-ai').addEventListener('click', () => {

@@ -118,6 +118,9 @@ try{
   await page.getByLabel('検証する動作',{exact:true}).fill('私が保存後に開き直しても同じ内容を読める');
   await page.getByRole('button',{name:'この内容を検証する',exact:true}).click();await page.locator('#trial:not([hidden])').waitFor();
   let v=await view(),check=v.workspace.checks[0];assert.equal(check.rule,'manual_only');assert.equal(v.workspace.evidence.length,0);assert.equal(check.questions[0].text,'保存後の再読込は未検証です。');
+  // AIの検証案は確かめたい部分の下書きになるが、観測の種類と判定条件は未選択のまま。試験が通っても自動では観測済みにならない。
+  assert.equal(check.aspects.length,1);assert.match(check.aspects[0].text,/同じ内容を読める/);assert.equal(check.aspects[0].observation,null);assert.deepEqual(check.aspects[0].trial_checks,[]);assert.match(check.aspects[0].origin,/AIの整理案/);
+  assert.equal(v.checks[0].coverage.status,'not_covered');assert.equal(v.checks[0].coverage.aspects[0].status,'undefined');
   assert.equal(v.workspace.statements[0].role,'developer','概要表示でも開発者として記録する');assert.equal(v.workspace.statements[0].confirmations.length,0);assert.equal(JSON.parse(v.workspace.statements[0].origin).dialogue_turn,2);
   assert.equal(await page.getByLabel('検証する動作',{exact:true}).inputValue(),check.id);
   assert.equal(await page.getByLabel('検証する動作',{exact:true}).locator('option',{hasText:check.text}).count(),1);

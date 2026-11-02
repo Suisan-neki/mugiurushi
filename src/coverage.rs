@@ -313,8 +313,8 @@ pub fn items(evidence: &Evidence) -> Vec<Item> {
 
 fn combine(outcomes: &[crate::execution::ObservationOutcome]) -> Option<Observed> {
     use crate::execution::ObservationOutcome;
-    let pass = outcomes.iter().any(|o| *o == ObservationOutcome::Pass);
-    let fail = outcomes.iter().any(|o| *o == ObservationOutcome::Fail);
+    let pass = outcomes.contains(&ObservationOutcome::Pass);
+    let fail = outcomes.contains(&ObservationOutcome::Fail);
     match (pass, fail) {
         (true, false) => Some(Observed::Pass),
         (false, true) => Some(Observed::Fail),

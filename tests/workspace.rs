@@ -562,3 +562,73 @@ fn retired_api_aliases_never_return_case_backup_or_execution_data() {
     );
     assert!(response.starts_with("HTTP/1.1 400"), "{response}");
 }
+
+#[test]
+fn observation_kinds_require_auth_and_aspect_links_are_validated_over_http() {
+    let sandbox = Sandbox::new();
+    let case = sandbox.case();
+    let denied = http(
+        &case,
+        "GET",
+        "/api/v1/observation-kinds",
+        "",
+        Some("same"),
+        None,
+        None,
+    );
+    assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+    let listed = http(
+        &case,
+        "GET",
+        "/api/v1/observation-kinds",
+        "",
+        Some("same"),
+        Some("test-token"),
+        None,
+    );
+    assert!(listed.starts_with("HTTP/1.1 200"), "{listed}");
+    let body: serde_json::Value =
+        serde_json::from_str(listed.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let kinds = body["kinds"].as_array().unwrap();
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k["id"] == "database_rows" && k["support"] == "judged")
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k["id"] == "network_payload" && k["support"] == "unsupported")
+    );
+    let revision = load(&case).unwrap().revision;
+    let request = |aspects: &str| {
+        http(
+            &case,
+            "POST",
+            "/api/v1/change",
+            &format!(
+                r#"{{"expected_revision":{revision},"actor":"合成","reason":"対応づけ","action":{{"op":"set_aspects","check_id":"save","aspects":{aspects}}}}}"#
+            ),
+            Some("same"),
+            Some("test-token"),
+            None,
+        )
+    };
+    let rejected = request(
+        r#"[{"id":"a","text":"読める","origin":"合成","observation":"network_payload","trial_checks":["readback"]}]"#,
+    );
+    assert!(rejected.starts_with("HTTP/1.1 400"), "{rejected}");
+    let unknown_kind = request(
+        r#"[{"id":"a","text":"読める","origin":"合成","observation":"telepathy","trial_checks":[]}]"#,
+    );
+    assert!(unknown_kind.starts_with("HTTP/1.1 400"), "{unknown_kind}");
+    assert_eq!(load(&case).unwrap().revision, revision);
+    let accepted = request(
+        r#"[{"id":"a","text":"読める","origin":"合成","observation":"reported_observation","trial_checks":["readback"]}]"#,
+    );
+    assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
+    let saved = load(&case).unwrap();
+    assert_eq!(saved.revision, revision + 1);
+    assert_eq!(saved.checks[0].version, 1, "対応づけは条件の版を変えない");
+    assert_eq!(saved.checks[0].aspects[0].trial_checks, vec!["readback"]);
+}

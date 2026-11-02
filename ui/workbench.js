@@ -409,6 +409,10 @@ async function loadCase() {
       try { state.browserRecipes = (await api('GET', '/api/v1/browser-recipes')).recipes; }
       catch (e) { state.browserRecipesError = e.message; }
     }
+    if (!state.observationKinds) {
+      try { state.observationKinds = (await api('GET', '/api/v1/observation-kinds')).kinds; }
+      catch (e) { state.observationKindsError = e.message; }
+    }
   } catch (e) { showError(e); }
   renderCurrent();
   if (['open', 'repository'].includes(state.step)) $('current').hidden = true;
@@ -906,6 +910,69 @@ function trialFormView(check, form, plan, exec) {
   setTimeout(updatePreview);
   return container;
 }
+/// 実行前に分かる判定条件の一覧。手動の設定では実行時と同じ c1, c2… の識別子を付ける。
+function trialChecksOf(form) {
+  if (form.runtime === 'browser') return (form.browser_recipe?.trial?.checks || []).map(c => ({ id: c.id, scope: c.scope, method: c.method }));
+  return (form.checks || []).map((c, i) => ({ id: `c${i + 1}`, scope: c.scope || '（範囲が未入力）', method: c.method }));
+}
+const SUPPORT_LABEL = { judged: '判定に使える', recorded_only: '記録のみ（判定には使えない）', inference: '推定（実行の観測ではない）', unsupported: '麦漆では観測できない' };
+const ASPECT_STATUS_MARK = { observed: '○', contradicted: '×', not_observed: '？', not_in_trial: '－', method_mismatch: '！', unlinked: '－', undefined: '－', unsupported: '×', not_judged: '－', no_evidence: '－' };
+function kindInfo(id) { return (state.observationKinds || []).find(k => k.id === id) || null; }
+function kindLabel(id) { return id ? (kindInfo(id)?.label || id) : '未定'; }
+/// 確認項目のどの部分を、どの観測・判定条件で確かめるかを人が登録する。文章の一致から自動で決めない。
+function aspectEditor(check, trialChecks) {
+  const kinds = state.observationKinds || [];
+  const drafts = (check.aspects || []).map(a => ({ ...a, trial_checks: [...(a.trial_checks || [])] }));
+  const container = h('section', { class: 'box', 'aria-label': '確認項目のどの部分をこの試験で確かめるか', 'data-aspect-editor': '' });
+  const current = () => state.view?.workspace.checks.find(c => c.id === check.id) || check;
+  const render = () => {
+    const rows = drafts.map((a, index) => {
+      const info = a.observation ? kindInfo(a.observation) : null;
+      const text = textarea({ rows: 2, value: a.text, maxlength: 2000 });
+      text.control.addEventListener('input', () => { a.text = text.control.value; });
+      const kind = select([['', '観測の種類を選ぶ（未定）'], ...kinds.map(k => [k.id, `${k.label}｜${SUPPORT_LABEL[k.support] || k.support}`])]);
+      kind.control.value = a.observation || '';
+      kind.control.addEventListener('change', () => { a.observation = kind.control.value || null; if (!a.observation || kindInfo(a.observation)?.support !== 'judged') a.trial_checks = []; render(); });
+      const judged = info?.support === 'judged';
+      const links = judged ? h('fieldset', { class: 'aspect-links' }, h('legend', {}, 'この部分に答える判定条件'),
+        trialChecks.length ? trialChecks.map(c => {
+          const box = h('input', { type: 'checkbox', value: c.id });
+          box.checked = a.trial_checks.includes(c.id);
+          box.addEventListener('change', () => { a.trial_checks = box.checked ? [...a.trial_checks, c.id] : a.trial_checks.filter(id => id !== c.id); });
+          const mismatch = c.method !== a.observation;
+          return h('label', { class: 'aspect-link' }, box, ` ${c.id}：${c.scope}（${METHODS.find(m => m[0] === c.method)?.[1] || c.method}）`, mismatch ? h('span', { class: 'ref-unverified' }, '　観測方法が宣言した種類と違うため、選んでも観測済みになりません') : null);
+        }) : h('p', { class: 'note' }, 'この試験には判定条件がありません。')) : null;
+      return h('div', { class: 'box', 'data-aspect': a.id },
+        field({ label: `確かめたい部分 ${index + 1}`, support: `出所: ${a.origin}`, control: text }),
+        field({ label: '必要な観測の種類', support: info ? info.note : '麦漆が判定に使える種類と、記録だけ・推定・未対応の種類を区別して選びます。', control: kind }),
+        links,
+        judged && !a.trial_checks.length ? h('p', { class: 'note' }, 'この試験のどの判定条件が答えるかを選ぶまで、この部分は未対応づけとして残ります。') : null,
+        info && info.support !== 'judged' ? h('p', { class: 'ref-unverified' }, `${SUPPORT_LABEL[info.support]}。この部分は試験が通っても未確認として残ります。`) : null,
+        button('この部分を外す', () => { drafts.splice(index, 1); render(); }, 'text'));
+    });
+    const add = button('確かめたい部分を追加する', () => { drafts.push({ id: randomId('part'), text: '', origin: `${person().name || '記入者'}（${ROLE[person().role]}）が画面で記入`, observation: null, trial_checks: [] }); render(); });
+    const unchanged = JSON.stringify(drafts) === JSON.stringify((current().aspects || []).map(a => ({ ...a, trial_checks: [...(a.trial_checks || [])] })));
+    const save = button('対応づけを保存する', () => guarded(async () => {
+      requirePerson();
+      if (drafts.some(a => !a.text.trim())) throw Error('確かめたい部分の文を入力するか、外してください。');
+      await change({ op: 'set_aspects', check_id: check.id, aspects: drafts.map(a => ({ id: a.id, text: a.text.trim(), origin: a.origin, observation: a.observation || null, trial_checks: a.trial_checks })) }, '確認項目のどの部分を、どの観測・判定条件で確かめるかを登録した');
+      setStatus('対応づけを保存しました。試験はまだ実行していません。');
+      render();
+    }), 'solid-fill', 'md');
+    save.disabled = unchanged;
+    const uncovered = drafts.filter(a => !(a.observation && kindInfo(a.observation)?.support === 'judged' && a.trial_checks.length));
+    fill(container,
+      h('h3', {}, '確認項目のどの部分をこの試験で確かめるか'),
+      h('p', {}, h('strong', {}, '確認項目: '), check.text),
+      h('p', { class: 'note' }, '試験の判定条件がすべて通っても、ここで対応づけた部分だけが「観測した」になります。相談文と試験の文章が似ているかは自動で判断しません。AIの整理案から入った部分は、人が観測の種類と判定条件を選ぶまで未確認のままです。'),
+      state.observationKindsError ? banner('warning', '観測の種類の一覧を読み込めませんでした', h('p', {}, state.observationKindsError)) : null,
+      rows.length ? rows : h('p', { class: 'note' }, '確かめたい部分はまだ登録されていません。登録しないまま実行すると、結果は「試験の判定」だけになり、確認項目には答えていない扱いになります。'),
+      uncovered.length ? h('p', { class: 'ref-unverified', 'data-uncovered': '' }, `この試験では確かめない部分: ${uncovered.map(a => a.text || '（未入力）').join('、')}`) : null,
+      h('div', { class: 'journey-actions' }, add, save));
+  };
+  render();
+  return container;
+}
 function showTrialConfirmation(check, form, exec) {
   const body = $('trial-body');
   const run = button('試験を始める', async () => {
@@ -915,7 +982,7 @@ function showTrialConfirmation(check, form, exec) {
     run.disabled = false;
   }, 'solid-fill', 'lg');
   run.disabled = !check.source;
-  body.replaceChildren(h('h3', {}, 'この内容で実行します'), h('p', {}, '次のボタンを押すと、固定版を取得して対象を起動します。'), previewBox(check, form, exec), h('div', { class: 'journey-actions' }, button('設定に戻る', () => { history.back(); }), run));
+  body.replaceChildren(h('h3', {}, 'この内容で実行します'), h('p', {}, '次のボタンを押すと、固定版を取得して対象を起動します。'), previewBox(check, form, exec), aspectEditor(check, trialChecksOf(form)), h('div', { class: 'journey-actions' }, button('設定に戻る', () => { history.back(); }), run));
   history.pushState(null, '', location.href.replace(/#.*$/, '') + '#trial-confirm');
   $('trial').focus(); $('main').scrollIntoView({ block: 'start' });
 }
@@ -1121,7 +1188,7 @@ function renderResult() {
     field({ label: '確認項目', control: pick }),
     concern ? h('p', { 'data-result-concern': '' }, h('strong', {}, 'もとの不安・疑問: '), concern.text) : null,
     h('p', {}, h('strong', {}, '検証する動作: '), check.text, `（条件の版 ${check.version}）`),
-    h('p', { class: 'note', 'data-coverage-note': '' }, '判定は選択した試験条件の結果です。試験がこの確認項目の全体を確かめたかどうかは自動で判断していません。'),
+    coverageBlock(cv),
     unanswered.length ? h('section', { 'data-result-questions': '' }, h('h3', {}, '記録した未回答の質問'),
       h('p', { class: 'note' }, '相談や確認項目に残した質問です。試験結果を見て、回答が分かったか確認してください。'),
       h('ul', { class: 'items' }, unanswered.map(q => h('li', {}, q.text))),
@@ -1144,6 +1211,20 @@ function renderResult() {
       state.focusedEvidence = requested;
     }
   }
+}
+/// 試験の判定とは別に、確認項目のどの部分を観測できたかを示す。
+function coverageBlock(cv) {
+  const c = cv.coverage;
+  const statusLabel = { not_declared: '未登録', covered: '登録した部分をすべて観測した', partial: '一部を観測した', not_covered: '観測できた部分はない' };
+  return h('section', { 'data-coverage': c.status }, h('h3', { class: 'dads-u-std-20B-150' }, '確認項目のどの部分を確かめたか'),
+    h('p', { 'data-coverage-note': '' }, h('strong', {}, `${statusLabel[c.status] || c.status}: `), c.summary),
+    h('p', { class: 'note' }, '判定は選択した試験条件の結果です。確認項目に答えたかは、人が登録した対応づけを麦漆が試行の判定条件IDと観測方法で照合した範囲に限ります。'),
+    c.aspects.length ? h('figure', { class: 'dads-table' }, h('figcaption', { class: 'dads-table__caption' }, '確かめたい部分ごとの状態'),
+      h('table', { class: 'dads-table__table', 'data-cell-border': 'bottom' },
+        h('thead', {}, h('tr', {}, ['確かめたい部分', '必要な観測', '対応づけた判定条件', '状態', '詳細'].map(t => h('th', { class: 'dads-table__col-header', scope: 'col' }, t)))),
+        h('tbody', {}, c.aspects.map(a => h('tr', { 'data-aspect-status': a.status }, h('td', {}, a.text, h('div', { class: 'note' }, `出所: ${a.origin}`)), h('td', {}, a.observation_label, a.support && a.support !== 'judged' ? h('div', { class: 'ref-unverified' }, SUPPORT_LABEL[a.support]) : null), h('td', {}, a.trial_checks.length ? a.trial_checks.join('、') : '（なし）'), h('td', { 'data-observed': a.status === 'observed' ? 'pass' : a.status === 'contradicted' ? 'fail' : 'not_observed' }, `${ASPECT_STATUS_MARK[a.status] || ''} ${a.status_label}`), h('td', {}, a.detail)))))) : null,
+    c.remaining.length ? h('p', { class: 'ref-unverified' }, `未確認として残る部分: ${c.remaining.length} 件`) : null,
+    button('対応づけを見直す（試験の画面へ）', () => goto('trial'), 'text'));
 }
 function evidenceCard(check, v, e) {
   const s = v.summary;
