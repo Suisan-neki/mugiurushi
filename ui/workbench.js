@@ -918,7 +918,6 @@ function trialChecksOf(form) {
 const SUPPORT_LABEL = { judged: '判定に使える', recorded_only: '記録のみ（判定には使えない）', inference: '推定（実行の観測ではない）', unsupported: '麦漆では観測できない' };
 const ASPECT_STATUS_MARK = { observed: '○', contradicted: '×', not_observed: '？', not_in_trial: '－', method_mismatch: '！', unlinked: '－', undefined: '－', unsupported: '×', not_judged: '－', no_evidence: '－' };
 function kindInfo(id) { return (state.observationKinds || []).find(k => k.id === id) || null; }
-function kindLabel(id) { return id ? (kindInfo(id)?.label || id) : '未定'; }
 /// 確認項目のどの部分を、どの観測・判定条件で確かめるかを人が登録する。文章の一致から自動で決めない。
 function aspectEditor(check, trialChecks) {
   const kinds = state.observationKinds || [];
@@ -951,11 +950,12 @@ function aspectEditor(check, trialChecks) {
         button('この部分を外す', () => { drafts.splice(index, 1); render(); }, 'text'));
     });
     const add = button('確かめたい部分を追加する', () => { drafts.push({ id: randomId('part'), text: '', origin: `${person().name || '記入者'}（${ROLE[person().role]}）が画面で記入`, observation: null, trial_checks: [] }); render(); });
-    const unchanged = JSON.stringify(drafts) === JSON.stringify((current().aspects || []).map(a => ({ ...a, trial_checks: [...(a.trial_checks || [])] })));
+    const normalized = list => list.map(a => ({ id: a.id, text: a.text.trim(), origin: a.origin, observation: a.observation || null, trial_checks: [...(a.trial_checks || [])] }));
+    const unchanged = JSON.stringify(normalized(drafts)) === JSON.stringify(normalized(current().aspects || []));
     const save = button('対応づけを保存する', () => guarded(async () => {
       requirePerson();
       if (drafts.some(a => !a.text.trim())) throw Error('確かめたい部分の文を入力するか、外してください。');
-      await change({ op: 'set_aspects', check_id: check.id, aspects: drafts.map(a => ({ id: a.id, text: a.text.trim(), origin: a.origin, observation: a.observation || null, trial_checks: a.trial_checks })) }, '確認項目のどの部分を、どの観測・判定条件で確かめるかを登録した');
+      await change({ op: 'set_aspects', check_id: check.id, aspects: normalized(drafts) }, '確認項目のどの部分を、どの観測・判定条件で確かめるかを登録した');
       setStatus('対応づけを保存しました。試験はまだ実行していません。');
       render();
     }), 'solid-fill', 'md');
@@ -1183,7 +1183,7 @@ function renderResult() {
   fill(body,
     h('p', { class: 'note', role: 'status' }, state.view.verification_passed
       ? '記録した全条件の検証を通過。実運用の許可を示すものではありません。'
-      : '検証未通過。未確認または未達の条件があり、「採用する」という判断は記録できません。'),
+      : '検証未通過。未確認・未達の条件、または確かめる部分の登録・観測が足りない確認項目があり、「採用する」という判断は記録できません。'),
     retestNotice(check),
     field({ label: '確認項目', control: pick }),
     concern ? h('p', { 'data-result-concern': '' }, h('strong', {}, 'もとの不安・疑問: '), concern.text) : null,
@@ -1218,13 +1218,13 @@ function coverageBlock(cv) {
   const statusLabel = { not_declared: '未登録', covered: '登録した部分をすべて観測した', partial: '一部を観測した', not_covered: '観測できた部分はない' };
   return h('section', { 'data-coverage': c.status }, h('h3', { class: 'dads-u-std-20B-150' }, '確認項目のどの部分を確かめたか'),
     h('p', { 'data-coverage-note': '' }, h('strong', {}, `${statusLabel[c.status] || c.status}: `), c.summary),
-    h('p', { class: 'note' }, '判定は選択した試験条件の結果です。確認項目に答えたかは、人が登録した対応づけを麦漆が試行の判定条件IDと観測方法で照合した範囲に限ります。'),
+    h('p', { class: 'note' }, '判定は麦漆が選択した試験条件を照合した結果です。確認項目に答えたかは、人が登録した対応づけを麦漆が試行の判定条件IDと観測方法で照合した範囲に限ります。'),
     c.aspects.length ? h('figure', { class: 'dads-table' }, h('figcaption', { class: 'dads-table__caption' }, '確かめたい部分ごとの状態'),
       h('table', { class: 'dads-table__table', 'data-cell-border': 'bottom' },
         h('thead', {}, h('tr', {}, ['確かめたい部分', '必要な観測', '対応づけた判定条件', '状態', '詳細'].map(t => h('th', { class: 'dads-table__col-header', scope: 'col' }, t)))),
         h('tbody', {}, c.aspects.map(a => h('tr', { 'data-aspect-status': a.status }, h('td', {}, a.text, h('div', { class: 'note' }, `出所: ${a.origin}`)), h('td', {}, a.observation_label, a.support && a.support !== 'judged' ? h('div', { class: 'ref-unverified' }, SUPPORT_LABEL[a.support]) : null), h('td', {}, a.trial_checks.length ? a.trial_checks.join('、') : '（なし）'), h('td', { 'data-observed': a.status === 'observed' ? 'pass' : a.status === 'contradicted' ? 'fail' : 'not_observed' }, `${ASPECT_STATUS_MARK[a.status] || ''} ${a.status_label}`), h('td', {}, a.detail)))))) : null,
     c.remaining.length ? h('p', { class: 'ref-unverified' }, `未確認として残る部分: ${c.remaining.length} 件`) : null,
-    button('対応づけを見直す（試験の画面へ）', () => goto('trial'), 'text'));
+    button('対応づけを見直す（試験の設定に戻り、実行前の確認画面で編集する）', () => goto('trial'), 'text'));
 }
 function evidenceCard(check, v, e) {
   const s = v.summary;

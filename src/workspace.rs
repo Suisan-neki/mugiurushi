@@ -1413,6 +1413,8 @@ pub fn change(directory: &Path, request: ChangeRequest) -> io::Result<WorkspaceV
                     question.answer = None;
                     question.origin = None;
                 }
+                // 条件の意味が変わると、前の文に対して登録した部分の対応づけは使えない。
+                check.aspects.clear();
             }
             check.version = check
                 .version
@@ -1563,7 +1565,7 @@ pub fn change(directory: &Path, request: ChangeRequest) -> io::Result<WorkspaceV
             {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    "検証未通過です。全条件の現在の判定が条件を満たすまで、「採用する」という判断は記録できません",
+                    "検証未通過です。全条件で現在の試行の判定が条件を満たし、登録した確かめる部分をすべて観測するまで、「採用する」という判断は記録できません",
                 ));
             }
             if check_ids.is_empty()

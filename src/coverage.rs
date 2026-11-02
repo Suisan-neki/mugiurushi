@@ -222,12 +222,12 @@ pub fn validate(aspects: &[Aspect]) -> io::Result<()> {
             return Err(invalid("確かめる部分の識別子が重複または不正です"));
         }
         if a.text.trim().is_empty()
-            || a.text.len() > 4000
+            || a.text.chars().count() > 2000
             || a.origin.trim().is_empty()
-            || a.origin.len() > 4000
+            || a.origin.chars().count() > 2000
         {
             return Err(invalid(
-                "確かめる部分には空でない4000バイト以内の文と出所が必要です",
+                "確かめる部分には空でない2000文字以内の文と出所が必要です",
             ));
         }
         if a.trial_checks.len() > MAX_LINKS {
@@ -350,7 +350,7 @@ pub enum AspectStatus {
 impl AspectStatus {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Observed => "観測した",
+            Self::Observed => "麦漆が観測した",
             Self::Contradicted => "期待と異なる観測",
             Self::NotObserved => "観測できていない",
             Self::NotInTrial => "最新の試行に対応する判定条件がない",
@@ -358,8 +358,8 @@ impl AspectStatus {
             Self::Unlinked => "どの判定条件が答えるか未対応づけ",
             Self::Undefined => "観測方法が未定",
             Self::Unsupported => "基盤が観測できない",
-            Self::NotJudged => "記録や推定だけで、判定していない",
-            Self::NoEvidence => "適用できる試行がない",
+            Self::NotJudged => "記録や推定だけで、麦漆は判定していない",
+            Self::NoEvidence => "適用できる試行がまだない",
         }
     }
 }

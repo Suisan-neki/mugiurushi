@@ -78,7 +78,7 @@ try {
   await editor.getByRole('button', { name: '確かめたい部分を追加する' }).click();
   await editor.locator('[data-aspect] textarea').first().fill('SOAPの主訴が試験用DBの form_soap に保存される');
   await editor.locator('[data-aspect] select').first().selectOption('database_rows');
-  await editor.locator('[data-aspect] input[type=checkbox][value="soap-subjective"]').check();
+  await editor.locator('[data-aspect] input[type=checkbox][value="soap-subjective-row"]').check();
   await editor.getByRole('button', { name: '確かめたい部分を追加する' }).click();
   await editor.locator('[data-aspect] textarea').nth(1).fill('診療データが意図しない外部へ送信されない');
   await editor.locator('[data-aspect] select').nth(1).selectOption('external_destination');
@@ -87,7 +87,7 @@ try {
   await editor.getByRole('button', { name: '対応づけを保存する' }).click();
   await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
   v = await view();
-  assert.deepEqual(v.workspace.checks[0].aspects.map(a => [a.observation, a.trial_checks]), [['database_rows', ['soap-subjective']], ['external_destination', []]]);
+  assert.deepEqual(v.workspace.checks[0].aspects.map(a => [a.observation, a.trial_checks]), [['database_rows', ['soap-subjective-row']], ['external_destination', []]]);
   assert.equal(v.workspace.checks[0].version, 2, '対応づけの登録は条件の版を変えない（レシピの版への切り替えで2になった版のまま）');
   assert.equal(v.checks[0].coverage.status, 'not_covered');
   assert.deepEqual(v.checks[0].coverage.aspects.map(a => a.status), ['no_evidence', 'unsupported']);
