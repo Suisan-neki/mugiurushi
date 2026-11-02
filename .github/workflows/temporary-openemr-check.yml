@@ -1,0 +1,47 @@
+name: Temporary OpenEMR storage check
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/temporary-openemr-check.yml'
+permissions:
+  contents: read
+jobs:
+  live-storage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-1.99-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-1.99-
+      - run: rustup toolchain install 1.99.0 --profile minimal
+      - run: cargo build --locked
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.19.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684
+        id: playwright
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+      - run: npx playwright install-deps chromium
+      - if: steps.playwright.outputs.cache-hit != 'true'
+        run: npx playwright install chromium
+      - run: bash .github/scripts/chromium-sandbox.sh
+      - name: Run OpenEMR through the browser
+        run: npm run test:browser-handoff -- --live
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: storage-demo-live
+          path: test-results/browser-handoff-*
+          if-no-files-found: ignore
+          retention-days: 7
