@@ -14,7 +14,16 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   const raw = { id: 'synthetic-result-observations', execution: {
     recipe: structuredClone(recipe), mode: 'local', runtime_version: '合成の実行環境', runtime_path: 'synthetic', exit_code: 1,
     stdout_excerpt: '', stderr_excerpt: '', trial: {},
-    containers: { egress: 'blocked', egress_confirmed: true, traffic_note: '合成の記録。mysqlの中継ログは一部未観測。', traffic: [
+    containers: { egress: 'blocked', egress_confirmed: true, traffic_note: '合成の記録。mysqlの中継ログは一部未観測。',
+      browser: { responses: [{ watch: 'soap-save', status: 200, request_step: 'save-soap' }] },
+      database_reads: [
+        { id: 'soap-subjective', performed: true, exit_code: 0, text: 'synthetic-value\n', detail: '試験値を読み取った' },
+        { id: 'soap-objective', performed: true, exit_code: 0, text: '', detail: '読み取った' },
+        { id: 'soap-assessment', performed: true, exit_code: 1, text: '失敗時の出力', detail: '読み取りエラー' },
+        { id: 'soap-plan', performed: false, exit_code: null, text: '', detail: '未実行' },
+      ],
+      database_reads_before: [{ id: 'soap-subjective', performed: true, exit_code: 0, text: '<img src=x onerror=alert(1)>\n', detail: '操作前' }],
+      traffic: [
       { from: 'openemr', to: 'mysql', connections: 4, failed: 1, unfinished: 2, bytes_from_client: 1234, bytes_to_client: 0 },
       { from: '<img src=x onerror=alert(1)>', to: 'mysql', connections: 0, failed: 0, bytes_from_client: 0, bytes_to_client: 0 },
     ] },
@@ -23,6 +32,7 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
     observed: { verdict: 'not_satisfied', reason: '合成の故障中の判定', next_action: '保存操作を再検証する', unconfirmed: [] },
     summary: { tried: '合成の故障と復旧の記録を表示する', fault: 'DB停止', test_value: 'synthetic', items: [], command: [] },
   };
+  raw.execution.recipe.browser.database.find(q => q.id === 'soap-subjective').before_actions = true;
   check.evidence = [evidence]; check.verdict = 'not_satisfied'; check.reason = evidence.observed.reason;
   caseView.verification_passed = false;
   caseView.workspace.evidence = [raw];
@@ -40,6 +50,7 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   await page.route('**/api/v1/case', route => route.fulfill({ json: caseView }));
   const card = page.locator(`[data-evidence="${raw.id}"]`);
   const traffic = card.locator('[data-container-observations]'), recovery = card.locator('[data-recovery-observations]');
+  const browserEvidence = card.locator('[data-browser-evidence]');
   const reload = async () => {
     if (page.url() === target.href) await page.reload(); else await page.goto(target.href);
     await card.waitFor();
@@ -50,6 +61,24 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   };
   try {
     await reload();
+    assert.match(await browserEvidence.innerText(), /mysql \/ openemr \/ form_soap/);
+    assert.match(await browserEvidence.innerText(), /HTTP 200（操作 save-soap）/);
+    assert.match(await browserEvidence.innerText(), /書き込みまでの経路を証明するものではありません/);
+    const rows = browserEvidence.locator('tbody tr');
+    const subjective = rows.filter({ hasText: 'soap-subjective' });
+    assert.match(await subjective.innerText(), /読み取りが正常終了した/);
+    await subjective.locator('summary').first().click();
+    assert.match(await subjective.innerText(), /<img src=x onerror=alert\(1\)>/);
+    assert.equal(await subjective.locator('img').count(), 0, 'DBの値をHTMLとして実行しない');
+    await subjective.locator('summary').last().click();
+    assert.match(await subjective.innerText(), /synthetic-value/);
+    const objective = rows.filter({ hasText: 'soap-objective' });
+    await objective.locator('summary').last().click();
+    assert.match(await objective.innerText(), /該当する行なし/);
+    assert.match(await rows.filter({ hasText: 'soap-assessment' }).innerText(), /読み取りに失敗した/);
+    assert.equal(await rows.filter({ hasText: 'soap-assessment' }).locator('summary').count(), 0, '失敗時の出力を読み取り値として扱わない');
+    assert.match(await rows.filter({ hasText: 'soap-plan' }).innerText(), /読み取りを実行できなかった/);
+    assert.match(await rows.filter({ hasText: 'soap-identity' }).innerText(), /記録なし/);
     assert.match(await traffic.innerText(), /外部通信を遮断する設定を確認した/);
     assert.match(await traffic.innerText(), /アプリの処理の失敗件数ではありません/);
     assert.match(await traffic.innerText(), /mysqlの中継ログは一部未観測/);
@@ -91,14 +120,18 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
 
     delete raw.execution.containers.egress; delete raw.execution.containers.egress_confirmed;
     delete raw.execution.containers.traffic; delete raw.execution.containers.traffic_note; delete raw.execution.trial.recovery;
+    delete raw.execution.containers.database_reads; delete raw.execution.containers.database_reads_before; delete raw.execution.containers.browser;
     await reload();
     assert.match(await traffic.innerText(), /外部通信の方針は未記録/);
     assert.match(await traffic.innerText(), /接続の集計は記録されていません/);
     assert.equal(await recovery.count(), 0, '旧記録に復旧を実施したと表示しない');
+    assert.match(await browserEvidence.innerText(), /記録なし/);
+    assert.doesNotMatch(await browserEvidence.innerText(), /読み取りが正常終了した/, '旧記録の欠落を成功として表示しない');
     raw.execution.recipe.trial.recovery = { ready_timeout_ms: 1000 }; await reload();
     assert.match(await recovery.innerText(), /復旧結果は記録されていません/);
     delete raw.execution;
     await reload();
+    assert.equal(await browserEvidence.count(), 0);
     assert.equal(await traffic.count(), 0); assert.equal(await recovery.count(), 0);
     assert.equal(await card.locator('.verdict').getAttribute('data-verdict'), 'not_satisfied', '実行記録のない旧形式でも判定を保持する');
   } finally {

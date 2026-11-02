@@ -928,6 +928,7 @@ function previewBox(check, f, exec) {
       h('h4', {}, '実行するイメージ'), h('ul', { class: 'items' }, recipe.containers.services.map(s => h('li', {}, s.image))),
       disclosure('ログインと準備の手順', browserSteps(recipe.browser.preparation)),
       disclosure('試験中の操作', browserSteps(recipe.browser.actions)),
+      databaseTargets(recipe.browser.database),
       h('h4', {}, '判定の条件'), h('ul', { class: 'items' }, recipe.trial.checks.map(c => h('li', {},
         c.method === 'database_relation' && c.relation
           ? `${c.scope}：DBから読み取った${c.relation.left_before ? '操作前の' : ''}${c.relation.left}の${recipe.browser.database.find(q => q.id === c.relation.left)?.columns[c.relation.left_column] || '指定列'}と、操作後の${c.relation.right}の${recipe.browser.database.find(q => q.id === c.relation.right)?.columns[c.relation.right_column] || '指定列'}が${c.expect === 'not_equal' ? '一致しない' : '一致する'}`
@@ -1008,6 +1009,39 @@ function observationTable(caption, headings, rows) {
 }
 function recordedNumber(value, unit = '') {
   return Number.isSafeInteger(value) && value >= 0 ? `${value.toLocaleString('ja-JP')}${unit}` : '未記録';
+}
+function databaseTargets(probes = []) {
+  if (!probes.length) return null;
+  return h('section', { 'data-database-targets': '' },
+    h('h4', {}, '試験で読み取るDB'),
+    h('p', { class: 'note' }, '試験設定で指定した読み取り先です。これだけでは、意図した保存先かどうかや、書き込み先を確認したことにはなりません。'),
+    observationTable('DBの読み取り設定', ['観測ID', 'サービス', 'DB', 'テーブル', '照合する列', '読み取る列'],
+      probes.map(p => [p.id, p.service, p.database, p.table, p.match_column, (p.columns || []).join('、')])));
+}
+function browserEvidence(trace) {
+  const browser = trace?.recipe?.browser;
+  if (!browser) return null;
+  const phase = trace.containers || trace.trial?.containers;
+  const probes = browser.database || [], reads = phase?.database_reads || [], before = phase?.database_reads_before || [];
+  const responses = phase?.browser?.responses || [];
+  const watches = browser.responses || [];
+  const readStatus = read => !read ? '記録なし' : !read.performed ? '読み取りを実行できなかった' : read.exit_code !== 0 ? '読み取りに失敗した' : '読み取りが正常終了した';
+  const readDetail = read => h('div', {}, h('p', {}, readStatus(read)),
+    read?.detail ? h('p', {}, read.detail) : null,
+    read?.performed && read.exit_code === 0
+      ? disclosure('読み取った値', h('pre', { class: 'output' }, read.text || '（該当する行なし）')) : null);
+  return h('section', { class: 'box', 'data-browser-evidence': '' },
+    h('h4', {}, '保存操作と読み取りの記録'),
+    h('p', { class: 'note' }, '試験設定で指定した対象と、実際に取得した記録を示します。記録がない場合は、成功・失敗のどちらとも判断できません。'),
+    watches.length ? observationTable('操作中のHTTP応答', ['観測ID', '指定した操作', '取得した応答'], watches.map(w => {
+      const found = responses.filter(r => r.watch === w.id);
+      return [w.id, `${w.method} ${w.path}`, found.length ? found.map(r => `HTTP ${r.status}${r.request_step ? `（操作 ${r.request_step}）` : ''}`).join('、') : '記録なし'];
+    })) : h('p', {}, 'HTTP応答の観測は指定されていません。'),
+    probes.length ? observationTable('指定したDBからの読み取り', ['観測ID', '指定した読み取り先', '操作前', '操作後'], probes.map(p => [p.id,
+      `${p.service} / ${p.database} / ${p.table}（照合: ${p.match_column}、列: ${(p.columns || []).join('、')}）`,
+      p.before_actions || before.some(r => r.id === p.id) ? readDetail(before.find(r => r.id === p.id)) : '指定なし', readDetail(reads.find(r => r.id === p.id))]))
+      : h('p', {}, 'DBの読み取りは指定されていません。'),
+    h('p', { class: 'note' }, 'DBを指定して読み取った結果です。指定先が意図した保存先であることや、この操作から個々の書き込みまでの経路を証明するものではありません。通信の集計は下の「コンテナの通信と隔離」で確認できます。'));
 }
 function containerObservations(phase) {
   if (!phase) return null;
@@ -1120,6 +1154,7 @@ function evidenceCard(check, v, e) {
           h('tbody', {}, s.items.map(i => h('tr', {}, h('td', {}, i.scope), h('td', {}, i.expected), h('td', { class: 'observed', 'data-observed': i.observed || 'not_observed' }, OBSERVED[i.observed] || '？ 記録がない'), h('td', {}, i.source), h('td', {}, i.detail)))))),
       s.state ? h('p', {}, h('strong', {}, '保存先の読み出し（麦漆）: '), s.state.detail, s.state.excerpt ? h('pre', { class: 'output' }, s.state.excerpt) : null) : null)
       : h('p', { class: 'note' }, 'この試行は判定条件の表がない形式です。技術的な詳細を確認してください。'),
+    browserEvidence(trace),
     containerObservations(trace?.containers || trace?.trial?.containers),
     recoveryObservations(trace),
     h('p', {}, h('strong', {}, '次に確認すること: '), v.observed.next_action || '（記録なし）'),
