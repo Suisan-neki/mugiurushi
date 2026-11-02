@@ -614,21 +614,38 @@ fn observation_kinds_require_auth_and_aspect_links_are_validated_over_http() {
             None,
         )
     };
-    let rejected = request(
-        r#"[{"id":"a","text":"読める","origin":"合成","observation":"network_payload","trial_checks":["readback"]}]"#,
-    );
+    let fingerprint =
+        mugiurushi::coverage::criterion_fingerprint(&mugiurushi::execution::Criterion {
+            assertion: "readback".into(),
+            subject: "record-1".into(),
+        });
+    let link = format!(r#"{{"id":"readback","fingerprint":"{fingerprint}"}}"#);
+    let rejected = request(&format!(
+        r#"[{{"id":"a","text":"読める","origin":"合成","observation":"network_payload","trial_checks":[{link}]}}]"#
+    ));
     assert!(rejected.starts_with("HTTP/1.1 400"), "{rejected}");
     let unknown_kind = request(
         r#"[{"id":"a","text":"読める","origin":"合成","observation":"telepathy","trial_checks":[]}]"#,
     );
     assert!(unknown_kind.starts_with("HTTP/1.1 400"), "{unknown_kind}");
-    assert_eq!(load(&case).unwrap().revision, revision);
-    let accepted = request(
-        r#"[{"id":"a","text":"読める","origin":"合成","observation":"reported_observation","trial_checks":["readback"]}]"#,
+    let no_fingerprint = request(
+        r#"[{"id":"a","text":"読める","origin":"合成","observation":"reported_observation","trial_checks":[{"id":"readback"}]}]"#,
     );
+    assert!(
+        no_fingerprint.starts_with("HTTP/1.1 400"),
+        "{no_fingerprint}"
+    );
+    assert_eq!(load(&case).unwrap().revision, revision);
+    let accepted = request(&format!(
+        r#"[{{"id":"a","text":"読める","origin":"合成","observation":"reported_observation","trial_checks":[{link}]}}]"#
+    ));
     assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
     let saved = load(&case).unwrap();
     assert_eq!(saved.revision, revision + 1);
     assert_eq!(saved.checks[0].version, 1, "対応づけは条件の版を変えない");
-    assert_eq!(saved.checks[0].aspects[0].trial_checks, vec!["readback"]);
+    assert_eq!(saved.checks[0].aspects[0].trial_checks[0].id, "readback");
+    assert_eq!(
+        saved.checks[0].aspects[0].trial_checks[0].fingerprint,
+        fingerprint
+    );
 }

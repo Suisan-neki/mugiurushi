@@ -84,10 +84,25 @@ try {
   await editor.locator('[data-aspect] select').nth(1).selectOption('external_destination');
   assert.match(await editor.locator('[data-aspect]').nth(1).innerText(), /麦漆では観測できない/);
   assert.match(await editor.locator('[data-uncovered]').innerText(), /外部へ送信されない/);
-  await editor.getByRole('button', { name: '対応づけを保存する' }).click();
+  const saveButton = editor.getByRole('button', { name: '対応づけを保存する' });
+  assert.equal(await saveButton.isDisabled(), false, '変更があれば保存できる');
+  await saveButton.click();
   await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
+  assert.equal(await saveButton.isDisabled(), true, '保存直後は変更がない');
   v = await view();
-  assert.deepEqual(v.workspace.checks[0].aspects.map(a => [a.observation, a.trial_checks]), [['database_rows', ['soap-subjective-row']], ['external_destination', []]]);
+  assert.deepEqual(v.workspace.checks[0].aspects.map(a => [a.observation, a.trial_checks.map(l => l.id)]), [['database_rows', ['soap-subjective-row']], ['external_destination', []]]);
+  const savedLink = v.workspace.checks[0].aspects[0].trial_checks[0];
+  assert.equal(savedLink.fingerprint.length, 64, '麦漆が判定条件の内容を指紋にして保存する'); assert.equal(savedLink.definition, undefined); assert.match(savedLink.label, /SOAP subjectiveの保存/);
+  // 保存済みの対応づけでチェックボックスだけを変えると保存ボタンが有効になり、未保存のまま試験は始められない。
+  await editor.locator('[data-aspect] input[type=checkbox][value="soap-objective-row"]').first().check();
+  assert.equal(await saveButton.isDisabled(), false);
+  await page.getByRole('button', { name: '試験を始める', exact: true }).click();
+  assert.match(await page.locator('#alert').innerText(), /未保存の変更があります/);
+  assert.equal((await view()).workspace.evidence.length, 0);
+  assert.deepEqual((await view()).workspace.checks[0].aspects[0].trial_checks.map(l => l.id), ['soap-subjective-row'], '未保存の変更は判定に使う記録へ入らない');
+  await editor.locator('[data-aspect] input[type=checkbox][value="soap-objective-row"]').first().uncheck();
+  assert.equal(await saveButton.isDisabled(), true, '元に戻せば未保存の変更はない');
+  await page.locator('#alert').getByRole('button', { name: '閉じる' }).click();
   assert.equal(v.workspace.checks[0].version, 2, '対応づけの登録は条件の版を変えない（レシピの版への切り替えで2になった版のまま）');
   assert.equal(v.checks[0].coverage.status, 'not_covered');
   assert.deepEqual(v.checks[0].coverage.aspects.map(a => a.status), ['no_evidence', 'unsupported']);

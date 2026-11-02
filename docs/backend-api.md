@@ -62,7 +62,7 @@ POST入力は1MiBまで。更新は`expected_revision`を照合し、別の更�
 }
 ```
 
-`set_aspects`は、確認項目のどの部分を、どの観測の種類とどの判定条件IDで確かめるかを登録し直す。`aspects`の各要素は`id`、`text`、`origin`、`observation`（`observation-kinds`のidか`null`）、`trial_checks`（試験案の判定条件ID）。判定条件を対応づけるには判定に使える種類が必要で、未対応の種類に判定条件を付けた入力は400。登録は試行結果の解釈であり、条件の版は変えない。`WorkspaceView.checks[].coverage`は、適用できる最新の試行の判定条件IDと観測方法に照合した部分ごとの状態（`observed`、`contradicted`、`not_observed`、`not_in_trial`、`method_mismatch`、`unlinked`、`undefined`、`unsupported`、`not_judged`、`no_evidence`）を返す。`verdict`は試行の判定、`verification_passed`は試行の判定が満たされ、かつ登録した部分をすべて観測した場合だけ真。部分が未登録の確認項目は通過にならず、「採用する」の判断を記録できない。文章の一致から対応づけを自動で決めない。
+`set_aspects`は、確認項目のどの部分を、どの観測の種類とどの判定条件で確かめるかを登録し直す。`aspects`の各要素は`id`、`text`、`origin`、`observation`（`observation-kinds`のidか`null`）、`trial_checks`。`trial_checks`の各要素は`id`と、登録時に送る判定条件の内容`definition`（試験案の`TrialCheck`）または内容の指紋`fingerprint`（試験案を使わない試行では`Criterion`の指紋）。サーバーは`definition`を指紋と説明`label`に変えて保存し、本体は残さない。内容も指紋もない対応づけ、識別子と内容が食い違う対応づけ、判定に使えない種類への対応づけは400。登録は試行結果の解釈であり、条件の版は変えない。`WorkspaceView.checks[].coverage`は、適用できる最新の試行の判定条件ID・観測方法・内容の指紋に照合した部分ごとの状態（`observed`、`contradicted`、`not_observed`、`not_in_trial`、`method_mismatch`、`definition_changed`、`unlinked`、`undefined`、`unsupported`、`not_judged`、`no_evidence`）を返す。識別子と観測方法が同じでも、範囲・期待・対象・文が変わった判定条件には前の対応づけを適用しない（`definition_changed`）。`verdict`は試行の判定、`verification_passed`は試行の判定が満たされ、かつ登録した部分をすべて観測した場合だけ真。部分が未登録の確認項目は通過にならず、「採用する」の判断を記録できない。文章の一致から対応づけを自動で決めない。
 
 actionのその他の型は`src/workspace.rs`の`Change`を参照する。HTTPでは、サーバー上の任意ディレクトリを読む`import`操作は受け付けない。ファイルのバックアップ・復元は下のCLIを使い、HTTPで復元先を指定する操作は提供しない。
 

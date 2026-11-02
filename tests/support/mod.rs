@@ -101,7 +101,15 @@ pub fn readback_aspects(check_id: &str) -> Change {
             text: "保存した記録を読み出せる".into(),
             origin: "合成の記入者".into(),
             observation: Some(mugiurushi::coverage::ObservationKind::ReportedObservation),
-            trial_checks: vec!["readback".into()],
+            trial_checks: vec![mugiurushi::coverage::TrialLink {
+                id: "readback".into(),
+                fingerprint: mugiurushi::coverage::criterion_fingerprint(&Criterion {
+                    assertion: "readback".into(),
+                    subject: "record-1".into(),
+                }),
+                label: "報告観測 readback".into(),
+                definition: None,
+            }],
         }],
     }
 }

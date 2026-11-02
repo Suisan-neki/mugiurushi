@@ -2,9 +2,11 @@
 //! 試験の合否（判定条件がすべて通ったか）とは別に求める。人やAIが述べた対応づけを、
 //! 基盤が実行記録の判定条件IDと観測方法に照合し、文章の一致から適否を決めない。
 use crate::error::invalid;
-use crate::trial::{CheckMethod, Observed};
+use crate::execution::Criterion;
+use crate::trial::{CheckMethod, Observed, TrialCheck};
 use crate::workspace::{Check, Evidence};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, io};
 
 pub const MAX_ASPECTS: usize = 32;
@@ -188,6 +190,33 @@ pub fn catalog() -> Vec<KindInfo> {
     ObservationKind::ALL.iter().map(|k| k.info()).collect()
 }
 
+/// 判定条件の内容（範囲・観測方法・期待・対象・文）の指紋。識別子が同じでも内容が変われば一致しない。
+pub fn trial_check_fingerprint(check: &TrialCheck) -> String {
+    let bytes = serde_json::to_vec(check).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
+}
+/// 試験案を使わない試行（対象プログラムの観測・外部の報告）の判定の指紋。
+pub fn criterion_fingerprint(criterion: &Criterion) -> String {
+    let bytes = serde_json::to_vec(criterion).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// 確かめたい部分に対応づけた判定条件。識別子だけでなく内容の指紋で照合する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrialLink {
+    pub id: String,
+    /// 対応づけた時点の判定条件の内容の指紋。基盤が`definition`から計算する。
+    #[serde(default)]
+    pub fingerprint: String,
+    /// 対応づけた時点の判定条件の説明（範囲と期待）。人が見直すための記録。
+    #[serde(default)]
+    pub label: String,
+    /// 登録時にだけ送る判定条件の内容。基盤が指紋と説明に変えて保存し、本体は残さない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<TrialCheck>,
+}
+
 /// 確認項目のうち、確かめたい一つの部分と、それをどの観測で確かめるかの宣言。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -200,9 +229,52 @@ pub struct Aspect {
     /// この部分を確かめるのに必要な観測の種類。未定なら None。
     #[serde(default)]
     pub observation: Option<ObservationKind>,
-    /// 対応づける試験の判定条件ID。実行記録の判定条件と照合する。
+    /// 対応づける試験の判定条件。実行記録の判定条件の識別子・観測方法・内容の指紋と照合する。
     #[serde(default)]
-    pub trial_checks: Vec<String>,
+    pub trial_checks: Vec<TrialLink>,
+}
+
+/// 登録時の入力を保存する形にする。判定条件の内容が送られていれば指紋と説明に変え、
+/// 指紋も内容もない対応づけは拒否する。試験案を使わない試行は`definition`なしで判定の指紋を送る。
+pub fn normalize(aspects: Vec<Aspect>) -> io::Result<Vec<Aspect>> {
+    let mut result = Vec::with_capacity(aspects.len());
+    for mut aspect in aspects {
+        for link in &mut aspect.trial_checks {
+            if let Some(definition) = link.definition.take() {
+                if definition.id != link.id {
+                    return Err(invalid("対応づける判定条件の識別子と内容が一致しません"));
+                }
+                link.fingerprint = trial_check_fingerprint(&definition);
+                link.label = format!(
+                    "{}（{}。期待: {:?}{}{}）",
+                    definition.scope,
+                    definition.method.source_label(),
+                    definition.expect,
+                    definition
+                        .text
+                        .as_deref()
+                        .map(|t| format!(" 「{t}」"))
+                        .unwrap_or_default(),
+                    definition
+                        .target
+                        .as_deref()
+                        .map(|t| format!("、対象 {t}"))
+                        .unwrap_or_default()
+                );
+            }
+            if link.fingerprint.len() != 64
+                || !link.fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+                || link.label.chars().count() > 2000
+            {
+                return Err(invalid(
+                    "対応づける判定条件には、その内容（definition）または内容の指紋が必要です",
+                ));
+            }
+        }
+        result.push(aspect);
+    }
+    validate(&result)?;
+    Ok(result)
 }
 
 pub fn validate(aspects: &[Aspect]) -> io::Result<()> {
@@ -234,8 +306,12 @@ pub fn validate(aspects: &[Aspect]) -> io::Result<()> {
             return Err(invalid("対応づける判定条件が多すぎます"));
         }
         let mut links = BTreeSet::new();
-        for id in &a.trial_checks {
-            if id.is_empty() || id.len() > 128 || !links.insert(id.as_str()) {
+        for link in &a.trial_checks {
+            if link.id.is_empty()
+                || link.id.len() > 128
+                || link.definition.is_some()
+                || !links.insert(link.id.as_str())
+            {
                 return Err(invalid("対応づける判定条件の識別子が重複または不正です"));
             }
         }
@@ -256,6 +332,8 @@ pub struct Item {
     pub id: String,
     pub kind: ObservationKind,
     pub scope: String,
+    /// 判定条件の内容の指紋。対応づけた時点のものと照合する。
+    pub fingerprint: String,
     /// 試行の結果。結果が保存されていなければ None。
     pub observed: Option<Observed>,
 }
@@ -271,6 +349,7 @@ pub fn items(evidence: &Evidence) -> Vec<Item> {
                     id: c.id.clone(),
                     kind: ObservationKind::of_method(c.method),
                     scope: c.scope.clone(),
+                    fingerprint: trial_check_fingerprint(c),
                     observed: trace
                         .trial
                         .as_ref()
@@ -291,6 +370,7 @@ pub fn items(evidence: &Evidence) -> Vec<Item> {
             id: criterion.assertion.clone(),
             kind: ObservationKind::ProgramObservation,
             scope: criterion.subject.clone(),
+            fingerprint: criterion_fingerprint(criterion),
             observed: combine(&outcomes),
         }];
     }
@@ -305,6 +385,7 @@ pub fn items(evidence: &Evidence) -> Vec<Item> {
             id: criterion.assertion.clone(),
             kind: ObservationKind::ReportedObservation,
             scope: criterion.subject.clone(),
+            fingerprint: criterion_fingerprint(criterion),
             observed: combine(&outcomes),
         }];
     }
@@ -336,6 +417,8 @@ pub enum AspectStatus {
     NotInTrial,
     /// 判定条件の観測方法が、宣言した観測の種類と違う。
     MethodMismatch,
+    /// 同じ識別子の判定条件はあるが、対応づけた時点と内容（範囲・期待・対象）が違う。
+    DefinitionChanged,
     /// 観測の種類はあるが、どの判定条件が答えるか未対応づけ。
     Unlinked,
     /// 観測の種類が未定。
@@ -355,6 +438,9 @@ impl AspectStatus {
             Self::NotObserved => "観測できていない",
             Self::NotInTrial => "最新の試行に対応する判定条件がない",
             Self::MethodMismatch => "宣言した観測の種類と判定条件が合わない",
+            Self::DefinitionChanged => {
+                "対応づけた後に判定条件の内容が変わった。人が対応づけを確認し直す"
+            }
             Self::Unlinked => "どの判定条件が答えるか未対応づけ",
             Self::Undefined => "観測方法が未定",
             Self::Unsupported => "基盤が観測できない",
@@ -372,7 +458,7 @@ pub struct AspectView {
     pub observation: Option<ObservationKind>,
     pub observation_label: String,
     pub support: Option<Support>,
-    pub trial_checks: Vec<String>,
+    pub trial_checks: Vec<TrialLink>,
     pub status: AspectStatus,
     pub status_label: String,
     pub detail: String,
@@ -519,10 +605,12 @@ fn status_of(aspect: &Aspect, has_evidence: bool, items: &[Item]) -> (AspectStat
         AspectStatus::NotObserved => 1,
         AspectStatus::Contradicted => 2,
         AspectStatus::MethodMismatch => 3,
-        AspectStatus::NotInTrial => 4,
-        _ => 5,
+        AspectStatus::DefinitionChanged => 4,
+        AspectStatus::NotInTrial => 5,
+        _ => 6,
     };
-    for id in &aspect.trial_checks {
+    for link in &aspect.trial_checks {
+        let id = &link.id;
         let (status, detail) = match items.iter().find(|i| &i.id == id) {
             None => (
                 AspectStatus::NotInTrial,
@@ -534,6 +622,18 @@ fn status_of(aspect: &Aspect, has_evidence: bool, items: &[Item]) -> (AspectStat
                     "判定条件 {id} の観測方法は「{}」で、宣言した「{}」と違う",
                     item.kind.label(),
                     kind.label()
+                ),
+            ),
+            Some(item) if item.fingerprint != link.fingerprint => (
+                AspectStatus::DefinitionChanged,
+                format!(
+                    "判定条件 {id}（{}）は、対応づけた時点（{}）と内容が違う",
+                    item.scope,
+                    if link.label.is_empty() {
+                        "説明なし"
+                    } else {
+                        link.label.as_str()
+                    }
                 ),
             ),
             Some(item) => match item.observed {
@@ -570,13 +670,22 @@ fn status_of(aspect: &Aspect, has_evidence: bool, items: &[Item]) -> (AspectStat
 mod tests {
     use super::*;
 
+    const FP: &str = "0000000000000000000000000000000000000000000000000000000000000000";
     fn aspect(kind: Option<ObservationKind>, links: &[&str]) -> Aspect {
         Aspect {
             id: "a".into(),
             text: "合成の部分".into(),
             origin: "試験".into(),
             observation: kind,
-            trial_checks: links.iter().map(|s| s.to_string()).collect(),
+            trial_checks: links
+                .iter()
+                .map(|s| TrialLink {
+                    id: s.to_string(),
+                    fingerprint: FP.into(),
+                    label: String::new(),
+                    definition: None,
+                })
+                .collect(),
         }
     }
     fn item(id: &str, kind: ObservationKind, observed: Option<Observed>) -> Item {
@@ -584,8 +693,64 @@ mod tests {
             id: id.into(),
             kind,
             scope: "範囲".into(),
+            fingerprint: FP.into(),
             observed,
         }
+    }
+    fn trial_check(id: &str, text: &str) -> TrialCheck {
+        TrialCheck {
+            id: id.into(),
+            scope: "範囲".into(),
+            method: CheckMethod::DatabaseRows,
+            expect: crate::trial::Expectation::Contains,
+            text: Some(text.into()),
+            target: Some("t".into()),
+            relation: None,
+        }
+    }
+
+    #[test]
+    fn same_id_with_changed_definition_is_not_observed_and_definitions_become_fingerprints() {
+        let a = trial_check("c1", "患者A");
+        let b = trial_check("c1", "患者B");
+        assert_ne!(trial_check_fingerprint(&a), trial_check_fingerprint(&b));
+        let mut aspect = aspect(Some(ObservationKind::DatabaseRows), &[]);
+        aspect.trial_checks.push(TrialLink {
+            id: "c1".into(),
+            fingerprint: String::new(),
+            label: String::new(),
+            definition: Some(a.clone()),
+        });
+        let saved = normalize(vec![aspect]).unwrap();
+        let link = &saved[0].trial_checks[0];
+        assert_eq!(link.fingerprint, trial_check_fingerprint(&a));
+        assert!(link.definition.is_none());
+        assert!(link.label.contains("範囲"));
+        let mut changed = item("c1", ObservationKind::DatabaseRows, Some(Observed::Pass));
+        changed.fingerprint = trial_check_fingerprint(&b);
+        assert_eq!(
+            status_of(&saved[0], true, &[changed]).0,
+            AspectStatus::DefinitionChanged
+        );
+        let mut same = item("c1", ObservationKind::DatabaseRows, Some(Observed::Pass));
+        same.fingerprint = trial_check_fingerprint(&a);
+        assert_eq!(
+            status_of(&saved[0], true, &[same]).0,
+            AspectStatus::Observed
+        );
+        // 内容も指紋もない対応づけ、識別子と内容が食い違う対応づけは拒否する。
+        let mut bare = super::Aspect {
+            trial_checks: vec![TrialLink {
+                id: "c1".into(),
+                fingerprint: String::new(),
+                label: String::new(),
+                definition: None,
+            }],
+            ..saved[0].clone()
+        };
+        assert!(normalize(vec![bare.clone()]).is_err());
+        bare.trial_checks[0].definition = Some(trial_check("c2", "x"));
+        assert!(normalize(vec![bare]).is_err());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! 試験の合否（判定条件がすべて通ったか）と、確認項目に答えたかを分ける。
 mod support;
 use mugiurushi::{
-    coverage::{Aspect, AspectStatus, CoverageStatus, ObservationKind},
+    coverage::{Aspect, AspectStatus, CoverageStatus, ObservationKind, TrialLink},
     execution::*,
     model::*,
     recording::*,
@@ -229,13 +229,23 @@ fn storage_trial(fault: TrialFault) -> TrialSpec {
         ],
     }
 }
+/// 対応づけは、保存の試験の判定条件の内容（definition）を添えて登録する。基盤が指紋に変える。
 fn aspect(id: &str, text: &str, kind: Option<ObservationKind>, links: &[&str]) -> Aspect {
+    let spec = storage_trial(TrialFault::Normal);
     Aspect {
         id: id.into(),
         text: text.into(),
         origin: "合成の記入者".into(),
         observation: kind,
-        trial_checks: links.iter().map(|s| s.to_string()).collect(),
+        trial_checks: links
+            .iter()
+            .map(|s| TrialLink {
+                id: s.to_string(),
+                fingerprint: String::new(),
+                label: String::new(),
+                definition: spec.checks.iter().find(|c| c.id == *s).cloned(),
+            })
+            .collect(),
     }
 }
 fn status(view: &WorkspaceView, id: &str) -> AspectStatus {
@@ -487,6 +497,12 @@ fn invalid_links_are_rejected_and_unanswered_conditions_stay_unknown() {
         ],
         vec![aspect("bad id", "識別子が不正", None, &[])],
         vec![aspect("a", " ", None, &[])],
+        vec![aspect(
+            "a",
+            "内容も指紋もない対応づけ",
+            Some(ObservationKind::StoredFile),
+            &["nowhere"],
+        )],
     ] {
         assert!(
             change(
@@ -551,8 +567,58 @@ fn invalid_links_are_rejected_and_unanswered_conditions_stay_unknown() {
         saved["checks"][0]["aspects"][0]["observation"],
         "stored_file"
     );
+    let link = &saved["checks"][0]["aspects"][0]["trial_checks"][0];
+    assert_eq!(link["id"], "written");
+    assert_eq!(link["fingerprint"].as_str().unwrap().len(), 64);
+    assert!(link.get("definition").is_none());
+}
+
+/// 同じ識別子・同じ観測方法の判定条件でも、対象や期待が変わった試験には前の対応づけを適用しない。
+#[test]
+fn same_check_id_with_a_different_definition_requires_a_new_link() {
+    let f = Fixture::new("追加したメモは保存される");
+    f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![aspect(
+            "stored",
+            "保存先に試験用の値が書き込まれる",
+            Some(ObservationKind::StoredFile),
+            &["written"],
+        )],
+    });
+    let v = f.run("add", storage_trial(TrialFault::Normal));
+    assert_eq!(status(&v, "stored"), AspectStatus::Observed);
+    assert!(v.checks[0].verification_passed);
+
+    // 判定条件 written の識別子と観測方法はそのまま、期待を「含まない」に変えた試験。
+    let mut changed = storage_trial(TrialFault::Normal);
+    changed
+        .checks
+        .iter_mut()
+        .find(|c| c.id == "written")
+        .unwrap()
+        .expect = Expectation::NotContains;
+    let v = f.run("claim", changed);
     assert_eq!(
-        saved["checks"][0]["aspects"][0]["trial_checks"][0],
-        "written"
+        v.checks[0].verdict,
+        Verdict::Satisfied,
+        "変えた試験自体は通る"
     );
+    assert_eq!(status(&v, "stored"), AspectStatus::DefinitionChanged);
+    assert!(!v.checks[0].verification_passed);
+    assert!(v.checks[0].coverage.remaining[0].contains("内容が違う"));
+    assert!(f.release().is_err());
+
+    // 範囲の文だけが変わっても、内容の指紋は一致しない。
+    let mut renamed = storage_trial(TrialFault::Normal);
+    renamed
+        .checks
+        .iter_mut()
+        .find(|c| c.id == "written")
+        .unwrap()
+        .scope = "患者Bの書き込み".into();
+    let v = f.run("add", renamed);
+    assert_eq!(status(&v, "stored"), AspectStatus::DefinitionChanged);
+    let label = &v.checks[0].coverage.aspects[0].trial_checks[0].label;
+    assert!(label.contains("書き込み"), "{label}");
 }

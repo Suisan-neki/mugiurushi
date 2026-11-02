@@ -1387,7 +1387,7 @@ pub fn change(directory: &Path, request: ChangeRequest) -> io::Result<WorkspaceV
             "add_question"
         }
         Change::SetAspects { check_id, aspects } => {
-            crate::coverage::validate(&aspects)?;
+            let aspects = crate::coverage::normalize(aspects)?;
             let i = find_check(&workspace.checks, &check_id)?;
             let check = &mut workspace.checks[i];
             if check.aspects == aspects {

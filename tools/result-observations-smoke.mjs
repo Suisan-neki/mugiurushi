@@ -42,9 +42,9 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   check.evidence = [evidence]; check.verdict = 'not_satisfied'; check.reason = evidence.observed.reason;
   // 確認項目のどの部分を確かめたかは、試験の判定とは別の合成記録。
   check.coverage = { status: 'partial', observed: 1, declared: 3, summary: '登録した3件のうち1件を観測した。残りは未確認', remaining: ['外部へ送信されない: 基盤が観測できない（試験用ネットワークの外にある送信先の特定は基盤が観測できない）', '<img src=x onerror=alert(1)>: 期待と異なる観測（判定条件 soap-plan（DB照合）: 期待と異なる）'], aspects: [
-    { id: 'p1', text: '主訴がDBに保存される', origin: 'AIの整理案（合成）', observation: 'database_rows', observation_label: '基盤が試験値に一致する試験用DBの行を直接読み出した結果', support: 'judged', trial_checks: ['soap-subjective'], status: 'observed', status_label: '観測した', detail: '判定条件 soap-subjective（DB照合）: 期待どおり' },
+    { id: 'p1', text: '主訴がDBに保存される', origin: 'AIの整理案（合成）', observation: 'database_rows', observation_label: '基盤が試験値に一致する試験用DBの行を直接読み出した結果', support: 'judged', trial_checks: [{ id: 'soap-subjective', fingerprint: 'f'.repeat(64), label: 'SOAP subjectiveの保存（合成）' }], status: 'observed', status_label: '観測した', detail: '判定条件 soap-subjective（DB照合）: 期待どおり' },
     { id: 'p2', text: '外部へ送信されない', origin: '記入者（合成）', observation: 'external_destination', observation_label: '試験用ネットワークの外にある送信先の特定', support: 'unsupported', trial_checks: [], status: 'unsupported', status_label: '基盤が観測できない', detail: '試験用ネットワークの外にある送信先の特定は基盤が観測できない' },
-    { id: 'p3', text: '<img src=x onerror=alert(1)>', origin: '記入者（合成）', observation: 'database_rows', observation_label: '基盤が試験値に一致する試験用DBの行を直接読み出した結果', support: 'judged', trial_checks: ['soap-plan'], status: 'contradicted', status_label: '期待と異なる観測', detail: '判定条件 soap-plan（DB照合）: 期待と異なる' },
+    { id: 'p3', text: '<img src=x onerror=alert(1)>', origin: '記入者（合成）', observation: 'database_rows', observation_label: '基盤が試験値に一致する試験用DBの行を直接読み出した結果', support: 'judged', trial_checks: [{ id: 'soap-plan', fingerprint: 'f'.repeat(64), label: '<img src=x onerror=alert(1)>' }], status: 'contradicted', status_label: '期待と異なる観測', detail: '判定条件 soap-plan（DB照合）: 期待と異なる' },
   ] };
   caseView.verification_passed = false;
   caseView.workspace.evidence = [raw];

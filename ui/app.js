@@ -394,6 +394,9 @@ async function handoffDialogue(dialogue, expectation) {
   const previousStatement = [...state.view.workspace.statements].reverse().find(s => meta(s)?.dialogue_id === dialogue.thread_id && checkFor(s));
   const previousCheck = previousStatement ? checkFor(previousStatement) : null;
   if (previousCheck?.text === expectation) {
+    // 期待する動作が同じでも、続けた対話で増えた未確認事項と検証案は確認項目へ引き継ぐ。
+    for (const text of record.unknowns) if (!previousCheck.questions.some(q => q.text === text)) await change({ op: 'add_question', check_id: previousCheck.id, question: { id: id('dialogue-unknown'), text, answer: null, origin: null } }, '続けた対話の未確認事項を検証内容へ残した');
+    await seedAspectsFromPlan(previousCheck, dialogue);
     location.assign(workbenchLink('検証の設定へ進む', previousCheck, meta(previousStatement), 'trial').href); return;
   }
   let statement = state.view.workspace.statements.find(s => s.id === statementId);
@@ -413,12 +416,19 @@ async function handoffDialogue(dialogue, expectation) {
     check = checkFor(statement);
   }
   if (!check) throw Error('検証内容を確認できませんでした。');
-  // AIの検証案は「確かめたい部分」の下書きとして引き継ぐ。観測の種類と判定条件は、検証画面で人が選ぶまで未定のまま。
-  if (!(check.aspects || []).length && record.test_plan.length) {
-    const aspects = record.test_plan.slice(0, 32).map((step, n) => ({ id: `plan-${n + 1}`, text: `${step.expected}（操作: ${step.operation}。観測の案: ${step.observe}）`.slice(0, 2000), origin: `AIの整理案（対話 ${dialogue.thread_id.slice(0, 12)}・${dialogue.turn}往復目）。観測の種類と判定条件は未選択`, observation: null, trial_checks: [] }));
-    await change({ op: 'set_aspects', check_id: check.id, aspects }, 'AIの検証案を、確かめたい部分の下書きとして確認項目に残した');
-  }
+  await seedAspectsFromPlan(check, dialogue);
   location.assign(workbenchLink('検証の設定へ進む', check, origin, 'trial').href);
+}
+/// AIの検証案を「確かめたい部分」の下書きとして引き継ぐ。観測の種類と判定条件は、検証画面で人が選ぶまで未定のまま。
+/// 既に登録した部分は残し、同じ文の案は重複させない。人が対応づけた部分を上書きしない。
+async function seedAspectsFromPlan(check, dialogue) {
+  const record = dialogue.record;
+  const existing = (check.aspects || []).map(a => ({ id: a.id, text: a.text, origin: a.origin, observation: a.observation, trial_checks: (a.trial_checks || []).map(l => ({ id: l.id, fingerprint: l.fingerprint, label: l.label })) }));
+  const planText = step => `${step.expected}（操作: ${step.operation}。観測の案: ${step.observe}）`.slice(0, 2000);
+  const added = record.test_plan.slice(0, 32).map(planText).filter(text => !existing.some(a => a.text === text)).slice(0, Math.max(0, 32 - existing.length))
+    .map((text, n) => ({ id: `plan-${dialogue.turn}-${n + 1}`, text, origin: `AIの整理案（対話 ${dialogue.thread_id.slice(0, 12)}・${dialogue.turn}往復目）。観測の種類と判定条件は未選択`, observation: null, trial_checks: [] }));
+  if (!added.length) return;
+  await change({ op: 'set_aspects', check_id: check.id, aspects: [...existing, ...added] }, 'AIの検証案を、確かめたい部分の下書きとして確認項目に残した');
 }
 $('ask-concern-ai').addEventListener('click', () => {
   const question = $('concern-text').value.trim();
