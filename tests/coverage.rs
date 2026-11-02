@@ -592,6 +592,8 @@ fn same_check_id_with_a_different_definition_requires_a_new_link() {
 
     // 判定条件 written の識別子と観測方法はそのまま、期待を「含まない」に変えた試験。
     let mut changed = storage_trial(TrialFault::Normal);
+    changed.readback = None;
+    changed.checks.retain(|c| c.id != "readback");
     changed
         .checks
         .iter_mut()
