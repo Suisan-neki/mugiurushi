@@ -35,6 +35,10 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
     summary: { tried: '合成の故障と復旧の記録を表示する', fault: 'DB停止', test_value: 'synthetic', items: [], command: [] },
   };
   raw.execution.recipe.browser.database.find(q => q.id === 'soap-subjective').before_actions = true;
+  const workspaceCheck = caseView.workspace.checks.find(item => item.id === checkId);
+  workspaceCheck.origin = 'repository-concern:synthetic-concern';
+  workspaceCheck.questions = [{ id: 'unknown-1', text: '想定した保存先はどこか', answer: null }, { id: 'answered-1', text: '回答済みの質問', answer: '回答済み' }];
+  caseView.workspace.statements.push({ id: 'synthetic-concern', text: '診療記録の保存先が不安', kind: 'unanswered', role: 'developer', origin: '{}', check_ids: [], confirmations: [] });
   check.evidence = [evidence]; check.verdict = 'not_satisfied'; check.reason = evidence.observed.reason;
   caseView.verification_passed = false;
   caseView.workspace.evidence = [raw];
@@ -63,6 +67,9 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   };
   try {
     await reload();
+    assert.match(await page.locator('[data-result-concern]').innerText(), /診療記録の保存先が不安/);
+    assert.match(await page.locator('[data-result-questions]').innerText(), /想定した保存先はどこか/);
+    assert.doesNotMatch(await page.locator('[data-result-questions]').innerText(), /回答済みの質問/);
     assert.match(await browserEvidence.innerText(), /mysql \/ openemr \/ form_soap/);
     assert.match(await browserEvidence.innerText(), /HTTP 200（操作 save-soap）/);
     assert.match(await browserEvidence.innerText(), /書き込みまでの経路を証明するものではありません/);

@@ -1105,13 +1105,21 @@ function renderResult() {
   const cv = checkView(check.id);
   const evidence = [...cv.evidence].reverse();
   const raw = id => state.view.workspace.evidence.find(e => e.id === id);
+  const concernId = check.origin?.startsWith('repository-concern:') ? check.origin.slice('repository-concern:'.length) : null;
+  const concern = concernId && state.view.workspace.statements.find(s => s.id === concernId);
+  const unanswered = (check.questions || []).filter(q => !q.answer);
   fill(body,
     h('p', { class: 'note', role: 'status' }, state.view.verification_passed
       ? '記録した全条件の検証を通過。実運用の許可を示すものではありません。'
       : '検証未通過。未確認または未達の条件があり、「採用する」という判断は記録できません。'),
     retestNotice(check),
     field({ label: '確認項目', control: pick }),
+    concern ? h('p', { 'data-result-concern': '' }, h('strong', {}, 'もとの不安・疑問: '), concern.text) : null,
     h('p', {}, h('strong', {}, '検証する動作: '), check.text, `（条件の版 ${check.version}）`),
+    unanswered.length ? h('section', { 'data-result-questions': '' }, h('h3', {}, '記録した未回答の質問'),
+      h('p', { class: 'note' }, '相談や確認項目に残した質問です。試験結果を見て、回答が分かったか確認してください。'),
+      h('ul', { class: 'items' }, unanswered.map(q => h('li', {}, q.text))),
+      button('質問を確認する', () => goto('expect-edit'), 'text')) : null,
     h('h3', { class: 'dads-u-std-20B-150' }, '現在の判定'),
     verdictBox(cv.verdict, cv.reason, h('p', {}, h('strong', {}, '次に確認すること: '), cv.next.text)),
     h('p', { class: 'note' }, '現在の判定は、最新の試行だけから決めます。最新の試行で観測が足りないときに、前の試行の成功で補いません。'),
