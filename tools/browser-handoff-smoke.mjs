@@ -53,6 +53,7 @@ try {
   const requestUrl = new URL(url + '/workbench'); requestUrl.search = new URLSearchParams({ url: 'https://github.com/' + repository, ref: before, check: 'soap-dialogue-check', from: 'system', focus: 'synthetic-node', diagram: 'd'.repeat(64) }); requestUrl.hash = 'trial';
   await page.goto(requestUrl.href);
   const preset = page.locator('[data-browser-preset="openemr-soap"]'); await preset.waitFor();
+  assert.match(await page.getByRole('region', { name: '同梱のブラウザ試験' }).innerText(), /適した試験かどうかは自動で確認していません/);
   assert.match(await preset.innerText(), /現在の確認項目の版/);
   assert.equal((await view()).workspace.checks[0].source.commit, before);
   await preset.getByRole('button', { name: /^レシピの版に切り替えて設定する/ }).click();
@@ -65,6 +66,7 @@ try {
   assert.match(await page.locator('#trial-body').innerText(), /soap-subjective/);
   assert.match(await page.locator('#trial-body').innerText(), /患者とSOAPの対応：DBから読み取った/);
   const targets = page.locator('[data-database-targets]');
+  assert.match(await page.locator('#trial-body').innerText(), /確認項目の全体を確かめたことにはなりません/);
   assert.match(await targets.innerText(), /form_soap/);
   assert.match(await targets.innerText(), /書き込み先を確認したことにはなりません/);
   assert.doesNotMatch(await page.locator('#trial-body').innerText(), /undefined/);

@@ -92,6 +92,15 @@ async function steps(list,phase){
    if(step.action!=='read_canvas')await screenshot(step,r,Math.max(1,Math.min(15000,deadline-Date.now())));
   }catch(error){
    r.detail=(r.detail?r.detail+'。':'')+redact(error.message);report.detail=`${phase}の手順 ${step.id} を完了できなかった`;
+   // 期待する文字を待ち切れなかったとき、対象が一意に見えていれば、その時点の表示を参考記録として残す。
+   // 手順は未完了のままとし、後続操作を続けたり条件の成功・失敗に変換したりしない。
+   if(step.action==='read_text'&&step.contains&&error.name==='TimeoutError'){
+    try{
+     const base=target(step.target);
+     const observed=await Promise.race([(async()=>await base.count()===1&&await base.isVisible()?await base.innerText({timeout:1000}):null)(),new Promise(resolve=>setTimeout(()=>resolve(null),1000))]);
+     if(typeof observed==='string'&&observed.length<=8192){r.text=redact(observed);r.detail+='。待機終了後の表示を参考として記録した。手順は未完了';}
+    }catch{}
+   }
    // 操作の待機上限を使い切っていても、一度だけ短い上限で停止後の表示を残す。
    // 追加の操作や再試行はせず、写真の有無で未完了という結果を変えない。
    await screenshot(step,r,1000,true);return false;
