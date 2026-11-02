@@ -17,6 +17,8 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
     containers: { egress: 'blocked', egress_confirmed: true, traffic_note: '合成の記録。mysqlの中継ログは一部未観測。',
       browser: { responses: [{ watch: 'soap-save', status: 200, request_step: 'save-soap' }] },
       database_reads: [
+        { id: 'patient', performed: true, exit_code: null, detail: '終了状態不明' },
+        { id: 'visit', performed: true, exit_code: 0, detail: '出力の記録なし' },
         { id: 'soap-subjective', performed: true, exit_code: 0, text: 'synthetic-value\n', detail: '試験値を読み取った' },
         { id: 'soap-objective', performed: true, exit_code: 0, text: '', detail: '読み取った' },
         { id: 'soap-assessment', performed: true, exit_code: 1, text: '失敗時の出力', detail: '読み取りエラー' },
@@ -79,6 +81,11 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
     assert.equal(await rows.filter({ hasText: 'soap-assessment' }).locator('summary').count(), 0, '失敗時の出力を読み取り値として扱わない');
     assert.match(await rows.filter({ hasText: 'soap-plan' }).innerText(), /読み取りを実行できなかった/);
     assert.match(await rows.filter({ hasText: 'soap-identity' }).innerText(), /記録なし/);
+    assert.match(await rows.filter({ hasText: '終了状態不明' }).innerText(), /終了状態は記録されていない/);
+    const visit = rows.filter({ hasText: '出力の記録なし' });
+    await visit.locator('summary').click();
+    assert.match(await visit.innerText(), /値は記録されていない/);
+    assert.doesNotMatch(await visit.innerText(), /該当する行なし/);
     assert.match(await traffic.innerText(), /外部通信を遮断する設定を確認した/);
     assert.match(await traffic.innerText(), /アプリの処理の失敗件数ではありません/);
     assert.match(await traffic.innerText(), /mysqlの中継ログは一部未観測/);

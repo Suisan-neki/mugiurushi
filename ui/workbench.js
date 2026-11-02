@@ -1025,13 +1025,13 @@ function browserEvidence(trace) {
   const probes = browser.database || [], reads = phase?.database_reads || [], before = phase?.database_reads_before || [];
   const responses = phase?.browser?.responses || [];
   const watches = browser.responses || [];
-  const readStatus = read => !read ? '記録なし' : !read.performed ? '読み取りを実行できなかった' : read.exit_code !== 0 ? '読み取りに失敗した' : '読み取りが正常終了した';
+  const readStatus = read => !read ? '記録なし' : !read.performed ? '読み取りを実行できなかった' : read.exit_code == null ? '読み取りの終了状態は記録されていない' : read.exit_code !== 0 ? '読み取りに失敗した' : '読み取りが正常終了した';
   const readDetail = read => h('div', {}, h('p', {}, readStatus(read)),
     read?.detail ? h('p', {}, read.detail) : null,
     read?.performed && read.exit_code === 0
-      ? disclosure('読み取った値', h('pre', { class: 'output' }, read.text || '（該当する行なし）')) : null);
+      ? disclosure('読み取った値', h('pre', { class: 'output' }, typeof read.text !== 'string' ? '（値は記録されていない）' : read.text === '' ? '（該当する行なし）' : read.text)) : null);
   return h('section', { class: 'box', 'data-browser-evidence': '' },
-    h('h4', {}, '保存操作と読み取りの記録'),
+    h('h4', {}, 'ブラウザ操作とDBの読み取り'),
     h('p', { class: 'note' }, '試験設定で指定した対象と、実際に取得した記録を示します。記録がない場合は、成功・失敗のどちらとも判断できません。'),
     watches.length ? observationTable('操作中のHTTP応答', ['観測ID', '指定した操作', '取得した応答'], watches.map(w => {
       const found = responses.filter(r => r.watch === w.id);
