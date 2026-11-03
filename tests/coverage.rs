@@ -434,16 +434,20 @@ fn declared_parts_pass_only_when_each_linked_check_was_observed() {
 #[test]
 fn unreadable_storage_and_missing_record_are_different_statuses() {
     let f = Fixture::new("追加したメモは保存される");
+    // 試す状況（読み出しを止める）も試験設定の一部なので、その設定で対応づける。
+    let skip = base_recipe("add", &[], storage_trial(TrialFault::SkipStateRead));
     f.apply(Change::SetAspects {
         check_id: "concern".into(),
         aspects: vec![
-            aspect(
+            aspect_for(
+                &skip,
                 "accepted",
                 "受付の表示が出る",
                 Some(ObservationKind::Stdout),
                 &["accepted"],
             ),
-            aspect(
+            aspect_for(
+                &skip,
                 "stored",
                 "保存先に書き込まれる",
                 Some(ObservationKind::StoredFile),
@@ -522,7 +526,9 @@ fn old_observations_are_not_reused_after_the_trial_or_version_changes() {
     assert_eq!(status(&v, "later"), AspectStatus::NotInTrial);
     assert_eq!(v.checks[0].coverage.status, CoverageStatus::NotCovered);
     assert!(!v.checks[0].verification_passed);
+    // 残る判定条件だけ現在の設定で選び直す。読み直しの対応づけは保存済みのまま（この試験にはない）。
     let narrow = base_recipe("add", &[], narrower);
+    let later = v.workspace.checks[0].aspects[1].clone();
     let v = f.apply(Change::SetAspects {
         check_id: "concern".into(),
         aspects: vec![
@@ -533,13 +539,7 @@ fn old_observations_are_not_reused_after_the_trial_or_version_changes() {
                 Some(ObservationKind::StoredFile),
                 &["written"],
             ),
-            aspect_for(
-                &narrow,
-                "later",
-                "後から読み出せる",
-                Some(ObservationKind::ReadbackOutput),
-                &["readback"],
-            ),
+            later,
         ],
     });
     assert_eq!(status(&v, "stored"), AspectStatus::Observed);
