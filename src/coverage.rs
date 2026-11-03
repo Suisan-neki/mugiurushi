@@ -330,7 +330,7 @@ pub fn normalize(aspects: Vec<Aspect>) -> io::Result<Vec<Aspect>> {
                 let in_recipe = recipe
                     .trial
                     .as_ref()
-                    .is_some_and(|t| t.checks.iter().any(|c| *c == check));
+                    .is_some_and(|t| t.checks.contains(&check));
                 if check.id != link.id || !in_recipe {
                     return Err(invalid(
                         "対応づける判定条件の識別子・内容が、送られた試験の設定と一致しません",
