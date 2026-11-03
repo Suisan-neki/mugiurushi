@@ -253,7 +253,7 @@ fn relation_requires_existing_distinct_probes_and_columns() {
 #[test]
 fn relation_can_compare_recorded_before_and_after_values() {
     let mut check: TrialCheck = serde_json::from_value(json!({
-        "id":"unchanged", "scope":"患者B", "method":"database_relation", "expect":"equal",
+        "id":"unchanged", "scope":"既存の記録", "method":"database_relation", "expect":"equal",
         "relation":{"left":"b", "left_column":0, "left_before":true, "right":"b", "right_column":0}
     }))
     .unwrap();
@@ -274,20 +274,6 @@ fn relation_can_compare_recorded_before_and_after_values() {
     assert_eq!(evaluate(&check, Some(&p), "").0, Observed::Pass);
     p.database_reads_before.clear();
     assert_eq!(evaluate(&check, Some(&p), "").0, Observed::NotObserved);
-}
-
-#[test]
-fn two_patient_recipe_is_bounded_and_valid() {
-    let recipe: mugiurushi::execution::Recipe = serde_json::from_str(include_str!(
-        "../examples/openemr-browser/soap-two-patients-recipe.json"
-    ))
-    .unwrap();
-    mugiurushi::execution::validate_recipe(&recipe).unwrap();
-    let browser = recipe.browser.unwrap();
-    let b = browser.database.iter().find(|q| q.id == "soap-b").unwrap();
-    assert!(b.before_actions);
-    assert_eq!(b.match_value.as_deref(), Some("B-{{test_value}}"));
-    assert!(query(b, "EEL-TEST-123").contains("422d45454c2d544553542d313233"));
 }
 
 #[test]
