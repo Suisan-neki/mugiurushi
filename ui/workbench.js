@@ -1084,7 +1084,7 @@ async function runTrial(check, f) {
     if (!['http', 'browser'].includes(f.runtime) && !f.entrypoint) throw Error('起動対象を入力してください。');
     if (f.runtime === 'http' && !f.http) throw Error('HTTPの操作先を入力してください。');
     const python = pythonSetup(f);
-    const containers = parseContainers(f.containers_text);
+    parseContainers(f.containers_text); // 入力の検査。試験設定は buildRecipe で作る。
     if ([f.launch, f.readback?.launch, f.server?.launch].some(l => l && l !== 'file') && f.runtime !== 'python3') throw Error('モジュール・宣言されたコマンドでの起動は、Python 3 だけで使えます。');
     if (f.server && !f.server.args.some(a => a.includes('{{port}}'))) throw Error('先に起動するプロセスの引数に、ポートの位置として {{port}} を入れてください。');
     if (!f.checks.length || f.checks.some(c => !c.scope)) throw Error('判定の条件を入力し、それぞれの確認する範囲を書いてください。');
