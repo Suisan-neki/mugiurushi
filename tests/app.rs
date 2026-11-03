@@ -129,6 +129,7 @@ fn add_check(case: &Path) {
                 dependencies: vec![],
                 questions: vec![],
                 aspects: vec![],
+                link_settings: vec![],
             },
         },
     )

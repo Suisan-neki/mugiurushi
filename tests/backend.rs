@@ -41,6 +41,7 @@ fn case() -> Case {
                 dependencies: vec![],
                 questions: vec![],
                 aspects: vec![],
+                link_settings: vec![],
             },
         },
     );

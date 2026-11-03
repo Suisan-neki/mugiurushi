@@ -171,7 +171,7 @@ fn handle_request(
             "architecture",
             "understand",
             "observation-kinds",
-            "trial-fingerprints",
+            "link-changes",
         ];
         if app.is_some() {
             routes.extend(["prepare", "ai", "system-diagram", "browser-recipes"]);
@@ -396,11 +396,20 @@ fn handle_request(
             }
         }
         ("GET", "/api/v1/backup") => result_response(stream, crate::backup::snapshot(directory)),
-        ("POST", "/api/v1/trial-fingerprints") => {
-            // 読み取り専用。試験の設定から判定条件ごとの指紋を返し、画面が保存済みの対応づけと比べる。
-            let result = parse_body::<crate::execution::Recipe>(&request.body)
-                .and_then(|recipe| crate::coverage::fingerprints(&recipe))
-                .map(|f| serde_json::json!({"schema_version": 1, "fingerprints": f}));
+        ("POST", "/api/v1/link-changes") => {
+            // 読み取り専用。確認項目に保存した対応づけを、これから実行する試験設定と比べ、
+            // 指紋の一致と、対応づけた時点から変わった設定の値を返す。
+            let result = parse_body::<crate::coverage::LinkChangesRequest>(&request.body)
+                .and_then(|request| {
+                    crate::coverage::link_changes(&workspace::load(directory)?, &request)
+                })
+                .map(|links| {
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "links": links,
+                        "note": "指紋の一致は麦漆が判定する。違いの一覧は記録した設定どうしの比較で、記録しない値（コンテナの環境変数の値）の違いは示せない",
+                    })
+                });
             result_response(stream, result)
         }
         ("POST", "/api/v1/compare") => {

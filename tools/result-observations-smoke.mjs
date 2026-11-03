@@ -43,6 +43,8 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   // 確認項目のどの部分を確かめたかは、試験の判定とは別の合成記録。
   check.coverage = { status: 'partial', observed: 1, declared: 3, summary: '登録した3件のうち1件を観測した。残りは未確認', remaining: ['外部へ送信されない: 基盤が観測できない（試験用ネットワークの外にある送信先の特定は基盤が観測できない）', '<img src=x onerror=alert(1)>: 期待と異なる観測（判定条件 soap-plan（DB照合）: 期待と異なる）'], aspects: [
     { id: 'p1', text: '主訴がDBに保存される', origin: 'AIの整理案（合成）', observation: 'database_rows', observation_label: '基盤が試験値に一致する試験用DBの行を直接読み出した結果', support: 'judged', trial_checks: [{ id: 'soap-subjective', fingerprint: 'f'.repeat(64), label: 'SOAP subjectiveの保存（合成）' }], status: 'observed', status_label: '観測した', detail: '判定条件 soap-subjective（DB照合）: 期待どおり' },
+    { id: 'p4', text: '患者Aの記録だけが変わる', origin: '記入者（合成）', observation: 'database_rows', observation_label: '基盤が試験値に一致する試験用DBの行を直接読み出した結果', support: 'judged', trial_checks: [{ id: 'patient-a-row', fingerprint: 'e'.repeat(64), label: '患者Aの保存（合成）' }], status: 'definition_changed', status_label: '対応づけた後に判定条件の内容が変わった。人が対応づけを確認し直す', detail: '判定条件 patient-a-row は、対応づけた時点と内容が違う',
+      link_changes: [{ link_id: 'patient-a-row', fingerprint: 'e'.repeat(64), state: 'changed', basis_source: '対応づけた時点に麦漆が保存した設定', changes: [{ section: 'DBの問い合わせ先', path: 'browser.database[patient-a].table', before: 'form_soap', after: '<img src=x onerror=alert(2)>' }], uncomparable: ['コンテナの環境変数の値は記録しないため、値の変更は比較していない（名前の追加・削除は表示する）'] }] },
     { id: 'p2', text: '外部へ送信されない', origin: '記入者（合成）', observation: 'external_destination', observation_label: '試験用ネットワークの外にある送信先の特定', support: 'unsupported', trial_checks: [], status: 'unsupported', status_label: '基盤が観測できない', detail: '試験用ネットワークの外にある送信先の特定は基盤が観測できない' },
     { id: 'p3', text: '<img src=x onerror=alert(1)>', origin: '記入者（合成）', observation: 'database_rows', observation_label: '基盤が試験値に一致する試験用DBの行を直接読み出した結果', support: 'judged', trial_checks: [{ id: 'soap-plan', fingerprint: 'f'.repeat(64), label: '<img src=x onerror=alert(1)>' }], status: 'contradicted', status_label: '期待と異なる観測', detail: '判定条件 soap-plan（DB照合）: 期待と異なる' },
   ] };
@@ -81,6 +83,13 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
     assert.match(await coverage.locator('[data-aspect-status="unsupported"]').innerText(), /麦漆では観測できない/);
     assert.match(await coverage.locator('[data-aspect-status="contradicted"]').innerText(), /期待と異なる観測/);
     assert.match(await coverage.innerText(), /未確認として残る部分: 2 件/);
+    // 内容が変わった対応づけは、対応づけた時点とこの試行の設定の違いを示す。値は文字列として表示する。
+    const changes = coverage.locator('[data-aspect-changes="p4"]');
+    assert.match(await changes.innerText(), /DBの問い合わせ先（1 件）/);
+    assert.match(await changes.innerText(), /対応づけた時点: form_soap/);
+    assert.match(await changes.innerText(), /この試行: <img src=x onerror=alert\(2\)>/);
+    assert.match(await changes.locator('[data-uncomparable]').innerText(), /環境変数の値は記録しない/);
+    assert.equal(await coverage.locator('img').count(), 0);
     assert.match(await browserEvidence.innerText(), /操作が未完了となった後の表示/);
     assert.equal(await browserEvidence.locator('img').count(), 0);
     assert.match(await page.locator('[data-result-questions]').innerText(), /想定した保存先はどこか/);

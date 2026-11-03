@@ -130,6 +130,10 @@ pub struct Check {
     /// 試験の合否とは別に照合する。旧形式の記録にはない。
     #[serde(default)]
     pub aspects: Vec<crate::coverage::Aspect>,
+    /// 対応づけた時点の試験設定（環境変数の値を伏せた形）。対応づけが参照するものだけを置き、
+    /// 設定が変わったときに何が変わったかを示すために使う。旧形式の記録にはない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_settings: Vec<crate::coverage::SettingsRecord>,
 }
 
 /// 確認事項が参照するコード。実行したコードとの一致を証明する情報ではない。
@@ -546,6 +550,7 @@ fn validate_check(check: &Check) -> io::Result<()> {
     unique(check.dependencies.iter().map(String::as_str))?;
     unique(check.questions.iter().map(|q| q.id.as_str()))?;
     crate::coverage::validate(&check.aspects)?;
+    crate::coverage::validate_settings(&check.aspects, &check.link_settings)?;
     for q in &check.questions {
         nonempty(&q.text, "質問")?;
         match (&q.answer, &q.origin) {
@@ -994,7 +999,8 @@ pub fn view(workspace: Workspace) -> WorkspaceView {
                     .iter()
                     .find(|raw| raw.id == e.id)
             });
-            let coverage = crate::coverage::assess(check, applicable_last);
+            let coverage =
+                crate::coverage::assess(check, applicable_last, &workspace.evidence);
             let next = if let Some(question) = unanswered.first() {
                 SuggestedAction {
                     kind: ActionKind::Ask,
@@ -1335,6 +1341,12 @@ pub fn change(directory: &Path, request: ChangeRequest) -> io::Result<WorkspaceV
             if check.version != 1 {
                 return Err(invalid("新しい条件の版は1です"));
             }
+            // 対応づけは set_aspects で登録する。指紋と対応づけた時点の設定は麦漆が作る。
+            if !check.aspects.is_empty() || !check.link_settings.is_empty() {
+                return Err(invalid(
+                    "確かめる部分の対応づけは、条件を記録した後に set_aspects で登録してください",
+                ));
+            }
             workspace.checks.push(check);
             "add_check"
         }
@@ -1387,15 +1399,16 @@ pub fn change(directory: &Path, request: ChangeRequest) -> io::Result<WorkspaceV
             "add_question"
         }
         Change::SetAspects { check_id, aspects } => {
-            let aspects = crate::coverage::normalize(aspects)?;
             let i = find_check(&workspace.checks, &check_id)?;
+            let (aspects, settings) = crate::coverage::normalize(aspects, &workspace.checks[i])?;
             let check = &mut workspace.checks[i];
-            if check.aspects == aspects {
+            if check.aspects == aspects && check.link_settings == settings {
                 return Err(invalid("同じ対応づけが既に記録されています"));
             }
             // 対応づけは試行結果の解釈であり、条件の意味は変えない。既存の試行は適用できるまま、
             // 現在の対応づけで照合し直す。
             check.aspects = aspects;
+            check.link_settings = settings;
             "set_aspects"
         }
         Change::ReviseCheck {
@@ -1415,6 +1428,7 @@ pub fn change(directory: &Path, request: ChangeRequest) -> io::Result<WorkspaceV
                 }
                 // 条件の意味が変わると、前の文に対して登録した部分の対応づけは使えない。
                 check.aspects.clear();
+                check.link_settings.clear();
             }
             check.version = check
                 .version

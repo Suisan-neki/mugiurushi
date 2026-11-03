@@ -6,8 +6,12 @@ use crate::execution::{Criterion, Recipe};
 use crate::trial::{CheckMethod, Observed, TrialCheck};
 use crate::workspace::{Check, Evidence};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, io};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+};
 
 pub const MAX_ASPECTS: usize = 32;
 const MAX_LINKS: usize = 32;
@@ -218,28 +222,6 @@ pub fn trial_check_fingerprint(check: &TrialCheck, recipe: &Recipe) -> String {
             .unwrap_or_default();
     format!("{:x}", Sha256::digest(bytes))
 }
-/// 試験の各判定条件の識別子・指紋・説明。画面が現在の設定と保存済みの対応づけを比べるために使う。
-#[derive(Debug, Clone, Serialize)]
-pub struct Fingerprint {
-    pub id: String,
-    pub fingerprint: String,
-    pub label: String,
-}
-pub fn fingerprints(recipe: &Recipe) -> io::Result<Vec<Fingerprint>> {
-    let spec = recipe
-        .trial
-        .as_ref()
-        .ok_or_else(|| invalid("試験案（判定条件）のない設定です"))?;
-    Ok(spec
-        .checks
-        .iter()
-        .map(|c| Fingerprint {
-            id: c.id.clone(),
-            fingerprint: trial_check_fingerprint(c, recipe),
-            label: link_label(c, recipe),
-        })
-        .collect())
-}
 fn link_label(definition: &TrialCheck, recipe: &Recipe) -> String {
     let fault = recipe
         .trial
@@ -295,10 +277,17 @@ pub struct TrialLink {
     /// 送らない対応づけは、保存済みの指紋をそのまま保つ（人が選び直すまで更新しない）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<LinkDefinition>,
+    /// 対応づけた時点の判定条件と、伏せた試験設定の識別子。基盤が`definition`から作り、
+    /// 変更内容を人に示すために使う。この機能より前の対応づけにはない。利用者からは受け取らない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<LinkBasis>,
 }
 impl PartialEq for TrialLink {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.fingerprint == other.fingerprint && self.label == other.label
+        self.id == other.id
+            && self.fingerprint == other.fingerprint
+            && self.label == other.label
+            && self.basis == other.basis
     }
 }
 impl Eq for TrialLink {}
@@ -320,9 +309,69 @@ pub struct Aspect {
     pub trial_checks: Vec<TrialLink>,
 }
 
-/// 登録時の入力を保存する形にする。判定条件の内容が送られていれば指紋と説明に変え、
-/// 指紋も内容もない対応づけは拒否する。試験案を使わない試行は`definition`なしで判定の指紋を送る。
-pub fn normalize(aspects: Vec<Aspect>) -> io::Result<Vec<Aspect>> {
+/// 対応づけた時点の判定条件と、その試験設定（秘密になりうる値を伏せた形）の識別子。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkBasis {
+    pub check: TrialCheck,
+    /// `Check.link_settings`に置いた、伏せた試験設定の識別子（その内容のSHA-256）。
+    pub settings: String,
+}
+
+/// 対応づけた時点の試験設定。同じ試験設定を参照する対応づけで共有する。
+/// コンテナの環境変数の値は伏せ、名前だけを残す。指紋は伏せる前の設定から計算するため、
+/// 伏せた値の変更は指紋の不一致として検出できるが、変更内容は示せない。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsRecord {
+    pub id: String,
+    pub settings: Value,
+}
+
+/// 記録しない値の代わりに置く文字列。
+pub const WITHHELD: &str = "（記録しない値）";
+const MAX_SETTINGS: usize = 8;
+const MAX_SETTINGS_BYTES: usize = 1024 * 1024;
+
+/// 対応づけの記録と比較に使う試験設定。指紋の対象と同じ項目から、コンテナの環境変数の値を伏せる。
+pub fn recorded_settings(recipe: &Recipe) -> Value {
+    let mut context = trial_context(recipe);
+    if let Some(services) = context
+        .pointer_mut("/containers/services")
+        .and_then(Value::as_array_mut)
+    {
+        for service in services {
+            if let Some(env) = service.get_mut("env").and_then(Value::as_object_mut) {
+                for value in env.values_mut() {
+                    *value = Value::String(WITHHELD.into());
+                }
+            }
+        }
+    }
+    context
+}
+fn settings_id(settings: &Value) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(settings).unwrap_or_default())
+    )
+}
+
+/// 登録時の入力を保存する形にする。判定条件の内容（`definition`）が送られていれば、基盤が指紋・説明と
+/// 対応づけた時点の設定の記録に変える。内容を送らない対応づけは、同じ識別子・指紋の保存済みの対応づけが
+/// あればその説明と記録を保ち（利用者が送った説明では上書きしない）、なければ送られた指紋を受け取る
+/// （試験案を使わない試行の判定、旧形式）。記録（`basis`）は利用者から受け取らない。
+/// 戻り値は保存する部分と、それらが参照する試験設定の記録。
+pub fn normalize(
+    aspects: Vec<Aspect>,
+    stored: &Check,
+) -> io::Result<(Vec<Aspect>, Vec<SettingsRecord>)> {
+    let stored_links: Vec<&TrialLink> = stored
+        .aspects
+        .iter()
+        .flat_map(|a| &a.trial_checks)
+        .collect();
+    let mut settings: BTreeMap<String, Value> = BTreeMap::new();
     let mut result = Vec::with_capacity(aspects.len());
     for mut aspect in aspects {
         for link in &mut aspect.trial_checks {
@@ -338,6 +387,29 @@ pub fn normalize(aspects: Vec<Aspect>) -> io::Result<Vec<Aspect>> {
                 }
                 link.fingerprint = trial_check_fingerprint(&check, &recipe);
                 link.label = link_label(&check, &recipe);
+                let recorded = recorded_settings(&recipe);
+                let id = settings_id(&recorded);
+                settings.insert(id.clone(), recorded);
+                link.basis = Some(LinkBasis {
+                    check,
+                    settings: id,
+                });
+            } else if let Some(previous) = stored_links
+                .iter()
+                .find(|l| l.id == link.id && l.fingerprint == link.fingerprint)
+            {
+                link.label = previous.label.clone();
+                link.basis = previous.basis.clone();
+                if let Some(basis) = &previous.basis
+                    && let Some(record) =
+                        stored.link_settings.iter().find(|r| r.id == basis.settings)
+                {
+                    settings.insert(record.id.clone(), record.settings.clone());
+                }
+            } else if link.basis.is_some() {
+                return Err(invalid(
+                    "対応づけた時点の設定の記録は麦漆が作ります。判定条件の内容（definition）を送ってください",
+                ));
             }
             if link.fingerprint.len() != 64
                 || !link.fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
@@ -350,8 +422,48 @@ pub fn normalize(aspects: Vec<Aspect>) -> io::Result<Vec<Aspect>> {
         }
         result.push(aspect);
     }
+    let settings: Vec<SettingsRecord> = settings
+        .into_iter()
+        .map(|(id, settings)| SettingsRecord { id, settings })
+        .collect();
     validate(&result)?;
-    Ok(result)
+    validate_settings(&result, &settings)?;
+    Ok((result, settings))
+}
+
+/// 対応づけた時点の設定の記録を検査する。識別子は内容のSHA-256で、参照されている記録だけを置く。
+pub fn validate_settings(aspects: &[Aspect], settings: &[SettingsRecord]) -> io::Result<()> {
+    let referenced: BTreeSet<&str> = aspects
+        .iter()
+        .flat_map(|a| &a.trial_checks)
+        .filter_map(|l| l.basis.as_ref().map(|b| b.settings.as_str()))
+        .collect();
+    let mut ids = BTreeSet::new();
+    let mut bytes = 0;
+    for record in settings {
+        bytes += serde_json::to_vec(&record.settings)
+            .map_err(io::Error::other)?
+            .len();
+        if record.id != settings_id(&record.settings)
+            || !ids.insert(record.id.as_str())
+            || !referenced.contains(record.id.as_str())
+        {
+            return Err(invalid("対応づけた時点の設定の記録が不正です"));
+        }
+    }
+    if settings.len() > MAX_SETTINGS || bytes > MAX_SETTINGS_BYTES {
+        return Err(invalid(format!(
+            "対応づけた試験設定が{MAX_SETTINGS}種類・1MiBを超えます。使っていない対応づけを外してください"
+        )));
+    }
+    for link in aspects.iter().flat_map(|a| &a.trial_checks) {
+        if let Some(basis) = &link.basis
+            && (basis.check.id != link.id || !ids.contains(basis.settings.as_str()))
+        {
+            return Err(invalid("対応づけた時点の設定の記録が見つかりません"));
+        }
+    }
+    Ok(())
 }
 
 pub fn validate(aspects: &[Aspect]) -> io::Result<()> {
@@ -539,6 +651,9 @@ pub struct AspectView {
     pub status: AspectStatus,
     pub status_label: String,
     pub detail: String,
+    /// 内容が変わった対応づけについて、対応づけた時点と試行の設定の違い。旧形式の記録にはない。
+    #[serde(default)]
+    pub link_changes: Vec<LinkComparison>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -581,7 +696,8 @@ pub fn undeclared() -> Coverage {
 }
 
 /// 確認項目の各部分を、適用できる最新の試行と照合する。`evidence`は適用できる試行だけを渡す。
-pub fn assess(check: &Check, evidence: Option<&Evidence>) -> Coverage {
+/// `all_evidence`は、旧形式の対応づけについて対応づけた時点の設定を探すためだけに使い、判定には使わない。
+pub fn assess(check: &Check, evidence: Option<&Evidence>, all_evidence: &[Evidence]) -> Coverage {
     if check.aspects.is_empty() {
         return undeclared();
     }
@@ -605,6 +721,9 @@ pub fn assess(check: &Check, evidence: Option<&Evidence>) -> Coverage {
                 status_label: status.label().to_owned(),
                 status,
                 detail,
+                link_changes: evidence
+                    .map(|e| changed_links(check, a, e, &items, all_evidence))
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -743,6 +862,370 @@ fn status_of(aspect: &Aspect, has_evidence: bool, items: &[Item]) -> (AspectStat
     (worst, details.join("、"))
 }
 
+/// 対応づけた時点と現在で、試験設定の一つの値がどう変わったか。値がなければ None。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingChange {
+    /// 人が読む区分（判定条件、ブラウザ操作、DBの問い合わせ先など）。
+    pub section: String,
+    /// 区分の中の場所。配列は識別子（id・name）があればそれで示す。
+    pub path: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkState {
+    /// 現在の設定でも、対応づけた時点と指紋が一致する。
+    Unchanged,
+    /// 指紋が一致しない。対応づけは適用されない。
+    Changed,
+    /// 現在の設定に、同じ識別子の判定条件がない。
+    NotInTrial,
+}
+
+/// 一つの対応づけについて、対応づけた時点の設定と、現在（または試行）の設定の比較。
+/// 指紋の一致・不一致は基盤が判定する。違いの一覧は記録した設定どうしの比較で、
+/// 記録していない値（コンテナの環境変数の値）の違いは示せない。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkComparison {
+    pub link_id: String,
+    /// 対応づけた時点の指紋。
+    pub fingerprint: String,
+    pub state: LinkState,
+    /// 比較に使った、対応づけた時点の設定の出所。見つからなければ None。
+    pub basis_source: Option<String>,
+    pub changes: Vec<SettingChange>,
+    /// 比較できなかったこと。推測で補わず、そのまま示す。
+    pub uncomparable: Vec<String>,
+}
+
+const WITHHELD_NOTE: &str = "コンテナの環境変数の値は記録しないため、値の変更は比較していない（名前の追加・削除は表示する）";
+const MAX_SHOWN: usize = 300;
+
+/// 対応づけた時点の判定条件と試験設定を探す。保存した記録を優先し、なければ（この機能より前の対応づけ）
+/// 同じ確認項目の試行のうち、同じ識別子・同じ指紋の判定条件で実行した記録から復元する。
+fn resolve_basis(
+    link: &TrialLink,
+    check: &Check,
+    evidence: &[Evidence],
+) -> Option<(TrialCheck, Value, String)> {
+    if let Some(basis) = &link.basis
+        && let Some(record) = check.link_settings.iter().find(|r| r.id == basis.settings)
+    {
+        return Some((
+            basis.check.clone(),
+            record.settings.clone(),
+            "対応づけた時点に麦漆が保存した設定".into(),
+        ));
+    }
+    evidence
+        .iter()
+        .filter(|e| e.check_id == check.id)
+        .find_map(|e| {
+            let recipe = &e.execution.as_ref()?.recipe;
+            let c = recipe.trial.as_ref()?.checks.iter().find(|c| {
+                c.id == link.id && trial_check_fingerprint(c, recipe) == link.fingerprint
+            })?;
+            Some((
+                c.clone(),
+                recorded_settings(recipe),
+                format!("同じ指紋の判定条件で実行した試行 {} の記録", e.id),
+            ))
+        })
+}
+
+/// 対応づけを、現在（または試行）の判定条件と試験設定に照らして比べる。
+pub fn compare_link(
+    link: &TrialLink,
+    check: &Check,
+    current: Option<(&TrialCheck, &Recipe)>,
+    evidence: &[Evidence],
+) -> LinkComparison {
+    let mut comparison = LinkComparison {
+        link_id: link.id.clone(),
+        fingerprint: link.fingerprint.clone(),
+        state: LinkState::NotInTrial,
+        basis_source: None,
+        changes: vec![],
+        uncomparable: vec![],
+    };
+    let Some((current_check, recipe)) = current else {
+        return comparison;
+    };
+    if trial_check_fingerprint(current_check, recipe) == link.fingerprint {
+        comparison.state = LinkState::Unchanged;
+        return comparison;
+    }
+    comparison.state = LinkState::Changed;
+    let Some((before_check, before_settings, source)) = resolve_basis(link, check, evidence) else {
+        comparison.uncomparable.push(
+            "対応づけた時点の設定が保存されていない（この機能より前に作った対応づけ）。同じ指紋で実行した試行の記録もないため、何が変わったかは示せない".into(),
+        );
+        return comparison;
+    };
+    comparison.basis_source = Some(source);
+    let after_settings = recorded_settings(recipe);
+    let withheld = has_withheld(&before_settings) || has_withheld(&after_settings);
+    comparison.changes = diff(
+        &serde_json::json!({"check": before_check, "settings": before_settings}),
+        &serde_json::json!({"check": current_check, "settings": after_settings}),
+    );
+    if comparison.changes.is_empty() {
+        comparison.uncomparable.push(if withheld {
+            "記録した項目には違いがない。記録しない値（コンテナの環境変数の値）が変わった可能性があるが、麦漆は内容を比較していない".into()
+        } else {
+            "記録した項目には違いがないが、指紋が一致しない。原因は特定できていない".into()
+        });
+    } else if withheld {
+        comparison.uncomparable.push(WITHHELD_NOTE.into());
+    }
+    comparison
+}
+
+/// 試行で内容が変わった対応づけの比較。試験案を使わない試行は観測名と対象の指紋だけで照合する。
+fn changed_links(
+    check: &Check,
+    aspect: &Aspect,
+    evidence: &Evidence,
+    items: &[Item],
+    all_evidence: &[Evidence],
+) -> Vec<LinkComparison> {
+    aspect
+        .trial_checks
+        .iter()
+        .filter(|l| {
+            items.iter().any(|i| {
+                i.id == l.id && Some(i.kind) == aspect.observation && i.fingerprint != l.fingerprint
+            })
+        })
+        .map(|l| {
+            let trial = evidence.execution.as_ref().and_then(|t| {
+                let c = t.recipe.trial.as_ref()?.checks.iter().find(|c| c.id == l.id)?;
+                Some((c, &t.recipe))
+            });
+            if trial.is_some() {
+                return compare_link(l, check, trial, all_evidence);
+            }
+            LinkComparison {
+                link_id: l.id.clone(),
+                fingerprint: l.fingerprint.clone(),
+                state: LinkState::Changed,
+                basis_source: None,
+                changes: vec![],
+                uncomparable: vec![
+                    "試験案を使わない試行の判定（観測名と対象）は指紋だけで照合しており、変更内容は示せない".into(),
+                ],
+            }
+        })
+        .collect()
+}
+
+/// 画面の確認用。確認項目に保存した対応づけを、これから実行する試験設定と比べる。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkChangesRequest {
+    pub check_id: String,
+    pub recipe: Recipe,
+}
+pub fn link_changes(
+    workspace: &crate::workspace::Workspace,
+    request: &LinkChangesRequest,
+) -> io::Result<Vec<LinkComparison>> {
+    let check = workspace
+        .checks
+        .iter()
+        .find(|c| c.id == request.check_id)
+        .ok_or_else(|| invalid("確認項目が見つかりません"))?;
+    let spec = request
+        .recipe
+        .trial
+        .as_ref()
+        .ok_or_else(|| invalid("試験案（判定条件）のない設定です"))?;
+    let mut seen = BTreeSet::new();
+    Ok(check
+        .aspects
+        .iter()
+        .flat_map(|a| &a.trial_checks)
+        .filter(|l| seen.insert((l.id.clone(), l.fingerprint.clone())))
+        .map(|l| {
+            let current = spec
+                .checks
+                .iter()
+                .find(|c| c.id == l.id)
+                .map(|c| (c, &request.recipe));
+            compare_link(l, check, current, &workspace.evidence)
+        })
+        .collect())
+}
+
+fn has_withheld(settings: &Value) -> bool {
+    settings
+        .pointer("/containers/services")
+        .and_then(Value::as_array)
+        .is_some_and(|services| {
+            services.iter().any(|s| {
+                s.get("env")
+                    .and_then(Value::as_object)
+                    .is_some_and(|env| !env.is_empty())
+            })
+        })
+}
+
+fn section(path: &str) -> &'static str {
+    let rest = match path.strip_prefix("settings.") {
+        Some(rest) => rest,
+        None => return "判定条件",
+    };
+    let head = |p: &str| {
+        rest == p
+            || [".", "[", "（"]
+                .iter()
+                .any(|sep| rest.starts_with(&format!("{p}{sep}")))
+    };
+    for (prefix, label) in [
+        ("browser.preparation", "ブラウザの準備"),
+        ("browser.actions", "ブラウザ操作"),
+        ("browser.responses", "観測するHTTP応答"),
+        ("browser.database", "DBの問い合わせ先"),
+        ("browser.http_reads", "直接要求する読み出し"),
+        ("browser.rejection", "拒否の観測"),
+        ("browser", "ブラウザの設定"),
+        ("runtime", "実行方式"),
+        ("launch", "起動のしかた"),
+        ("entrypoint", "操作対象（起動するファイル・HTTPのパス）"),
+        ("args", "引数"),
+        ("input", "入力"),
+        ("fault", "故障の条件"),
+        ("storage", "保存先"),
+        ("readback", "読み直し"),
+        ("python", "Pythonの読み込み先と依存先"),
+        ("server", "先に起動して待つプロセス"),
+        ("containers", "試験用コンテナ"),
+        ("http", "HTTP操作"),
+    ] {
+        if head(prefix) {
+            return label;
+        }
+    }
+    "その他の設定"
+}
+
+fn shown(value: &str) -> String {
+    if value.chars().count() <= MAX_SHOWN {
+        return value.to_owned();
+    }
+    let head: String = value.chars().take(MAX_SHOWN).collect();
+    format!("{head}…（以下省略）")
+}
+
+/// 配列の要素を、すべてが一意の`id`か`name`を持てばその値で示す。
+fn keyed(items: &[Value]) -> Option<Vec<String>> {
+    ["id", "name"].iter().find_map(|field| {
+        let keys: Vec<String> = items
+            .iter()
+            .map(|v| v.get(*field).and_then(Value::as_str).map(str::to_owned))
+            .collect::<Option<_>>()?;
+        let unique: BTreeSet<_> = keys.iter().collect();
+        (unique.len() == keys.len()).then_some(keys)
+    })
+}
+
+fn leaf(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Array(items) if items.is_empty() => None,
+        Value::Object(map) if map.is_empty() => None,
+        Value::String(s) => Some(shown(s)),
+        other => Some(shown(&other.to_string())),
+    }
+}
+
+/// 二つの値を再帰的に比べる。識別子のある配列は要素を識別子で対応させ、並び順の違いも示す。
+/// 片方にしかない要素は一つの値として示す。
+fn walk(
+    path: &str,
+    before: &Value,
+    after: &Value,
+    out: &mut Vec<(String, Option<String>, Option<String>)>,
+) {
+    if before == after {
+        return;
+    }
+    match (before, after) {
+        (Value::Object(a), Value::Object(b)) => {
+            let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+            for key in keys {
+                walk(
+                    &format!("{path}.{key}"),
+                    a.get(key).unwrap_or(&Value::Null),
+                    b.get(key).unwrap_or(&Value::Null),
+                    out,
+                );
+            }
+        }
+        (Value::Array(a), Value::Array(b))
+            if !a.is_empty() && !b.is_empty() && a.iter().chain(b).all(Value::is_object) =>
+        {
+            if let (Some(ka), Some(kb)) = (keyed(a), keyed(b)) {
+                if ka != kb {
+                    out.push((
+                        format!("{path}（順序）"),
+                        Some(ka.join(" → ")),
+                        Some(kb.join(" → ")),
+                    ));
+                }
+                let keys: BTreeSet<&String> = ka.iter().chain(&kb).collect();
+                for key in keys {
+                    let find = |keys: &[String], items: &[Value]| {
+                        keys.iter()
+                            .position(|k| k == key)
+                            .map(|n| items[n].clone())
+                            .unwrap_or(Value::Null)
+                    };
+                    walk(&format!("{path}[{key}]"), &find(&ka, a), &find(&kb, b), out);
+                }
+            } else {
+                for n in 0..a.len().max(b.len()) {
+                    walk(
+                        &format!("{path}[{}]", n + 1),
+                        a.get(n).unwrap_or(&Value::Null),
+                        b.get(n).unwrap_or(&Value::Null),
+                        out,
+                    );
+                }
+            }
+        }
+        _ => {
+            let (a, b) = (leaf(before), leaf(after));
+            if a != b {
+                out.push((path.into(), a, b));
+            }
+        }
+    }
+}
+
+/// 二つの記録の違いを、値ごとに示す。
+pub fn diff(before: &Value, after: &Value) -> Vec<SettingChange> {
+    let mut out = vec![];
+    walk("", before, after, &mut out);
+    out.into_iter()
+        .map(|(full, before, after)| {
+            let full = full.trim_start_matches('.');
+            let path = full
+                .strip_prefix("settings.")
+                .or_else(|| full.strip_prefix("check."))
+                .unwrap_or(full);
+            SettingChange {
+                section: section(full).into(),
+                path: path.into(),
+                before,
+                after,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,6 +1244,7 @@ mod tests {
                     fingerprint: FP.into(),
                     label: String::new(),
                     definition: None,
+                    basis: None,
                 })
                 .collect(),
         }
@@ -772,6 +1256,21 @@ mod tests {
             scope: "範囲".into(),
             fingerprint: FP.into(),
             observed,
+        }
+    }
+    fn stored(aspects: Vec<Aspect>, link_settings: Vec<SettingsRecord>) -> Check {
+        Check {
+            id: "concern".into(),
+            version: 1,
+            text: "合成の確認項目".into(),
+            origin: "試験".into(),
+            source: None,
+            observation: None,
+            rule: crate::workspace::Rule::ManualOnly,
+            dependencies: vec![],
+            questions: vec![],
+            aspects,
+            link_settings,
         }
     }
     fn trial_check(id: &str, text: &str) -> TrialCheck {
@@ -854,13 +1353,15 @@ mod tests {
                 check: a.clone(),
                 recipe: ra.clone(),
             }),
+            basis: None,
         });
-        let saved = normalize(vec![aspect]).unwrap();
+        let (saved, settings) = normalize(vec![aspect], &stored(vec![], vec![])).unwrap();
         let link = &saved[0].trial_checks[0];
         assert_eq!(link.fingerprint, trial_check_fingerprint(&a, &ra));
         assert!(link.definition.is_none());
         assert!(link.label.contains("範囲") && link.label.contains("patient-a"));
-        assert_eq!(fingerprints(&ra).unwrap()[0].fingerprint, link.fingerprint);
+        assert_eq!(link.basis.as_ref().unwrap().check, a);
+        assert_eq!(settings.len(), 1);
         let mut changed = item("c1", ObservationKind::DatabaseRows, Some(Observed::Pass));
         changed.fingerprint = trial_check_fingerprint(&a, &other_patient);
         assert_eq!(
@@ -874,8 +1375,11 @@ mod tests {
             AspectStatus::Observed
         );
         // 内容を送らない対応づけは保存済みの指紋を保ち、現在の試験に合わせて更新しない。
-        let kept = normalize(saved.clone()).unwrap();
+        let check = stored(saved.clone(), settings.clone());
+        let (kept, kept_settings) = normalize(saved.clone(), &check).unwrap();
         assert_eq!(kept[0].trial_checks[0].fingerprint, link.fingerprint);
+        assert_eq!(kept[0].trial_checks[0].basis, link.basis);
+        assert_eq!(kept_settings, settings);
         // 内容も指紋もない対応づけ、識別子や内容が試験の設定と食い違う対応づけは拒否する。
         let mut bare = super::Aspect {
             trial_checks: vec![TrialLink {
@@ -883,20 +1387,25 @@ mod tests {
                 fingerprint: String::new(),
                 label: String::new(),
                 definition: None,
+                basis: None,
             }],
             ..saved[0].clone()
         };
-        assert!(normalize(vec![bare.clone()]).is_err());
+        let empty = stored(vec![], vec![]);
+        assert!(normalize(vec![bare.clone()], &empty).is_err());
         bare.trial_checks[0].definition = Some(LinkDefinition {
             check: trial_check("c2", "x"),
             recipe: ra.clone(),
         });
-        assert!(normalize(vec![bare.clone()]).is_err());
+        assert!(normalize(vec![bare.clone()], &empty).is_err());
         bare.trial_checks[0].definition = Some(LinkDefinition {
             check: b.clone(),
             recipe: ra,
         });
-        assert!(normalize(vec![bare]).is_err(), "試験の設定にない内容");
+        assert!(
+            normalize(vec![bare], &empty).is_err(),
+            "試験の設定にない内容"
+        );
     }
 
     #[test]
@@ -1032,5 +1541,190 @@ mod tests {
         let mut empty = aspect(None, &[]);
         empty.text = " ".into();
         assert!(validate(&[empty]).is_err());
+    }
+
+    fn bundled(n: usize) -> Recipe {
+        let catalog = crate::browser_recipes::catalog().unwrap();
+        serde_json::from_value(catalog["recipes"][n]["recipe"].clone()).unwrap()
+    }
+    fn link_to(recipe: &Recipe, id: &str) -> (Vec<Aspect>, Vec<SettingsRecord>) {
+        let check = recipe
+            .trial
+            .as_ref()
+            .unwrap()
+            .checks
+            .iter()
+            .find(|c| c.id == id)
+            .unwrap()
+            .clone();
+        let mut a = aspect(Some(ObservationKind::of_method(check.method)), &[]);
+        a.trial_checks.push(TrialLink {
+            id: id.into(),
+            fingerprint: String::new(),
+            label: String::new(),
+            definition: Some(LinkDefinition {
+                check,
+                recipe: recipe.clone(),
+            }),
+            basis: None,
+        });
+        normalize(vec![a], &stored(vec![], vec![])).unwrap()
+    }
+    fn current<'a>(recipe: &'a Recipe, id: &str) -> Option<(&'a TrialCheck, &'a Recipe)> {
+        recipe
+            .trial
+            .as_ref()
+            .unwrap()
+            .checks
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| (c, recipe))
+    }
+
+    /// ブラウザ操作・DBの問い合わせ先・故障の変更を、対応づけた時点と現在の値で示す。
+    /// 環境変数の値は記録に残さず、値だけの変更は「比較できない」として示す。
+    #[test]
+    fn changed_settings_are_listed_with_before_and_after_and_secrets_are_not_recorded() {
+        let normal = bundled(0);
+        let (aspects, settings) = link_to(&normal, "soap-subjective-row");
+        let check = stored(aspects.clone(), settings.clone());
+        let saved = serde_json::to_string(&check).unwrap();
+        assert!(
+            !saved.contains("eel-root-trial") && !saved.contains("eel-pass-trial"),
+            "試験用の認証情報を対応づけの記録に残さない"
+        );
+        assert!(saved.contains("MYSQL_ROOT_PASSWORD") && saved.contains(WITHHELD));
+        let link = &aspects[0].trial_checks[0];
+        let same = compare_link(link, &check, current(&normal, "soap-subjective-row"), &[]);
+        assert_eq!(same.state, LinkState::Unchanged);
+        assert!(same.changes.is_empty());
+
+        // DB停止の試験: 故障の条件と、保存前の操作が準備へ移ったことを示す。
+        let stopped = bundled(1);
+        let c = compare_link(link, &check, current(&stopped, "soap-subjective-row"), &[]);
+        assert_eq!(c.state, LinkState::Changed);
+        assert_eq!(
+            c.basis_source.as_deref(),
+            Some("対応づけた時点に麦漆が保存した設定")
+        );
+        let fault = c
+            .changes
+            .iter()
+            .find(|x| x.section == "故障の条件")
+            .unwrap();
+        assert_eq!(fault.before.as_deref(), Some("normal"));
+        assert_eq!(fault.after.as_deref(), Some("database_stopped"));
+        assert!(c.changes.iter().any(|x| x.section == "ブラウザの準備"));
+        let listed: Vec<_> = c
+            .changes
+            .iter()
+            .map(|x| (&x.section, &x.path, &x.before, &x.after))
+            .collect();
+        assert!(
+            c.changes
+                .iter()
+                .any(|x| x.section == "ブラウザ操作" && x.path.ends_with("（順序）")),
+            "{listed:#?}"
+        );
+        assert!(c.uncomparable.iter().any(|u| u.contains("環境変数")));
+
+        // DBの問い合わせ先（表）だけを変える。
+        let mut table = normal.clone();
+        table.browser.as_mut().unwrap().database[0].table = "other_table".into();
+        let c = compare_link(link, &check, current(&table, "soap-subjective-row"), &[]);
+        assert_eq!(c.state, LinkState::Changed);
+        let changed: Vec<_> = c
+            .changes
+            .iter()
+            .map(|x| (x.section.as_str(), x.after.as_deref()))
+            .collect();
+        assert_eq!(
+            changed,
+            vec![("DBの問い合わせ先", Some("other_table"))],
+            "{c:?}"
+        );
+
+        // 環境変数の値だけを変える。指紋は変わるが、記録した項目には違いがない。
+        let mut env = normal.clone();
+        env.containers.as_mut().unwrap().services[0]
+            .env
+            .insert("MYSQL_ROOT_PASSWORD".into(), "eel-other-trial".into());
+        let c = compare_link(link, &check, current(&env, "soap-subjective-row"), &[]);
+        assert_eq!(c.state, LinkState::Changed);
+        assert!(c.changes.is_empty());
+        assert!(c.uncomparable[0].contains("記録しない値"), "{c:?}");
+        assert!(
+            !serde_json::to_string(&c)
+                .unwrap()
+                .contains("eel-other-trial")
+        );
+
+        // 判定条件そのものの変更は「判定条件」の区分で示す。
+        let mut expect = normal.clone();
+        expect
+            .trial
+            .as_mut()
+            .unwrap()
+            .checks
+            .iter_mut()
+            .find(|c| c.id == "soap-subjective-row")
+            .unwrap()
+            .expect = crate::trial::Expectation::NotContains;
+        let c = compare_link(link, &check, current(&expect, "soap-subjective-row"), &[]);
+        assert_eq!(c.changes.len(), 1, "{c:?}");
+        assert_eq!(c.changes[0].section, "判定条件");
+        assert_eq!(c.changes[0].path, "expect");
+
+        // 試験にない判定条件。
+        let c = compare_link(link, &check, None, &[]);
+        assert_eq!(c.state, LinkState::NotInTrial);
+    }
+
+    /// この機能より前の対応づけ（記録なし）は、推測で補わず比較できないと示す。
+    #[test]
+    fn legacy_links_without_a_recorded_basis_are_reported_as_uncomparable() {
+        let normal = bundled(0);
+        let (mut aspects, _) = link_to(&normal, "soap-subjective-row");
+        aspects[0].trial_checks[0].basis = None;
+        let check = stored(aspects.clone(), vec![]);
+        let c = compare_link(
+            &aspects[0].trial_checks[0],
+            &check,
+            current(&bundled(1), "soap-subjective-row"),
+            &[],
+        );
+        assert_eq!(c.state, LinkState::Changed);
+        assert!(c.basis_source.is_none() && c.changes.is_empty());
+        assert!(c.uncomparable[0].contains("保存されていない"));
+    }
+
+    /// 対応づけた時点の記録は利用者から受け取らず、保存済みの対応づけの説明も上書きさせない。
+    #[test]
+    fn the_basis_and_label_of_a_saved_link_are_kept_by_the_server() {
+        let normal = bundled(0);
+        let (aspects, settings) = link_to(&normal, "soap-subjective-row");
+        let check = stored(aspects.clone(), settings.clone());
+        let mut resent = aspects.clone();
+        resent[0].trial_checks[0].label = "書き換えた説明".into();
+        resent[0].trial_checks[0].basis = None;
+        let (kept, kept_settings) = normalize(resent, &check).unwrap();
+        assert_eq!(kept[0].trial_checks[0], aspects[0].trial_checks[0]);
+        assert_eq!(kept_settings, settings);
+        // 保存済みにない対応づけに、利用者が記録を付けて送ることはできない。
+        let mut forged = aspects.clone();
+        forged[0].trial_checks[0].fingerprint = "f".repeat(64);
+        assert!(normalize(forged, &check).is_err());
+        // 記録の識別子と内容が合わない保存データは読み込めない。
+        let mut tampered = settings.clone();
+        tampered[0].settings["fault"] = serde_json::json!("normal_but_edited");
+        assert!(validate_settings(&aspects, &tampered).is_err());
+        assert!(
+            validate_settings(&aspects, &[]).is_err(),
+            "参照先のない記録"
+        );
+        assert!(
+            validate_settings(&[], &settings).is_err(),
+            "参照されない記録"
+        );
     }
 }

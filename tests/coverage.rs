@@ -98,6 +98,7 @@ impl Fixture {
             dependencies: vec![],
             questions: vec![],
             aspects: vec![],
+            link_settings: vec![],
         });
         initialize(&case, workspace, "合成の記入者", "相談の登録").unwrap();
         let fixture = Self {
@@ -275,6 +276,7 @@ fn aspect_for(
                         check,
                         recipe: recipe.clone(),
                     }),
+                basis: None,
             })
             .collect(),
     }
@@ -781,4 +783,205 @@ fn changing_only_the_operated_target_requires_relinking_and_saving_other_parts_k
     });
     assert_eq!(status(&v, "stored"), AspectStatus::Observed);
     assert!(v.checks[0].verification_passed);
+}
+
+/// 操作対象を変えた試行では、結果の画面・APIに、対応づけた時点と試行の引数の違いを示す。
+/// 別の部分を保存しても、対応づけた時点の記録は変わらない。
+#[test]
+fn changed_trial_shows_what_changed_and_keeps_the_recorded_basis_until_relinked() {
+    let f = Fixture::new("追加したメモは保存される");
+    let source = f.recipe("add", storage_trial(TrialFault::Normal)).source;
+    let mut patient_a = base_recipe("add", &["patient-a"], storage_trial(TrialFault::Normal));
+    patient_a.source = source.clone();
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![aspect_for(
+            &patient_a,
+            "stored",
+            "患者のメモが保存先に書き込まれる",
+            Some(ObservationKind::StoredFile),
+            &["written"],
+        )],
+    });
+    let saved = v.workspace.checks[0].aspects[0].trial_checks[0].clone();
+    assert!(saved.basis.is_some());
+    assert_eq!(v.workspace.checks[0].link_settings.len(), 1);
+
+    let mut patient_b = base_recipe("add", &["patient-b"], storage_trial(TrialFault::Normal));
+    patient_b.source = source;
+    let v = f.run_recipe(patient_b.clone());
+    let aspect = &v.checks[0].coverage.aspects[0];
+    assert_eq!(aspect.status, AspectStatus::DefinitionChanged);
+    assert_eq!(aspect.link_changes.len(), 1);
+    let change = &aspect.link_changes[0];
+    assert_eq!(change.state, mugiurushi::coverage::LinkState::Changed);
+    assert_eq!(change.changes.len(), 1, "{change:?}");
+    assert_eq!(change.changes[0].section, "引数");
+    assert!(
+        change.changes[0]
+            .before
+            .as_deref()
+            .unwrap()
+            .contains("patient-a")
+    );
+    assert!(
+        change.changes[0]
+            .after
+            .as_deref()
+            .unwrap()
+            .contains("patient-b")
+    );
+    assert!(!v.checks[0].verification_passed);
+    assert!(f.release().is_err());
+    // 確認資料には変わった区分の名前だけを載せ、値（操作対象・入力）は載せない。
+    let report = mugiurushi::review_report::html(
+        &mugiurushi::review_report::build(load(&f.case).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        report.contains("対応づけた時点から変わった設定：引数"),
+        "{report}"
+    );
+    let at = report
+        .find("patient-b")
+        .map(|i| &report[i.saturating_sub(400)..(i + 200).min(report.len())]);
+    assert!(at.is_none(), "{at:?}");
+
+    // 画面が実行前に使う比較（同じ処理）でも、同じ違いを示す。
+    let request = mugiurushi::coverage::LinkChangesRequest {
+        check_id: "concern".into(),
+        recipe: patient_b.clone(),
+    };
+    let listed = mugiurushi::coverage::link_changes(&load(&f.case).unwrap(), &request).unwrap();
+    assert_eq!(listed, aspect.link_changes);
+    let request = mugiurushi::coverage::LinkChangesRequest {
+        check_id: "concern".into(),
+        recipe: patient_a.clone(),
+    };
+    let listed = mugiurushi::coverage::link_changes(&load(&f.case).unwrap(), &request).unwrap();
+    assert_eq!(listed[0].state, mugiurushi::coverage::LinkState::Unchanged);
+
+    // 別の部分を足して保存する。既存の対応づけは内容を送らず、利用者が説明を書き換えても保存済みの説明と記録を保つ。
+    let mut kept = v.workspace.checks[0].aspects.clone();
+    kept[0].trial_checks[0].label = "書き換えた説明".into();
+    kept[0].trial_checks[0].basis = None;
+    kept.push(Aspect {
+        id: "note".into(),
+        text: "受付の表示が出る".into(),
+        origin: "合成の記入者".into(),
+        observation: Some(ObservationKind::Stdout),
+        trial_checks: vec![],
+    });
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: kept,
+    });
+    assert_eq!(v.workspace.checks[0].aspects[0].trial_checks[0], saved);
+    assert_eq!(status(&v, "stored"), AspectStatus::DefinitionChanged);
+
+    // 人が変更を確認して選び直すと、記録も新しい設定に替わり、使われなくなった記録は残さない。
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![aspect_for(
+            &patient_b,
+            "stored",
+            "患者のメモが保存先に書き込まれる",
+            Some(ObservationKind::StoredFile),
+            &["written"],
+        )],
+    });
+    assert_eq!(status(&v, "stored"), AspectStatus::Observed);
+    assert!(v.checks[0].coverage.aspects[0].link_changes.is_empty());
+    assert_eq!(v.workspace.checks[0].link_settings.len(), 1);
+    assert_ne!(
+        v.workspace.checks[0].link_settings[0].id,
+        saved.basis.unwrap().settings
+    );
+}
+
+/// この機能より前の対応づけ（指紋だけ）は、同じ指紋で実行した試行の記録から時点の設定を復元する。
+/// 該当する試行がなければ、比較できないと示す。
+#[test]
+fn legacy_fingerprint_only_links_use_a_matching_trial_or_say_they_cannot_be_compared() {
+    let f = Fixture::new("追加したメモは保存される");
+    let source = f.recipe("add", storage_trial(TrialFault::Normal)).source;
+    let mut patient_a = base_recipe("add", &["patient-a"], storage_trial(TrialFault::Normal));
+    patient_a.source = source.clone();
+    let written = patient_a.trial.as_ref().unwrap().checks[1].clone();
+    let legacy = |fingerprint: String| Aspect {
+        id: "stored".into(),
+        text: "患者のメモが保存先に書き込まれる".into(),
+        origin: "旧形式の対応づけ".into(),
+        observation: Some(ObservationKind::StoredFile),
+        trial_checks: vec![TrialLink {
+            id: "written".into(),
+            fingerprint,
+            label: "旧形式の説明".into(),
+            definition: None,
+            basis: None,
+        }],
+    };
+    let fingerprint = mugiurushi::coverage::trial_check_fingerprint(&written, &patient_a);
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![legacy(fingerprint)],
+    });
+    assert!(
+        v.workspace.checks[0].aspects[0].trial_checks[0]
+            .basis
+            .is_none()
+    );
+    let mut patient_b = base_recipe("add", &["patient-b"], storage_trial(TrialFault::Normal));
+    patient_b.source = source;
+    // 対応づけた時点の設定で実行した記録がまだない。
+    let v = f.run_recipe(patient_b.clone());
+    let change = &v.checks[0].coverage.aspects[0].link_changes[0];
+    assert!(change.basis_source.is_none() && change.changes.is_empty());
+    assert!(change.uncomparable[0].contains("保存されていない"));
+    // 患者Aの設定で実行した記録があれば、そこから時点の設定を示す（判定には使わない）。
+    let v = f.run_recipe(patient_a.clone());
+    assert_eq!(status(&v, "stored"), AspectStatus::Observed);
+    let v = f.run_recipe(patient_b);
+    assert_eq!(status(&v, "stored"), AspectStatus::DefinitionChanged);
+    let change = &v.checks[0].coverage.aspects[0].link_changes[0];
+    assert!(
+        change
+            .basis_source
+            .as_deref()
+            .unwrap()
+            .contains("同じ指紋の判定条件で実行した試行"),
+        "{change:?}"
+    );
+    assert_eq!(change.changes[0].section, "引数");
+}
+
+/// 新しい確認項目と一緒に対応づけを送ると、指紋・時点の記録の作成を経ないため拒否する。
+#[test]
+fn a_new_check_cannot_carry_links() {
+    let f = Fixture::new("追加したメモは保存される");
+    let mut check = load(&f.case).unwrap().checks[0].clone();
+    check.id = "other".into();
+    check.aspects = vec![Aspect {
+        id: "a".into(),
+        text: "合成".into(),
+        origin: "合成".into(),
+        observation: Some(ObservationKind::StoredFile),
+        trial_checks: vec![TrialLink {
+            id: "written".into(),
+            fingerprint: "a".repeat(64),
+            label: "偽の説明".into(),
+            definition: None,
+            basis: None,
+        }],
+    }];
+    let result = change(
+        &f.case,
+        ChangeRequest {
+            expected_revision: load(&f.case).unwrap().revision,
+            actor: "合成の記入者".into(),
+            reason: "試験".into(),
+            action: Change::AddCheck { check },
+        },
+    );
+    assert!(result.is_err());
 }

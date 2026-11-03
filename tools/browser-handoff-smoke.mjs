@@ -118,7 +118,7 @@ try {
   assert.equal(v.checks[0].coverage.status, 'not_covered');
   assert.deepEqual(v.checks[0].coverage.aspects.map(a => a.status), ['no_evidence', 'unsupported']);
   assert.equal(v.workspace.evidence.length, 0);
-  await page.locator('[data-aspect-editor][data-fingerprints="loaded"]').waitFor();
+  await page.locator('[data-aspect-editor][data-link-changes="loaded"]').waitFor();
   assert.equal(await editor.locator('[data-link-changed]').count(), 0, '同じ試験設定なら変更なし');
   // 判定条件 soap-subjective-row は同じまま、試す状況（DB停止）だけを変えた試験では、前の対応づけを適用しない。
   await page.locator('a.step-link[href="#trial"]').click();
@@ -127,10 +127,26 @@ try {
   await page.getByRole('button', { name: '次へ：判定の条件を確認する', exact: true }).click();
   await page.getByRole('button', { name: '実行前に確認する', exact: true }).click();
   const editor2 = page.getByRole('region', { name: '確認項目のどの部分をこの試験で確かめるか' });
-  await page.locator('[data-aspect-editor][data-fingerprints="loaded"]').waitFor();
+  await page.locator('[data-aspect-editor][data-link-changes="loaded"]').waitFor();
   assert.equal(await editor2.locator('[data-link-changed="true"][data-link="soap-subjective-row"]').count(), 1);
   assert.match(await editor2.locator('[data-changed-links]').innerText(), /1 件あります/);
   assert.match(await editor2.locator('[data-uncovered]').innerText(), /form_soap に保存される/, '変わった判定条件への対応づけはこの試験では確かめない');
+  // 対応づけ直す前に、何が変わったかを対応づけた時点と現在の値で示す。環境変数の値は記録・表示しない。
+  const comparison = editor2.locator('[data-link-comparison="soap-subjective-row"]');
+  assert.match(await comparison.innerText(), /対応づけた時点に麦漆が保存した設定/);
+  assert.match(await comparison.innerText(), /変わった設定: .*故障の条件（1 件）/);
+  assert.match(await comparison.locator('[data-change-section="故障の条件"]').innerText(), /normal[\s\S]*database_stopped/);
+  assert.equal(await comparison.locator('[data-change-section="ブラウザの準備"]').count(), 1, '保存前の操作が準備へ移ったことを示す');
+  await comparison.locator('[data-change-section="ブラウザの準備"] summary').click();
+  assert.match(await comparison.locator('[data-uncomparable]').innerText(), /環境変数の値は記録しない/);
+  assert.doesNotMatch(await editor2.innerText(), /eel-root-trial|eel-pass-trial/, '試験用の認証情報を表示しない');
+  assert.doesNotMatch(JSON.stringify((await view()).workspace.checks), /eel-root-trial|eel-pass-trial/, '試験用の認証情報を対応づけの記録に残さない');
+  await mkdir(output, { recursive: true });
+  await comparison.scrollIntoViewIfNeeded(); await page.screenshot({ path: join(output, 'browser-handoff-link-changes.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), '比較表を出しても390px幅で横にはみ出さない');
+  await comparison.scrollIntoViewIfNeeded(); await page.screenshot({ path: join(output, 'browser-handoff-link-changes-mobile.png') });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   // 別の部分を追加して保存しても、変わった判定条件への対応づけは以前の指紋のまま。
   await editor2.getByRole('button', { name: '確かめたい部分を追加する' }).click();
   await editor2.locator('[data-aspect] textarea').nth(2).fill('DB停止中に保存が失敗したと画面に出る');
@@ -153,7 +169,7 @@ try {
   await page.getByRole('button', { name: '次へ：判定の条件を確認する', exact: true }).click();
   await page.getByRole('button', { name: '実行前に確認する', exact: true }).click();
   const editor3 = page.getByRole('region', { name: '確認項目のどの部分をこの試験で確かめるか' });
-  await page.locator('[data-aspect-editor][data-fingerprints="loaded"]').waitFor();
+  await page.locator('[data-aspect-editor][data-link-changes="loaded"]').waitFor();
   assert.equal(await editor3.locator('[data-link-changed="true"]').count(), 1);
   await editor3.locator('[data-relink="soap-subjective-row"]').click();
   await editor3.locator('[data-aspect]').nth(2).getByRole('button', { name: 'この部分を外す' }).click();

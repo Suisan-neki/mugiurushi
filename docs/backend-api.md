@@ -35,7 +35,7 @@ APIを呼ぶクライアントは`X-Review-Token`を指定する。POSTは`Conte
 | POST `/api/v1/execute` | expected_revision、actor、reason、recipe | 指定したリポジトリの固定版実行を受付。HTTP 202 |
 | POST `/api/v1/understand` | UnderstandRequest | 公開GitHubの読取、サーバーが保存した読取記録の参照・解析。コード本文は受け付けない |
 | GET `/api/v1/observation-kinds` | 操作トークン | 確かめたい部分に対応づける観測の種類。判定に使える種類、記録のみ、推定、基盤が未対応の種類を区別する |
-| POST `/api/v1/trial-fingerprints` | Recipe | 読み取り専用。試験設定の判定条件ごとの識別子・内容の指紋・説明。画面が保存済みの対応づけと現在の設定を比べる |
+| POST `/api/v1/link-changes` | `{check_id, recipe}` | 読み取り専用。確認項目に保存した対応づけごとに、これから実行する試験設定と指紋が一致するか（`unchanged`・`changed`・`not_in_trial`）と、対応づけた時点から変わった設定の値（区分・場所・前・後）を返す。比較できないことは`uncomparable`に示す。コンテナの環境変数の値は記録・比較しない |
 
 POST入力は1MiBまで。更新は`expected_revision`を照合し、別の更新があればHTTP 409を返す。不正な形式や対応しない操作は400、トークン・Origin・権限の不一致は403、未定義のパス、未保存の読取記録・構成図は404。HTTP受付にはaxumを使い、長い読取・AI処理は4件まで同時に処理する。超過時は503。失敗した更新を成功した事例版として保存しない。
 

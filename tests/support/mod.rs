@@ -26,6 +26,7 @@ pub fn workspace() -> Workspace {
             dependencies: vec!["report-save".into(), "environment".into()],
             questions: vec![],
             aspects: vec![],
+            link_settings: vec![],
         },
         Check {
             id: "later-view".into(),
@@ -38,6 +39,7 @@ pub fn workspace() -> Workspace {
             dependencies: vec![],
             questions: vec![],
             aspects: vec![],
+            link_settings: vec![],
         },
     ];
     w
@@ -109,6 +111,7 @@ pub fn readback_aspects(check_id: &str) -> Change {
                 }),
                 label: "報告観測 readback".into(),
                 definition: None,
+                basis: None,
             }],
         }],
     }

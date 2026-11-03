@@ -25,6 +25,14 @@ pub struct EvidenceReference {
     pub kind: &'static str,
     pub scope: String,
 }
+fn without_setting_values(view: &mut CheckView) {
+    for aspect in &mut view.coverage.aspects {
+        for change in aspect.link_changes.iter_mut().flat_map(|c| &mut c.changes) {
+            change.before = None;
+            change.after = None;
+        }
+    }
+}
 #[derive(Debug, Serialize)]
 pub struct ReportCheck {
     pub definition: Check,
@@ -113,7 +121,7 @@ pub fn build(workspace: Workspace) -> io::Result<Report> {
         .checks
         .into_iter()
         .map(|mut current| {
-            let definition = view
+            let mut definition = view
                 .workspace
                 .checks
                 .iter()
@@ -161,6 +169,16 @@ pub fn build(workspace: Workspace) -> io::Result<Report> {
             for evidence in &mut current.evidence {
                 evidence.summary = None;
             }
+            // 対応づけた時点の設定と、変わった設定の値は載せない（入力・操作の詳細を含みうる）。区分と場所は残す。
+            definition.link_settings.clear();
+            for link in definition
+                .aspects
+                .iter_mut()
+                .flat_map(|a| &mut a.trial_checks)
+            {
+                link.basis = None;
+            }
+            without_setting_values(&mut current);
             Ok(ReportCheck {
                 definition,
                 current,
@@ -170,6 +188,7 @@ pub fn build(workspace: Workspace) -> io::Result<Report> {
         .collect::<io::Result<Vec<_>>>()?;
     for decision in &mut view.workspace.decisions {
         for check in &mut decision.basis {
+            without_setting_values(check);
             for evidence in &mut check.evidence {
                 evidence.summary = None;
             }
@@ -335,12 +354,40 @@ pub fn html(report: &Report) -> io::Result<String> {
         if !check.current.coverage.aspects.is_empty() {
             out.push_str("<ul>");
             for aspect in &check.current.coverage.aspects {
+                // 変わった設定は区分の名前だけを示す。値には入力データや操作の詳細が含まれうるため載せない。
+                let sections: std::collections::BTreeSet<&str> = aspect
+                    .link_changes
+                    .iter()
+                    .flat_map(|c| c.changes.iter().map(|x| x.section.as_str()))
+                    .collect();
+                let uncomparable = aspect
+                    .link_changes
+                    .iter()
+                    .any(|c| !c.uncomparable.is_empty());
+                let changed = if sections.is_empty() && !uncomparable {
+                    String::new()
+                } else {
+                    format!(
+                        "。対応づけた時点から変わった設定：{}{}",
+                        if sections.is_empty() {
+                            "（示せない）".to_owned()
+                        } else {
+                            sections.into_iter().collect::<Vec<_>>().join("、")
+                        },
+                        if uncomparable {
+                            "。比較できない値がある"
+                        } else {
+                            ""
+                        }
+                    )
+                };
                 out.push_str(&format!(
-                    "<li>{}：{}（観測の種類：{}。{}）</li>",
+                    "<li>{}：{}（観測の種類：{}。{}{}）</li>",
                     escape(&aspect.text),
                     escape(&aspect.status_label),
                     escape(&aspect.observation_label),
-                    escape(&aspect.detail)
+                    escape(&aspect.detail),
+                    escape(&changed)
                 ));
             }
             out.push_str("</ul>");

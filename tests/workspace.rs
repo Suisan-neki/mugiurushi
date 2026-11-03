@@ -124,6 +124,7 @@ fn general_case_starts_without_generated_domain_requirements() {
                 dependencies: vec![],
                 questions: vec![],
                 aspects: vec![],
+                link_settings: vec![],
             },
         },
     );
@@ -647,5 +648,62 @@ fn observation_kinds_require_auth_and_aspect_links_are_validated_over_http() {
     assert_eq!(
         saved.checks[0].aspects[0].trial_checks[0].fingerprint,
         fingerprint
+    );
+}
+
+#[test]
+fn link_changes_requires_auth_and_rejects_settings_without_trial_checks() {
+    let sandbox = Sandbox::new();
+    let case = sandbox.case();
+    let recipe = serde_json::json!({"schema_version":1,"check_id":"save","source":{"repository":"example/notes","commit":"a".repeat(40),"path":"notes.py","line":1,"end_line":1},"runtime":"python3","entrypoint":"notes.py","args":[],"input":{},"criterion":{"assertion":"eel.trial","subject":"save"},"timeout_ms":1000});
+    let body = serde_json::json!({"check_id":"save","recipe":recipe}).to_string();
+    let denied = http(
+        &case,
+        "POST",
+        "/api/v1/link-changes",
+        &body,
+        Some("same"),
+        None,
+        None,
+    );
+    assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+    let no_trial = http(
+        &case,
+        "POST",
+        "/api/v1/link-changes",
+        &body,
+        Some("same"),
+        Some("test-token"),
+        None,
+    );
+    assert!(no_trial.starts_with("HTTP/1.1 400"), "{no_trial}");
+    let unknown = http(
+        &case,
+        "POST",
+        "/api/v1/link-changes",
+        &serde_json::json!({"check_id":"save","recipe":recipe,"extra":1}).to_string(),
+        Some("same"),
+        Some("test-token"),
+        None,
+    );
+    assert!(unknown.starts_with("HTTP/1.1 400"), "{unknown}");
+    let mut with_trial = recipe.clone();
+    with_trial["trial"] = serde_json::json!({"schema_version":1,"fault":"normal","checks":[{"id":"c1","scope":"受付","method":"exit_code","expect":"zero"}]});
+    let listed = http(
+        &case,
+        "POST",
+        "/api/v1/link-changes",
+        &serde_json::json!({"check_id":"save","recipe":with_trial}).to_string(),
+        Some("same"),
+        Some("test-token"),
+        None,
+    );
+    assert!(listed.starts_with("HTTP/1.1 200"), "{listed}");
+    let body: serde_json::Value =
+        serde_json::from_str(listed.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(
+        body["links"],
+        serde_json::json!([]),
+        "対応づけのない確認項目"
     );
 }

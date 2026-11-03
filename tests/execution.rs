@@ -267,6 +267,7 @@ fn external_trial_returns_to_its_code_and_retest_preserves_old_evidence() {
         dependencies: vec![],
         questions: vec![],
         aspects: vec![],
+        link_settings: vec![],
     });
     initialize(&case, workspace, "Synthetic", "外部試験を始める").unwrap();
     change(
@@ -403,6 +404,7 @@ fn next_confirmation_distinguishes_execution_failure_missing_and_invalid_observa
             dependencies: vec![],
             questions: vec![],
             aspects: vec![],
+            link_settings: vec![],
         });
         initialize(&case, workspace, "Synthetic", "初期化").unwrap();
         change(
@@ -473,6 +475,7 @@ fn review_case(fixture: &Fixture) -> PathBuf {
         dependencies: vec!["execution-stored".into()],
         questions: vec![],
         aspects: vec![],
+        link_settings: vec![],
     });
     initialize(&case, spec, "Synthetic", "合成の試験を設定する").unwrap();
     case

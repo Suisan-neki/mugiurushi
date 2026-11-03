@@ -944,6 +944,7 @@ fn openemr_browser_registers_patient_and_reads_back_visit() {
             dependencies: vec!["execution-openemr".into()],
             questions: vec![],
             aspects: vec![],
+            link_settings: vec![],
         });
         mugiurushi::workspace::initialize(&case, w, "CI", "実試験と構成の対応づけ").unwrap();
         let mut w = mugiurushi::workspace::change(
