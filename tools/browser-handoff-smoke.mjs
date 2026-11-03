@@ -45,6 +45,18 @@ try {
     const r = await page.request.post(url + '/api/v1/' + name, { headers, data: body });
     const result = await r.json(); assert.equal(r.status(), 200, JSON.stringify(result)); return result;
   };
+  // 対応づけの保存は非同期。前回の状態表示が残るため、事例の版が進むまで待ってから確認する。
+  const saveAspects = async editor => {
+    const before = (await view()).workspace.revision;
+    await editor.getByRole('button', { name: '対応づけを保存する' }).click();
+    for (let i = 0; i < 60; i++) {
+      if ((await view()).workspace.revision > before) break;
+      if (await page.locator('#alert .dads-notification-banner').count()) throw Error('対応づけの保存に失敗: ' + await page.locator('#alert').innerText());
+      await new Promise(r => setTimeout(r, 250));
+    }
+    assert.ok((await view()).workspace.revision > before, '対応づけの保存で事例の版が進む');
+    await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
+  };
   const origin = '合成の相談から登録した確認項目。実利用者の相談ではありません。';
   await post('change', { expected_revision: (await view()).workspace.revision, actor: '合成の試験担当', reason: '画面の接続試験', action: { op: 'add_check', check: {
     id: 'soap-dialogue-check', version: 1, text: 'SOAPを保存して開き直し、4項目の内容をDBと照合できる', origin,
@@ -86,8 +98,7 @@ try {
   assert.match(await editor.locator('[data-uncovered]').innerText(), /外部へ送信されない/);
   const saveButton = editor.getByRole('button', { name: '対応づけを保存する' });
   assert.equal(await saveButton.isDisabled(), false, '変更があれば保存できる');
-  await saveButton.click();
-  await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
+  await saveAspects(editor);
   assert.equal(await saveButton.isDisabled(), true, '保存直後は変更がない');
   v = await view();
   assert.deepEqual(v.workspace.checks[0].aspects.map(a => [a.observation, a.trial_checks.map(l => l.id)]), [['database_rows', ['soap-subjective-row']], ['external_destination', []]]);
@@ -123,16 +134,14 @@ try {
   // 別の部分を追加して保存しても、変わった判定条件への対応づけは以前の指紋のまま。
   await editor2.getByRole('button', { name: '確かめたい部分を追加する' }).click();
   await editor2.locator('[data-aspect] textarea').nth(2).fill('DB停止中に保存が失敗したと画面に出る');
-  await editor2.getByRole('button', { name: '対応づけを保存する' }).click();
-  await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
+  await saveAspects(editor2);
   v = await view();
   assert.equal(v.workspace.checks[0].aspects.length, 3);
   assert.equal(v.workspace.checks[0].aspects[0].trial_checks[0].fingerprint, savedLink.fingerprint, '別の部分の保存で、変わった判定条件への対応づけを更新しない');
   assert.equal(await editor2.locator('[data-link-changed="true"][data-link="soap-subjective-row"]').count(), 1);
   // 人が「現在の内容で対応づけ直す」を押して保存すると、この試験の内容で対応づける。
   await editor2.locator('[data-relink="soap-subjective-row"]').click();
-  await editor2.getByRole('button', { name: '対応づけを保存する' }).click();
-  await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
+  await saveAspects(editor2);
   v = await view();
   const relinked = v.workspace.checks[0].aspects[0].trial_checks[0];
   assert.notEqual(relinked.fingerprint, savedLink.fingerprint); assert.match(relinked.label, /データベースのコンテナを止める/);
@@ -148,8 +157,7 @@ try {
   assert.equal(await editor3.locator('[data-link-changed="true"]').count(), 1);
   await editor3.locator('[data-relink="soap-subjective-row"]').click();
   await editor3.locator('[data-aspect]').nth(2).getByRole('button', { name: 'この部分を外す' }).click();
-  await editor3.getByRole('button', { name: '対応づけを保存する' }).click();
-  await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
+  await saveAspects(editor3);
   v = await view();
   assert.equal(v.workspace.checks[0].aspects[0].trial_checks[0].fingerprint, savedLink.fingerprint, '同じ試験設定へ戻せば同じ指紋になる');
   assert.equal(v.workspace.checks[0].aspects.length, 2);
