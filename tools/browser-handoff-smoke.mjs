@@ -107,6 +107,53 @@ try {
   assert.equal(v.checks[0].coverage.status, 'not_covered');
   assert.deepEqual(v.checks[0].coverage.aspects.map(a => a.status), ['no_evidence', 'unsupported']);
   assert.equal(v.workspace.evidence.length, 0);
+  await page.locator('[data-aspect-editor][data-fingerprints="loaded"]').waitFor();
+  assert.equal(await editor.locator('[data-link-changed]').count(), 0, '同じ試験設定なら変更なし');
+  // 判定条件 soap-subjective-row は同じまま、試す状況（DB停止）だけを変えた試験では、前の対応づけを適用しない。
+  await page.locator('a.step-link[href="#trial"]').click();
+  await page.locator('[data-browser-preset="openemr-soap-db-stopped"]').getByRole('button').click();
+  await page.getByRole('button', { name: '次へ：試す状況を選ぶ', exact: true }).click();
+  await page.getByRole('button', { name: '次へ：判定の条件を確認する', exact: true }).click();
+  await page.getByRole('button', { name: '実行前に確認する', exact: true }).click();
+  const editor2 = page.getByRole('region', { name: '確認項目のどの部分をこの試験で確かめるか' });
+  await page.locator('[data-aspect-editor][data-fingerprints="loaded"]').waitFor();
+  assert.equal(await editor2.locator('[data-link-changed="true"][data-link="soap-subjective-row"]').count(), 1);
+  assert.match(await editor2.locator('[data-changed-links]').innerText(), /1 件あります/);
+  assert.match(await editor2.locator('[data-uncovered]').innerText(), /form_soap に保存される/, '変わった判定条件への対応づけはこの試験では確かめない');
+  // 別の部分を追加して保存しても、変わった判定条件への対応づけは以前の指紋のまま。
+  await editor2.getByRole('button', { name: '確かめたい部分を追加する' }).click();
+  await editor2.locator('[data-aspect] textarea').nth(2).fill('DB停止中に保存が失敗したと画面に出る');
+  await editor2.getByRole('button', { name: '対応づけを保存する' }).click();
+  await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
+  v = await view();
+  assert.equal(v.workspace.checks[0].aspects.length, 3);
+  assert.equal(v.workspace.checks[0].aspects[0].trial_checks[0].fingerprint, savedLink.fingerprint, '別の部分の保存で、変わった判定条件への対応づけを更新しない');
+  assert.equal(await editor2.locator('[data-link-changed="true"][data-link="soap-subjective-row"]').count(), 1);
+  // 人が「現在の内容で対応づけ直す」を押して保存すると、この試験の内容で対応づける。
+  await editor2.locator('[data-relink="soap-subjective-row"]').click();
+  await editor2.getByRole('button', { name: '対応づけを保存する' }).click();
+  await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
+  v = await view();
+  const relinked = v.workspace.checks[0].aspects[0].trial_checks[0];
+  assert.notEqual(relinked.fingerprint, savedLink.fingerprint); assert.match(relinked.label, /データベースのコンテナを止める/);
+  assert.equal(await editor2.locator('[data-link-changed]').count(), 0);
+  // 通常時の試験へ戻す。前の試験の内容へ対応づけ直して、以降の確認と実行に使う。
+  await page.locator('a.step-link[href="#trial"]').click();
+  await page.locator('[data-browser-preset="openemr-soap"]').getByRole('button').click();
+  await page.getByRole('button', { name: '次へ：試す状況を選ぶ', exact: true }).click();
+  await page.getByRole('button', { name: '次へ：判定の条件を確認する', exact: true }).click();
+  await page.getByRole('button', { name: '実行前に確認する', exact: true }).click();
+  const editor3 = page.getByRole('region', { name: '確認項目のどの部分をこの試験で確かめるか' });
+  await page.locator('[data-aspect-editor][data-fingerprints="loaded"]').waitFor();
+  assert.equal(await editor3.locator('[data-link-changed="true"]').count(), 1);
+  await editor3.locator('[data-relink="soap-subjective-row"]').click();
+  await editor3.locator('[data-aspect]').nth(2).getByRole('button', { name: 'この部分を外す' }).click();
+  await editor3.getByRole('button', { name: '対応づけを保存する' }).click();
+  await page.getByText('対応づけを保存しました', { exact: false }).waitFor();
+  v = await view();
+  assert.equal(v.workspace.checks[0].aspects[0].trial_checks[0].fingerprint, savedLink.fingerprint, '同じ試験設定へ戻せば同じ指紋になる');
+  assert.equal(v.workspace.checks[0].aspects.length, 2);
+  assert.equal(v.workspace.evidence.length, 0);
   await mkdir(output, { recursive: true }); await page.screenshot({ path: join(output, 'browser-handoff-confirm.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), '390px幅で横にはみ出さない');
@@ -168,7 +215,7 @@ try {
     assert.doesNotMatch(preview, /undefined/);
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ checks: ['版の相違を表示', '明示操作による参照先変更', '相談の出所を保持', '確認まで実行しない', 'ブラウザ手順・入力・観測先を保持', '確かめる部分を観測の種類と判定条件IDで登録', ...(live ? ['画面から実OpenEMRを起動・保存・再表示・DB照合', '再読込後にブラウザ設定へ戻る'] : [])], actual_target_execution: live ? 'OpenEMR' : 'not_conducted' }));
+  console.log(JSON.stringify({ checks: ['版の相違を表示', '明示操作による参照先変更', '相談の出所を保持', '確認まで実行しない', 'ブラウザ手順・入力・観測先を保持', '確かめる部分を観測の種類と判定条件の内容で登録', '試す状況を変えた試験には前の対応づけを適用しない', ...(live ? ['画面から実OpenEMRを起動・保存・再表示・DB照合', '再読込後にブラウザ設定へ戻る'] : [])], actual_target_execution: live ? 'OpenEMR' : 'not_conducted' }));
 } catch (error) {
   await mkdir(output, { recursive: true });
   const page = browser?.contexts()[0]?.pages()[0];

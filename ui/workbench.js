@@ -910,21 +910,28 @@ function trialFormView(check, form, plan, exec) {
   setTimeout(updatePreview);
   return container;
 }
-/// 実行前に分かる判定条件の一覧。手動の設定では実行時（runTrial）と同じ c1, c2… の識別子と内容を作る。
-/// definition は登録時に麦漆へ送り、麦漆が内容の指紋に変えて保存する。内容が変わった試験には前の対応づけを適用しない。
-function trialChecksOf(form) {
-  if (form.runtime === 'browser') return (form.browser_recipe?.trial?.checks || []).map(c => ({ id: c.id, scope: c.scope, method: c.method, definition: structuredClone(c) }));
-  return (form.checks || []).map((c, i) => ({ id: `c${i + 1}`, scope: c.scope || '（範囲が未入力）', method: c.method,
-    definition: { id: `c${i + 1}`, scope: c.scope, method: c.method, expect: c.expect, text: c.method === 'exit_code' ? null : c.text, target: c.target || null } }));
+/// 実行前に分かる判定条件の一覧。実行時（runTrial）と同じ試験設定から作り、識別子も同じ c1, c2… になる。
+/// definition（判定条件とその試験設定）は登録時に麦漆へ送り、麦漆が内容の指紋に変えて保存する。
+/// 設定を試験設定にできない場合は null を返し、対応づけを選べない理由を error に入れる。
+function trialChecksOf(check, form) {
+  try {
+    const recipe = buildRecipe(check, form);
+    return { recipe, checks: (recipe.trial?.checks || []).map(c => ({ id: c.id, scope: c.scope || '（範囲が未入力）', method: c.method, definition: { check: structuredClone(c), recipe: structuredClone(recipe) } })) };
+  } catch (e) { return { recipe: null, checks: [], error: e.message }; }
 }
 const SUPPORT_LABEL = { judged: '判定に使える', recorded_only: '記録のみ（判定には使えない）', inference: '推定（実行の観測ではない）', unsupported: '麦漆では観測できない' };
 const ASPECT_STATUS_MARK = { observed: '○', contradicted: '×', not_observed: '？', not_in_trial: '－', method_mismatch: '！', definition_changed: '！', unlinked: '－', undefined: '－', unsupported: '×', not_judged: '－', no_evidence: '－' };
 function kindInfo(id) { return (state.observationKinds || []).find(k => k.id === id) || null; }
 /// 確認項目のどの部分を、どの観測・判定条件で確かめるかを人が登録する。文章の一致から自動で決めない。
 /// 戻り値の要素は hasUnsavedChanges() を持ち、未保存の変更があるうちは試験を始められない。
-function aspectEditor(check, trialChecks) {
+function aspectEditor(check, trial) {
   const kinds = state.observationKinds || [];
+  const trialChecks = trial.checks;
   const linkOf = id => trialChecks.find(c => c.id === id);
+  // 現在の試験設定での判定条件ごとの指紋。麦漆が計算し、画面は保存済みの対応づけと比べるだけに使う。
+  let currentFingerprints = null, fingerprintError = trial.error || null;
+  const fingerprintOf = id => currentFingerprints?.find(f => f.id === id) || null;
+  const changedLink = l => { const now = fingerprintOf(l.id); return Boolean(l.fingerprint && now && now.fingerprint !== l.fingerprint); };
   const drafts = (check.aspects || []).map(a => ({ ...a, trial_checks: (a.trial_checks || []).map(l => ({ ...l })) }));
   const container = h('section', { class: 'box', 'aria-label': '確認項目のどの部分をこの試験で確かめるか', 'data-aspect-editor': '' });
   const current = () => state.view?.workspace.checks.find(c => c.id === check.id) || check;
@@ -943,16 +950,25 @@ function aspectEditor(check, trialChecks) {
       kind.control.value = a.observation || '';
       kind.control.addEventListener('change', () => { a.observation = kind.control.value || null; if (!a.observation || kindInfo(a.observation)?.support !== 'judged') a.trial_checks = []; render(); });
       const judged = info?.support === 'judged';
-      // この試験にない判定条件や、内容が変わった判定条件への対応づけは、外して選び直す。
+      // この試験にない判定条件への対応づけは残したまま表示し、保存しても指紋を変えない（人が外すまで）。
       const stale = a.trial_checks.filter(l => !linkOf(l.id));
       const links = judged ? h('fieldset', { class: 'aspect-links' }, h('legend', {}, 'この部分に答える判定条件'),
-        stale.length ? h('p', { class: 'ref-unverified' }, `この試験にない判定条件への対応づけが残っています（${stale.map(l => l.id).join('、')}）。保存すると外れます。`) : null,
+        fingerprintError ? h('p', { class: 'ref-unverified' }, `現在の設定を試験設定にできないため、判定条件を選べません: ${fingerprintError}`) : null,
+        stale.length ? h('p', { class: 'ref-unverified' }, `この試験にない判定条件への対応づけが残っています（${stale.map(l => l.id).join('、')}）。この試験では「最新の試行に判定条件がない」になります。`, ' ', button('外す', () => { a.trial_checks = a.trial_checks.filter(l => linkOf(l.id)); render(); }, 'text')) : null,
         trialChecks.length ? trialChecks.map(c => {
+          const link = a.trial_checks.find(l => l.id === c.id);
           const box = h('input', { type: 'checkbox', value: c.id });
-          box.checked = a.trial_checks.some(l => l.id === c.id);
-          box.addEventListener('change', () => { a.trial_checks = box.checked ? [...a.trial_checks.filter(l => l.id !== c.id), { id: c.id, fingerprint: '', label: '', definition: c.definition }] : a.trial_checks.filter(l => l.id !== c.id); refreshSave(); });
+          box.checked = Boolean(link);
+          // 新しく選んだ判定条件だけ、現在の試験設定（definition）を添える。既存の対応づけは保存済みの指紋のまま。
+          box.addEventListener('change', () => { a.trial_checks = box.checked ? [...a.trial_checks.filter(l => l.id !== c.id), { id: c.id, fingerprint: '', label: '', definition: c.definition }] : a.trial_checks.filter(l => l.id !== c.id); render(); });
           const mismatch = c.method !== a.observation;
-          return h('label', { class: 'aspect-link' }, box, ` ${c.id}：${c.scope}（${METHODS.find(m => m[0] === c.method)?.[1] || c.method}）`, mismatch ? h('span', { class: 'ref-unverified' }, '　観測方法が宣言した種類と違うため、選んでも観測済みになりません') : null);
+          const changed = link && changedLink(link);
+          return h('div', { class: 'aspect-link', 'data-link': c.id, 'data-link-changed': changed ? 'true' : null },
+            h('label', {}, box, ` ${c.id}：${c.scope}（${METHODS.find(m => m[0] === c.method)?.[1] || c.method}）`),
+            mismatch ? h('span', { class: 'ref-unverified' }, '　観測方法が宣言した種類と違うため、選んでも観測済みになりません') : null,
+            changed ? h('p', { class: 'ref-unverified' }, `対応づけた時点（${link.label || '説明なし'}）と、現在の試験の内容・操作・観測先が違います。選び直すまで前の対応づけを保ち、この試験には適用しません。`, ' ',
+              button('現在の内容で対応づけ直す', () => { a.trial_checks = a.trial_checks.map(l => l.id === c.id ? { id: c.id, fingerprint: '', label: '', definition: c.definition } : l); render(); }, 'outlined', 'sm', { 'data-relink': c.id })) : null,
+            link && !link.fingerprint ? h('p', { class: 'note' }, '保存すると、現在の試験の内容で対応づけます。') : null);
         }) : h('p', { class: 'note' }, 'この試験には判定条件がありません。')) : null;
       return h('div', { class: 'box', 'data-aspect': a.id },
         field({ label: `確かめたい部分 ${index + 1}`, support: `出所: ${a.origin}`, control: text }),
@@ -966,32 +982,41 @@ function aspectEditor(check, trialChecks) {
     save = button('対応づけを保存する', () => guarded(async () => {
       requirePerson();
       if (drafts.some(a => !a.text.trim())) throw Error('確かめたい部分の文を入力するか、外してください。');
-      // 選んだ判定条件は、この試験の内容（definition）を添えて送る。この試験にない対応づけは外す。
+      // 新しく選んだ・選び直した判定条件だけ内容（definition）を送る。それ以外は保存済みの指紋と説明をそのまま送り、
+      // 麦漆は更新しない。別の部分を直して保存しても、変わった判定条件への対応づけは人が選び直すまで変わらない。
       const aspects = drafts.map(a => ({ id: a.id, text: a.text.trim(), origin: a.origin, observation: a.observation || null,
-        trial_checks: a.trial_checks.filter(l => linkOf(l.id)).map(l => ({ id: l.id, definition: linkOf(l.id).definition })) }));
+        trial_checks: a.trial_checks.map(l => l.definition ? { id: l.id, definition: l.definition } : { id: l.id, fingerprint: l.fingerprint, label: l.label || '' }) }));
       const view = await change({ op: 'set_aspects', check_id: check.id, aspects }, '確認項目のどの部分を、どの観測・判定条件で確かめるかを登録した');
       const saved = view.workspace.checks.find(c => c.id === check.id);
       drafts.splice(0, drafts.length, ...(saved?.aspects || []).map(a => ({ ...a, trial_checks: (a.trial_checks || []).map(l => ({ ...l })) })));
       setStatus('対応づけを保存しました。試験はまだ実行していません。');
       render();
     }), 'solid-fill', 'md');
-    const uncovered = drafts.filter(a => !(a.observation && kindInfo(a.observation)?.support === 'judged' && a.trial_checks.some(l => linkOf(l.id))));
+    const uncovered = drafts.filter(a => !(a.observation && kindInfo(a.observation)?.support === 'judged' && a.trial_checks.some(l => linkOf(l.id) && !changedLink(l))));
+    const changedCount = drafts.flatMap(a => a.trial_checks).filter(changedLink).length;
     fill(container,
       h('h3', {}, '確認項目のどの部分をこの試験で確かめるか'),
       h('p', {}, h('strong', {}, '確認項目: '), check.text),
       h('p', { class: 'note' }, '試験の判定条件がすべて通っても、ここで対応づけた部分だけが「観測した」になります。相談文と試験の文章が似ているかは自動で判断しません。AIの整理案から入った部分は、人が観測の種類と判定条件を選ぶまで未確認のままです。判定条件の内容が後で変わると、麦漆は対応づけを適用せず、人が確認し直します。'),
       state.observationKindsError ? banner('warning', '観測の種類の一覧を読み込めませんでした', h('p', {}, state.observationKindsError)) : null,
       rows.length ? rows : h('p', { class: 'note' }, '確かめたい部分はまだ登録されていません。登録しないまま実行すると、結果は「試験の判定」だけになり、確認項目には答えていない扱いになります。'),
+      changedCount ? h('p', { class: 'ref-unverified', 'data-changed-links': changedCount }, `対応づけた後に内容・操作・観測先が変わった判定条件が ${changedCount} 件あります。人が確認して選び直すまで、この試験には適用しません。`) : null,
       uncovered.length ? h('p', { class: 'ref-unverified', 'data-uncovered': '' }, `この試験では確かめない部分: ${uncovered.map(a => a.text || '（未入力）').join('、')}`) : null,
       h('div', { class: 'journey-actions' }, add, save));
     refreshSave();
   };
   render();
+  if (trial.recipe) {
+    api('POST', '/api/v1/trial-fingerprints', trial.recipe)
+      .then(r => { currentFingerprints = r.fingerprints; })
+      .catch(e => { fingerprintError = `判定条件の指紋を取得できませんでした: ${e.message}`; })
+      .finally(() => { container.dataset.fingerprints = currentFingerprints ? 'loaded' : 'unavailable'; render(); });
+  } else container.dataset.fingerprints = 'unavailable';
   return container;
 }
 function showTrialConfirmation(check, form, exec) {
   const body = $('trial-body');
-  const editor = aspectEditor(check, trialChecksOf(form));
+  const editor = aspectEditor(check, trialChecksOf(check, form));
   const run = button('試験を始める', async () => {
     if (run.disabled) return;
     // 画面で変えた対応づけが保存されていないと、判定に使う保存済みの内容と食い違う。
@@ -1045,6 +1070,14 @@ function previewBox(check, f, exec) {
       h('dt', {}, '判定の条件'), h('dd', {}, h('ul', { class: 'items' }, f.checks.map(c => h('li', {}, `${c.scope || '（範囲が未入力）'}: ${METHODS.find(m => m[0] === c.method)?.[1]} が ${{ zero: '0で終わる', nonzero: '0以外で終わる', contains: `「${c.text}」を含む`, not_contains: `「${c.text}」を含まない` }[c.expect]}（${METHODS.find(m => m[0] === c.method)?.[2]}）`)))),
       h('dt', {}, '実行の方式'), h('dd', {}, `${exec?.mode || '不明'}方式。${exec?.mode === 'local' ? 'OSによる隔離は行いません。' : ''}固定コミットのファイルを読み取り専用で複製し、試行ごとの新しい作業ディレクトリで起動します。依存パッケージのインストールは行いません。既存の保存データは使わず、置き換えません。${f.server ? '先に起動するプロセスとの通信は 127.0.0.1 のポートで行います。' : ''}${f.containers_text?.trim() ? 'コンテナの待ち受けは 127.0.0.1 だけに公開し、試行の後に消します。' : ''}`)));
 }
+/// 画面の設定から実行要求の試験設定を作る。実行と、対応づけの指紋の計算に同じものを使う。
+function buildRecipe(check, f, criterion = { assertion: 'eel.trial', subject: check.id }) {
+  if (f.runtime === 'browser') return browserRecipeForCheck(check, f);
+  const python = pythonSetup(f), containers = parseContainers(f.containers_text);
+  return { schema_version: 1, check_id: check.id, source: check.source, runtime: f.runtime, launch: f.launch, entrypoint: f.runtime === 'http' ? (f.http?.path || '/') : f.entrypoint, args: f.args, input: {}, criterion, timeout_ms: f.timeout_ms,
+    python, server: f.server, containers, http: f.http,
+    trial: { schema_version: 1, fault: f.fault, storage: f.storage || null, readback: f.readback, checks: f.checks.map((c, i) => ({ id: `c${i + 1}`, scope: c.scope, method: c.method, expect: c.expect, text: c.method === 'exit_code' ? null : c.text, target: c.target || null })) } };
+}
 async function runTrial(check, f) {
   await guarded(async () => {
     requirePerson();
@@ -1063,9 +1096,7 @@ async function runTrial(check, f) {
       await change({ op: 'configure_observation', check_id: check.id, criterion }, '試験案の判定条件で判定するように設定した');
       current = currentCheck();
     }
-    const recipe = f.runtime === 'browser' ? browserRecipeForCheck(current, f) : { schema_version: 1, check_id: check.id, source: current.source, runtime: f.runtime, launch: f.launch, entrypoint: f.runtime === 'http' ? (f.http?.path || '/') : f.entrypoint, args: f.args, input: {}, criterion, timeout_ms: f.timeout_ms,
-      python, server: f.server, containers, http: f.http,
-      trial: { schema_version: 1, fault: f.fault, storage: f.storage || null, readback: f.readback, checks: f.checks.map((c, i) => ({ id: `c${i + 1}`, scope: c.scope, method: c.method, expect: c.expect, text: c.method === 'exit_code' ? null : c.text, target: c.target || null })) } };
+    const recipe = buildRecipe(current, f, criterion);
     setStatus(`固定コミット ${shortCommit(current.source.commit)} を試験用に取得しています（git fetch のみ。まだ実行しません）。`);
     await api('POST', '/api/v1/prepare', { repository: current.source.repository, commit: current.source.commit });
     const p = person();

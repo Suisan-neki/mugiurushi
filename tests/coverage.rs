@@ -2,7 +2,7 @@
 //! 試験の合否（判定条件がすべて通ったか）と、確認項目に答えたかを分ける。
 mod support;
 use mugiurushi::{
-    coverage::{Aspect, AspectStatus, CoverageStatus, ObservationKind, TrialLink},
+    coverage::{Aspect, AspectStatus, CoverageStatus, LinkDefinition, ObservationKind, TrialLink},
     execution::*,
     model::*,
     recording::*,
@@ -127,33 +127,18 @@ impl Fixture {
         .unwrap()
     }
     fn recipe(&self, command: &str, spec: TrialSpec) -> Recipe {
-        Recipe {
-            schema_version: 1,
-            check_id: "concern".into(),
-            source: load(&self.case).unwrap().checks[0].source.clone().unwrap(),
-            runtime: Runtime::Python3,
-            entrypoint: "notes.py".into(),
-            args: vec![".".into(), command.into(), TEST_VALUE.into()],
-            input: serde_json::json!({}),
-            criterion: Criterion {
-                assertion: "eel.trial".into(),
-                subject: "concern".into(),
-            },
-            timeout_ms: 5000,
-            trial: Some(spec),
-            launch: Default::default(),
-            python: None,
-            server: None,
-            containers: None,
-            http: None,
-            browser: None,
-        }
+        let mut recipe = base_recipe(command, &[], spec);
+        recipe.source = load(&self.case).unwrap().checks[0].source.clone().unwrap();
+        recipe
     }
     fn run(&self, command: &str, spec: TrialSpec) -> WorkspaceView {
+        self.run_recipe(self.recipe(command, spec))
+    }
+    fn run_recipe(&self, recipe: Recipe) -> WorkspaceView {
         support::run_external(
             &self.case,
             &self.root,
-            self.recipe(command, spec),
+            recipe,
             "合成の記入者".into(),
             "保存の試験".into(),
         )
@@ -229,9 +214,47 @@ fn storage_trial(fault: TrialFault) -> TrialSpec {
         ],
     }
 }
-/// 対応づけは、保存の試験の判定条件の内容（definition）を添えて登録する。基盤が指紋に変える。
-fn aspect(id: &str, text: &str, kind: Option<ObservationKind>, links: &[&str]) -> Aspect {
-    let spec = storage_trial(TrialFault::Normal);
+/// 試験の設定。固定版は対応づけの指紋に含まれないため、ここでは仮の値を置く。
+fn base_recipe(command: &str, extra_args: &[&str], spec: TrialSpec) -> Recipe {
+    let mut args = vec![".".to_owned(), command.to_owned(), TEST_VALUE.to_owned()];
+    args.extend(extra_args.iter().map(|s| s.to_string()));
+    Recipe {
+        schema_version: 1,
+        check_id: "concern".into(),
+        source: CodeReference {
+            repository: "example/notes".into(),
+            commit: "a".repeat(40),
+            path: "notes.py".into(),
+            line: 1,
+            end_line: 1,
+        },
+        runtime: Runtime::Python3,
+        entrypoint: "notes.py".into(),
+        args,
+        input: serde_json::json!({}),
+        criterion: Criterion {
+            assertion: "eel.trial".into(),
+            subject: "concern".into(),
+        },
+        timeout_ms: 5000,
+        trial: Some(spec),
+        launch: Default::default(),
+        python: None,
+        server: None,
+        containers: None,
+        http: None,
+        browser: None,
+    }
+}
+/// 対応づけは、判定条件の内容とその試験の設定（definition）を添えて登録する。基盤が指紋に変える。
+fn aspect_for(
+    recipe: &Recipe,
+    id: &str,
+    text: &str,
+    kind: Option<ObservationKind>,
+    links: &[&str],
+) -> Aspect {
+    let spec = recipe.trial.as_ref().unwrap();
     Aspect {
         id: id.into(),
         text: text.into(),
@@ -243,10 +266,28 @@ fn aspect(id: &str, text: &str, kind: Option<ObservationKind>, links: &[&str]) -
                 id: s.to_string(),
                 fingerprint: String::new(),
                 label: String::new(),
-                definition: spec.checks.iter().find(|c| c.id == *s).cloned(),
+                definition: spec
+                    .checks
+                    .iter()
+                    .find(|c| c.id == *s)
+                    .cloned()
+                    .map(|check| LinkDefinition {
+                        check,
+                        recipe: recipe.clone(),
+                    }),
             })
             .collect(),
     }
+}
+/// 通常時の保存の試験（`add`）への対応づけ。
+fn aspect(id: &str, text: &str, kind: Option<ObservationKind>, links: &[&str]) -> Aspect {
+    aspect_for(
+        &base_recipe("add", &[], storage_trial(TrialFault::Normal)),
+        id,
+        text,
+        kind,
+        links,
+    )
 }
 fn status(view: &WorkspaceView, id: &str) -> AspectStatus {
     view.checks[0]
@@ -417,6 +458,27 @@ fn unreadable_storage_and_missing_record_are_different_statuses() {
     assert_eq!(v.checks[0].coverage.status, CoverageStatus::Partial);
 
     // 表示は成功と言うが、保存先に記録がない: 表示とDB（保存先）が食い違う。
+    // 操作（claim）が変わるので、人がその試験の設定で対応づけ直してから実行する。
+    let claim = base_recipe("claim", &[], storage_trial(TrialFault::Normal));
+    f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![
+            aspect_for(
+                &claim,
+                "accepted",
+                "受付の表示が出る",
+                Some(ObservationKind::Stdout),
+                &["accepted"],
+            ),
+            aspect_for(
+                &claim,
+                "stored",
+                "保存先に書き込まれる",
+                Some(ObservationKind::StoredFile),
+                &["written"],
+            ),
+        ],
+    });
     let v = f.run("claim", storage_trial(TrialFault::Normal));
     assert_eq!(v.checks[0].verdict, Verdict::NotSatisfied);
     assert_eq!(status(&v, "accepted"), AspectStatus::Observed);
@@ -453,12 +515,36 @@ fn old_observations_are_not_reused_after_the_trial_or_version_changes() {
     let mut narrower = storage_trial(TrialFault::Normal);
     narrower.readback = None;
     narrower.checks.retain(|c| c.id != "readback");
-    let v = f.run("add", narrower);
+    let v = f.run("add", narrower.clone());
     assert_eq!(v.checks[0].verdict, Verdict::Satisfied);
+    // 読み直しを外すと試験の設定が変わるため、残る判定条件への対応づけも確認し直す。
+    assert_eq!(status(&v, "stored"), AspectStatus::DefinitionChanged);
+    assert_eq!(status(&v, "later"), AspectStatus::NotInTrial);
+    assert_eq!(v.checks[0].coverage.status, CoverageStatus::NotCovered);
+    assert!(!v.checks[0].verification_passed);
+    let narrow = base_recipe("add", &[], narrower);
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![
+            aspect_for(
+                &narrow,
+                "stored",
+                "保存先に書き込まれる",
+                Some(ObservationKind::StoredFile),
+                &["written"],
+            ),
+            aspect_for(
+                &narrow,
+                "later",
+                "後から読み出せる",
+                Some(ObservationKind::ReadbackOutput),
+                &["readback"],
+            ),
+        ],
+    });
     assert_eq!(status(&v, "stored"), AspectStatus::Observed);
     assert_eq!(status(&v, "later"), AspectStatus::NotInTrial);
     assert_eq!(v.checks[0].coverage.status, CoverageStatus::Partial);
-    assert!(!v.checks[0].verification_passed);
 
     // 参照する版を変えると、試行は適用できず、どの部分も観測済みにしない。
     let mut other = v.workspace.checks[0].source.clone().unwrap();
@@ -623,4 +709,76 @@ fn same_check_id_with_a_different_definition_requires_a_new_link() {
     assert_eq!(status(&v, "stored"), AspectStatus::DefinitionChanged);
     let label = &v.checks[0].coverage.aspects[0].trial_checks[0].label;
     assert!(label.contains("書き込み"), "{label}");
+}
+
+/// 判定条件の識別子・文面は同じまま、操作対象（引数）だけが変わった試験には前の対応づけを適用しない。
+/// 別の部分を保存しても、変わった判定条件への対応づけは人が選び直すまで以前の指紋を保つ。
+#[test]
+fn changing_only_the_operated_target_requires_relinking_and_saving_other_parts_keeps_old_links() {
+    let f = Fixture::new("追加したメモは保存される");
+    let patient_a = base_recipe("add", &["patient-a"], storage_trial(TrialFault::Normal));
+    f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![aspect_for(
+            &patient_a,
+            "stored",
+            "患者のメモが保存先に書き込まれる",
+            Some(ObservationKind::StoredFile),
+            &["written"],
+        )],
+    });
+    let mut run_a = patient_a.clone();
+    run_a.source = f.recipe("add", storage_trial(TrialFault::Normal)).source;
+    let v = f.run_recipe(run_a);
+    assert_eq!(status(&v, "stored"), AspectStatus::Observed);
+    assert!(v.checks[0].verification_passed);
+    let saved_link = v.workspace.checks[0].aspects[0].trial_checks[0].clone();
+    assert!(
+        saved_link.label.contains("patient-a"),
+        "{}",
+        saved_link.label
+    );
+
+    // 判定条件 written は同じ内容のまま、操作対象を患者Bに変える。
+    let mut run_b = base_recipe("add", &["patient-b"], storage_trial(TrialFault::Normal));
+    run_b.source = f.recipe("add", storage_trial(TrialFault::Normal)).source;
+    let v = f.run_recipe(run_b.clone());
+    assert_eq!(v.checks[0].verdict, Verdict::Satisfied, "試験自体は通る");
+    assert_eq!(status(&v, "stored"), AspectStatus::DefinitionChanged);
+    assert!(!v.checks[0].verification_passed);
+    assert!(f.release().is_err());
+
+    // 別の部分を追加して保存する。既存の対応づけは内容を送らないので、以前の指紋のまま。
+    let mut kept = v.workspace.checks[0].aspects.clone();
+    kept.push(Aspect {
+        id: "note".into(),
+        text: "受付の表示が出る".into(),
+        origin: "合成の記入者".into(),
+        observation: Some(ObservationKind::Stdout),
+        trial_checks: vec![],
+    });
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: kept,
+    });
+    assert_eq!(
+        v.workspace.checks[0].aspects[0].trial_checks[0].fingerprint, saved_link.fingerprint,
+        "別の部分の保存で、変わった判定条件への対応づけを更新しない"
+    );
+    assert_eq!(status(&v, "stored"), AspectStatus::DefinitionChanged);
+    assert!(!v.checks[0].verification_passed);
+
+    // 人が患者Bの試験の設定で選び直すと、その試行で観測済みになる。
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![aspect_for(
+            &run_b,
+            "stored",
+            "患者のメモが保存先に書き込まれる",
+            Some(ObservationKind::StoredFile),
+            &["written"],
+        )],
+    });
+    assert_eq!(status(&v, "stored"), AspectStatus::Observed);
+    assert!(v.checks[0].verification_passed);
 }

@@ -171,6 +171,7 @@ fn handle_request(
             "architecture",
             "understand",
             "observation-kinds",
+            "trial-fingerprints",
         ];
         if app.is_some() {
             routes.extend(["prepare", "ai", "system-diagram", "browser-recipes"]);
@@ -395,6 +396,13 @@ fn handle_request(
             }
         }
         ("GET", "/api/v1/backup") => result_response(stream, crate::backup::snapshot(directory)),
+        ("POST", "/api/v1/trial-fingerprints") => {
+            // 読み取り専用。試験の設定から判定条件ごとの指紋を返し、画面が保存済みの対応づけと比べる。
+            let result = parse_body::<crate::execution::Recipe>(&request.body)
+                .and_then(|recipe| crate::coverage::fingerprints(&recipe))
+                .map(|f| serde_json::json!({"schema_version": 1, "fingerprints": f}));
+            result_response(stream, result)
+        }
         ("POST", "/api/v1/compare") => {
             let result = parse_body::<crate::comparison::CompareRequest>(&request.body).and_then(
                 |request| crate::comparison::compare(workspace::load(directory)?, request),

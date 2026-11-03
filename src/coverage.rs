@@ -2,7 +2,7 @@
 //! 試験の合否（判定条件がすべて通ったか）とは別に求める。人やAIが述べた対応づけを、
 //! 基盤が実行記録の判定条件IDと観測方法に照合し、文章の一致から適否を決めない。
 use crate::error::invalid;
-use crate::execution::Criterion;
+use crate::execution::{Criterion, Recipe};
 use crate::trial::{CheckMethod, Observed, TrialCheck};
 use crate::workspace::{Check, Evidence};
 use serde::{Deserialize, Serialize};
@@ -190,10 +190,88 @@ pub fn catalog() -> Vec<KindInfo> {
     ObservationKind::ALL.iter().map(|k| k.info()).collect()
 }
 
-/// 判定条件の内容（範囲・観測方法・期待・対象・文）の指紋。識別子が同じでも内容が変われば一致しない。
-pub fn trial_check_fingerprint(check: &TrialCheck) -> String {
-    let bytes = serde_json::to_vec(check).unwrap_or_default();
+/// 判定条件が依存する試験の設定。起動・引数・入力・故障・保存先・読み直し・待つプロセス・コンテナ・
+/// HTTP操作・ブラウザ操作（準備・操作・DBの問い合わせ先）を含む。固定版（コミット）と確認項目のIDは含めない。
+/// 固定版の違いは試行の適用可否で扱う。
+fn trial_context(recipe: &Recipe) -> serde_json::Value {
+    serde_json::json!({
+        "runtime": recipe.runtime,
+        "launch": recipe.launch,
+        "entrypoint": recipe.entrypoint,
+        "args": recipe.args,
+        "input": recipe.input,
+        "fault": recipe.trial.as_ref().map(|t| t.fault),
+        "storage": recipe.trial.as_ref().and_then(|t| t.storage.clone()),
+        "readback": recipe.trial.as_ref().and_then(|t| t.readback.clone()),
+        "python": recipe.python,
+        "server": recipe.server,
+        "containers": recipe.containers,
+        "http": recipe.http,
+        "browser": recipe.browser,
+    })
+}
+/// 判定条件の内容（範囲・観測方法・期待・対象・文）と、その判定条件が依存する試験の設定の指紋。
+/// 識別子と文面が同じでも、操作対象・引数・観測先などが変われば一致しない。
+pub fn trial_check_fingerprint(check: &TrialCheck, recipe: &Recipe) -> String {
+    let bytes =
+        serde_json::to_vec(&serde_json::json!({"check": check, "context": trial_context(recipe)}))
+            .unwrap_or_default();
     format!("{:x}", Sha256::digest(bytes))
+}
+/// 試験の各判定条件の識別子・指紋・説明。画面が現在の設定と保存済みの対応づけを比べるために使う。
+#[derive(Debug, Clone, Serialize)]
+pub struct Fingerprint {
+    pub id: String,
+    pub fingerprint: String,
+    pub label: String,
+}
+pub fn fingerprints(recipe: &Recipe) -> io::Result<Vec<Fingerprint>> {
+    let spec = recipe
+        .trial
+        .as_ref()
+        .ok_or_else(|| invalid("試験案（判定条件）のない設定です"))?;
+    Ok(spec
+        .checks
+        .iter()
+        .map(|c| Fingerprint {
+            id: c.id.clone(),
+            fingerprint: trial_check_fingerprint(c, recipe),
+            label: link_label(c, recipe),
+        })
+        .collect())
+}
+fn link_label(definition: &TrialCheck, recipe: &Recipe) -> String {
+    let fault = recipe
+        .trial
+        .as_ref()
+        .map(|t| t.fault.label())
+        .unwrap_or("故障の指定なし");
+    format!(
+        "{}（{}。期待: {:?}{}{}。{}。起動: {} {}）",
+        definition.scope,
+        definition.method.source_label(),
+        definition.expect,
+        definition
+            .text
+            .as_deref()
+            .map(|t| format!(" 「{t}」"))
+            .unwrap_or_default(),
+        definition
+            .target
+            .as_deref()
+            .map(|t| format!("、対象 {t}"))
+            .unwrap_or_default(),
+        fault,
+        recipe.entrypoint,
+        recipe.args.join(" ")
+    )
+}
+/// 登録時に送る判定条件と、それが属する試験の設定。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkDefinition {
+    pub check: TrialCheck,
+    pub recipe: Recipe,
 }
 /// 試験案を使わない試行（対象プログラムの観測・外部の報告）の判定の指紋。
 pub fn criterion_fingerprint(criterion: &Criterion) -> String {
@@ -202,7 +280,8 @@ pub fn criterion_fingerprint(criterion: &Criterion) -> String {
 }
 
 /// 確かめたい部分に対応づけた判定条件。識別子だけでなく内容の指紋で照合する。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// 等価性は保存する識別子・指紋・説明で決め、登録時にだけ送る内容は比べない。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrialLink {
     pub id: String,
@@ -212,10 +291,17 @@ pub struct TrialLink {
     /// 対応づけた時点の判定条件の説明（範囲と期待）。人が見直すための記録。
     #[serde(default)]
     pub label: String,
-    /// 登録時にだけ送る判定条件の内容。基盤が指紋と説明に変えて保存し、本体は残さない。
+    /// 登録時にだけ送る判定条件の内容と試験の設定。基盤が指紋と説明に変えて保存し、本体は残さない。
+    /// 送らない対応づけは、保存済みの指紋をそのまま保つ（人が選び直すまで更新しない）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition: Option<TrialCheck>,
+    pub definition: Option<LinkDefinition>,
 }
+impl PartialEq for TrialLink {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.fingerprint == other.fingerprint && self.label == other.label
+    }
+}
+impl Eq for TrialLink {}
 
 /// 確認項目のうち、確かめたい一つの部分と、それをどの観測で確かめるかの宣言。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,27 +326,18 @@ pub fn normalize(aspects: Vec<Aspect>) -> io::Result<Vec<Aspect>> {
     let mut result = Vec::with_capacity(aspects.len());
     for mut aspect in aspects {
         for link in &mut aspect.trial_checks {
-            if let Some(definition) = link.definition.take() {
-                if definition.id != link.id {
-                    return Err(invalid("対応づける判定条件の識別子と内容が一致しません"));
+            if let Some(LinkDefinition { check, recipe }) = link.definition.take() {
+                let in_recipe = recipe
+                    .trial
+                    .as_ref()
+                    .is_some_and(|t| t.checks.iter().any(|c| *c == check));
+                if check.id != link.id || !in_recipe {
+                    return Err(invalid(
+                        "対応づける判定条件の識別子・内容が、送られた試験の設定と一致しません",
+                    ));
                 }
-                link.fingerprint = trial_check_fingerprint(&definition);
-                link.label = format!(
-                    "{}（{}。期待: {:?}{}{}）",
-                    definition.scope,
-                    definition.method.source_label(),
-                    definition.expect,
-                    definition
-                        .text
-                        .as_deref()
-                        .map(|t| format!(" 「{t}」"))
-                        .unwrap_or_default(),
-                    definition
-                        .target
-                        .as_deref()
-                        .map(|t| format!("、対象 {t}"))
-                        .unwrap_or_default()
-                );
+                link.fingerprint = trial_check_fingerprint(&check, &recipe);
+                link.label = link_label(&check, &recipe);
             }
             if link.fingerprint.len() != 64
                 || !link.fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
@@ -349,7 +426,7 @@ pub fn items(evidence: &Evidence) -> Vec<Item> {
                     id: c.id.clone(),
                     kind: ObservationKind::of_method(c.method),
                     scope: c.scope.clone(),
-                    fingerprint: trial_check_fingerprint(c),
+                    fingerprint: trial_check_fingerprint(c, &trace.recipe),
                     observed: trace
                         .trial
                         .as_ref()
@@ -708,37 +785,98 @@ mod tests {
             relation: None,
         }
     }
+    fn recipe(checks: Vec<TrialCheck>, args: &[&str]) -> Recipe {
+        Recipe {
+            schema_version: 1,
+            check_id: "concern".into(),
+            source: crate::workspace::CodeReference {
+                repository: "example/notes".into(),
+                commit: "a".repeat(40),
+                path: "notes.py".into(),
+                line: 1,
+                end_line: 1,
+            },
+            runtime: crate::execution::Runtime::Python3,
+            entrypoint: "notes.py".into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            input: serde_json::json!({}),
+            criterion: Criterion {
+                assertion: "eel.trial".into(),
+                subject: "concern".into(),
+            },
+            timeout_ms: 1000,
+            trial: Some(crate::trial::TrialSpec {
+                schema_version: 1,
+                fault: crate::trial::TrialFault::Normal,
+                storage: None,
+                readback: None,
+                checks,
+                recovery: None,
+            }),
+            launch: Default::default(),
+            python: None,
+            server: None,
+            containers: None,
+            http: None,
+            browser: None,
+        }
+    }
 
     #[test]
     fn same_id_with_changed_definition_is_not_observed_and_definitions_become_fingerprints() {
         let a = trial_check("c1", "患者A");
         let b = trial_check("c1", "患者B");
-        assert_ne!(trial_check_fingerprint(&a), trial_check_fingerprint(&b));
+        let ra = recipe(vec![a.clone()], &["patient-a"]);
+        let rb = recipe(vec![b.clone()], &["patient-a"]);
+        assert_ne!(
+            trial_check_fingerprint(&a, &ra),
+            trial_check_fingerprint(&b, &rb)
+        );
+        // 判定条件の文面が同じでも、操作対象（引数）が変われば一致しない。固定版と待機上限の違いは含めない。
+        let other_patient = recipe(vec![a.clone()], &["patient-b"]);
+        assert_ne!(
+            trial_check_fingerprint(&a, &ra),
+            trial_check_fingerprint(&a, &other_patient)
+        );
+        let mut other_commit = ra.clone();
+        other_commit.source.commit = "b".repeat(40);
+        other_commit.timeout_ms = 9;
+        assert_eq!(
+            trial_check_fingerprint(&a, &ra),
+            trial_check_fingerprint(&a, &other_commit)
+        );
         let mut aspect = aspect(Some(ObservationKind::DatabaseRows), &[]);
         aspect.trial_checks.push(TrialLink {
             id: "c1".into(),
             fingerprint: String::new(),
             label: String::new(),
-            definition: Some(a.clone()),
+            definition: Some(LinkDefinition {
+                check: a.clone(),
+                recipe: ra.clone(),
+            }),
         });
         let saved = normalize(vec![aspect]).unwrap();
         let link = &saved[0].trial_checks[0];
-        assert_eq!(link.fingerprint, trial_check_fingerprint(&a));
+        assert_eq!(link.fingerprint, trial_check_fingerprint(&a, &ra));
         assert!(link.definition.is_none());
-        assert!(link.label.contains("範囲"));
+        assert!(link.label.contains("範囲") && link.label.contains("patient-a"));
+        assert_eq!(fingerprints(&ra).unwrap()[0].fingerprint, link.fingerprint);
         let mut changed = item("c1", ObservationKind::DatabaseRows, Some(Observed::Pass));
-        changed.fingerprint = trial_check_fingerprint(&b);
+        changed.fingerprint = trial_check_fingerprint(&a, &other_patient);
         assert_eq!(
             status_of(&saved[0], true, &[changed]).0,
             AspectStatus::DefinitionChanged
         );
         let mut same = item("c1", ObservationKind::DatabaseRows, Some(Observed::Pass));
-        same.fingerprint = trial_check_fingerprint(&a);
+        same.fingerprint = trial_check_fingerprint(&a, &ra);
         assert_eq!(
             status_of(&saved[0], true, &[same]).0,
             AspectStatus::Observed
         );
-        // 内容も指紋もない対応づけ、識別子と内容が食い違う対応づけは拒否する。
+        // 内容を送らない対応づけは保存済みの指紋を保ち、現在の試験に合わせて更新しない。
+        let kept = normalize(saved.clone()).unwrap();
+        assert_eq!(kept[0].trial_checks[0].fingerprint, link.fingerprint);
+        // 内容も指紋もない対応づけ、識別子や内容が試験の設定と食い違う対応づけは拒否する。
         let mut bare = super::Aspect {
             trial_checks: vec![TrialLink {
                 id: "c1".into(),
@@ -749,8 +887,16 @@ mod tests {
             ..saved[0].clone()
         };
         assert!(normalize(vec![bare.clone()]).is_err());
-        bare.trial_checks[0].definition = Some(trial_check("c2", "x"));
-        assert!(normalize(vec![bare]).is_err());
+        bare.trial_checks[0].definition = Some(LinkDefinition {
+            check: trial_check("c2", "x"),
+            recipe: ra.clone(),
+        });
+        assert!(normalize(vec![bare.clone()]).is_err());
+        bare.trial_checks[0].definition = Some(LinkDefinition {
+            check: b.clone(),
+            recipe: ra,
+        });
+        assert!(normalize(vec![bare]).is_err(), "試験の設定にない内容");
     }
 
     #[test]
