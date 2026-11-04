@@ -31,7 +31,7 @@ const dify=createServer(async(req,res)=>{
       assert.equal(query.writing_policy_source.commit,'488dd37c0baa67ec65bf155aced9fa1a01d261e2');
       assert.ok(context.architecture.nodes.some(n=>n.id===context.selected_element));
       const ready=Boolean(query.previous_record?.expectation)||query.message.includes('開き直して');
-      const record={concern:query.previous_record?.concern||query.message,actor:ready?'私':'',operation:ready?'保存して画面を開き直す':'',expectation:ready?'保存後に画面を開き直しても同じ内容を読める':'',related_object_ids:context.architecture.nodes.filter(n=>['api','database'].includes(n.role)).map(n=>n.id),claims:[{text:'APIが定義されている',refs:[{path:'server/main.py',line:3,end_line:3}]}],unknowns:['保存後の再読込は未検証です。'],test_plan:ready?[{operation:'架空のメモを保存して画面を開き直す',expected:'同じ内容を読める',observe:'保存時の表示と開き直した後の本文'}]:[],reported_observations:[],improvement_ideas:[]};
+      const record={concern:query.previous_record?.concern||query.message,actor:ready?'私':'',operation:ready?'保存して画面を開き直す':'',expectation:ready?'保存後に画面を開き直しても同じ内容を読める':'',related_object_ids:context.architecture.nodes.filter(n=>['api','database'].includes(n.role)).map(n=>n.id),claims:[{text:'APIが定義されている',refs:[{path:'server/main.py',line:3,end_line:3}]}],unknowns:['保存後の再読込は未検証です。'],test_plan:ready?[{operation:'架空のメモを保存して画面を開き直す',expected:'同じ内容を読める',observe:'保存時の表示と開き直した後の本文'},...(query.results?.checks?.length?[{operation:'開き直した後にもう一度開く',expected:'二度目も同じ内容を読める',observe:'二度目の本文'}]:[])]:[],reported_observations:[],improvement_ideas:[]};
       if(query.message.includes('SOAP')) record.claims=[{text:'form_soapへの書込関数を呼ぶ記述がある',refs:[{path:'interface/forms/soap/save.php',line:2,end_line:2}]}];
       if(invalidMode==='object')record.related_object_ids=['invented_store'];
       if(invalidMode==='ref')record.claims[0].refs[0].line=999;
@@ -118,6 +118,9 @@ try{
   await page.getByLabel('検証する動作',{exact:true}).fill('私が保存後に開き直しても同じ内容を読める');
   await page.getByRole('button',{name:'この内容を検証する',exact:true}).click();await page.locator('#trial:not([hidden])').waitFor();
   let v=await view(),check=v.workspace.checks[0];assert.equal(check.rule,'manual_only');assert.equal(v.workspace.evidence.length,0);assert.equal(check.questions[0].text,'保存後の再読込は未検証です。');
+  // AIの検証案は確かめたい部分の下書きになるが、観測の種類と判定条件は未選択のまま。試験が通っても自動では観測済みにならない。
+  assert.equal(check.aspects.length,1);assert.match(check.aspects[0].text,/同じ内容を読める/);assert.equal(check.aspects[0].observation,null);assert.deepEqual(check.aspects[0].trial_checks,[]);assert.match(check.aspects[0].origin,/AIの整理案/);
+  assert.equal(v.checks[0].coverage.status,'not_covered');assert.equal(v.checks[0].coverage.aspects[0].status,'undefined');
   assert.equal(v.workspace.statements[0].role,'developer','概要表示でも開発者として記録する');assert.equal(v.workspace.statements[0].confirmations.length,0);assert.equal(JSON.parse(v.workspace.statements[0].origin).dialogue_turn,2);
   assert.equal(await page.getByLabel('検証する動作',{exact:true}).inputValue(),check.id);
   assert.equal(await page.getByLabel('検証する動作',{exact:true}).locator('option',{hasText:check.text}).count(),1);
@@ -135,6 +138,8 @@ try{
   // 同じ期待は複製せず、同じ会話で編集した確認項目も版へ反映する。
   await page.getByRole('button',{name:'この内容で再検証する',exact:true}).click();await page.locator('#trial:not([hidden])').waitFor();
   v=await view();assert.equal(v.workspace.checks.length,1);assert.equal(v.workspace.checks[0].version,check.version);
+  // 期待が同じでも、続けた対話で増えた検証案は下書きとして追加され、前の下書きは重複しない。
+  assert.deepEqual(v.workspace.checks[0].aspects.map(a=>[a.id,a.observation]),[['plan-2-1',null],['plan-3-1',null]]);assert.match(v.workspace.checks[0].aspects[1].text,/二度目も同じ内容を読める/);
   for(const expectation of ['開き直した後の本文が保存前の本文と一致する','二度開き直した後も保存前の本文と一致する']){
     await page.getByRole('link',{name:'構成図と検証項目に戻る',exact:true}).click();await page.locator('.dialogue-history summary',{hasText:'3往復'}).waitFor();
     await page.getByLabel('検証する動作',{exact:true}).fill(expectation);

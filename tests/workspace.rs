@@ -123,6 +123,8 @@ fn general_case_starts_without_generated_domain_requirements() {
                 rule: Rule::ManualOnly,
                 dependencies: vec![],
                 questions: vec![],
+                aspects: vec![],
+                link_settings: vec![],
             },
         },
     );
@@ -228,6 +230,17 @@ fn unknown_and_failed_checks_block_release_without_relabelling_the_observation()
     assert!(!failed.checks[0].verification_passed);
     assert!(release().is_err());
     let passed = import(&case, &support::trace(&[ObservationOutcome::Pass]), "save");
+    assert_eq!(passed.checks[0].verdict, Verdict::Satisfied);
+    assert!(
+        !passed.checks[0].verification_passed,
+        "試行が通っても、確認項目のどの部分を確かめたか未登録なら通過にしない"
+    );
+    assert_eq!(
+        passed.checks[0].coverage.status,
+        mugiurushi::coverage::CoverageStatus::NotDeclared
+    );
+    assert!(release().is_err());
+    let passed = apply(&case, support::readback_aspects("save"));
     assert!(passed.checks[0].verification_passed);
     assert!(
         !passed.verification_passed,
@@ -245,11 +258,12 @@ fn unknown_and_failed_checks_block_release_without_relabelling_the_observation()
     let mut workspace = support::workspace();
     workspace.checks.truncate(1);
     initialize(&passed_case, workspace, "合成の作成者", "一条件の確認").unwrap();
-    let passed = import(
+    import(
         &passed_case,
         &support::trace(&[ObservationOutcome::Pass]),
         "save",
     );
+    let passed = apply(&passed_case, support::readback_aspects("save"));
     assert!(passed.verification_passed);
     assert!(
         change(
@@ -548,4 +562,148 @@ fn retired_api_aliases_never_return_case_backup_or_execution_data() {
         None,
     );
     assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+}
+
+#[test]
+fn observation_kinds_require_auth_and_aspect_links_are_validated_over_http() {
+    let sandbox = Sandbox::new();
+    let case = sandbox.case();
+    let denied = http(
+        &case,
+        "GET",
+        "/api/v1/observation-kinds",
+        "",
+        Some("same"),
+        None,
+        None,
+    );
+    assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+    let listed = http(
+        &case,
+        "GET",
+        "/api/v1/observation-kinds",
+        "",
+        Some("same"),
+        Some("test-token"),
+        None,
+    );
+    assert!(listed.starts_with("HTTP/1.1 200"), "{listed}");
+    let body: serde_json::Value =
+        serde_json::from_str(listed.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let kinds = body["kinds"].as_array().unwrap();
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k["id"] == "database_rows" && k["support"] == "judged")
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| k["id"] == "network_payload" && k["support"] == "unsupported")
+    );
+    let revision = load(&case).unwrap().revision;
+    let request = |aspects: &str| {
+        http(
+            &case,
+            "POST",
+            "/api/v1/change",
+            &format!(
+                r#"{{"expected_revision":{revision},"actor":"合成","reason":"対応づけ","action":{{"op":"set_aspects","check_id":"save","aspects":{aspects}}}}}"#
+            ),
+            Some("same"),
+            Some("test-token"),
+            None,
+        )
+    };
+    let fingerprint =
+        mugiurushi::coverage::criterion_fingerprint(&mugiurushi::execution::Criterion {
+            assertion: "readback".into(),
+            subject: "record-1".into(),
+        });
+    let link = format!(r#"{{"id":"readback","fingerprint":"{fingerprint}"}}"#);
+    let rejected = request(&format!(
+        r#"[{{"id":"a","text":"読める","origin":"合成","observation":"network_payload","trial_checks":[{link}]}}]"#
+    ));
+    assert!(rejected.starts_with("HTTP/1.1 400"), "{rejected}");
+    let unknown_kind = request(
+        r#"[{"id":"a","text":"読める","origin":"合成","observation":"telepathy","trial_checks":[]}]"#,
+    );
+    assert!(unknown_kind.starts_with("HTTP/1.1 400"), "{unknown_kind}");
+    let no_fingerprint = request(
+        r#"[{"id":"a","text":"読める","origin":"合成","observation":"reported_observation","trial_checks":[{"id":"readback"}]}]"#,
+    );
+    assert!(
+        no_fingerprint.starts_with("HTTP/1.1 400"),
+        "{no_fingerprint}"
+    );
+    assert_eq!(load(&case).unwrap().revision, revision);
+    let accepted = request(&format!(
+        r#"[{{"id":"a","text":"読める","origin":"合成","observation":"reported_observation","trial_checks":[{link}]}}]"#
+    ));
+    assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
+    let saved = load(&case).unwrap();
+    assert_eq!(saved.revision, revision + 1);
+    assert_eq!(saved.checks[0].version, 1, "対応づけは条件の版を変えない");
+    assert_eq!(saved.checks[0].aspects[0].trial_checks[0].id, "readback");
+    assert_eq!(
+        saved.checks[0].aspects[0].trial_checks[0].fingerprint,
+        fingerprint
+    );
+}
+
+#[test]
+fn link_changes_requires_auth_and_rejects_settings_without_trial_checks() {
+    let sandbox = Sandbox::new();
+    let case = sandbox.case();
+    let recipe = serde_json::json!({"schema_version":1,"check_id":"save","source":{"repository":"example/notes","commit":"a".repeat(40),"path":"notes.py","line":1,"end_line":1},"runtime":"python3","entrypoint":"notes.py","args":[],"input":{},"criterion":{"assertion":"eel.trial","subject":"save"},"timeout_ms":1000});
+    let body = serde_json::json!({"check_id":"save","recipe":recipe}).to_string();
+    let denied = http(
+        &case,
+        "POST",
+        "/api/v1/link-changes",
+        &body,
+        Some("same"),
+        None,
+        None,
+    );
+    assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+    let no_trial = http(
+        &case,
+        "POST",
+        "/api/v1/link-changes",
+        &body,
+        Some("same"),
+        Some("test-token"),
+        None,
+    );
+    assert!(no_trial.starts_with("HTTP/1.1 400"), "{no_trial}");
+    let unknown = http(
+        &case,
+        "POST",
+        "/api/v1/link-changes",
+        &serde_json::json!({"check_id":"save","recipe":recipe,"extra":1}).to_string(),
+        Some("same"),
+        Some("test-token"),
+        None,
+    );
+    assert!(unknown.starts_with("HTTP/1.1 400"), "{unknown}");
+    let mut with_trial = recipe.clone();
+    with_trial["trial"] = serde_json::json!({"schema_version":1,"fault":"normal","checks":[{"id":"c1","scope":"受付","method":"exit_code","expect":"zero"}]});
+    let listed = http(
+        &case,
+        "POST",
+        "/api/v1/link-changes",
+        &serde_json::json!({"check_id":"save","recipe":with_trial}).to_string(),
+        Some("same"),
+        Some("test-token"),
+        None,
+    );
+    assert!(listed.starts_with("HTTP/1.1 200"), "{listed}");
+    let body: serde_json::Value =
+        serde_json::from_str(listed.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(
+        body["links"],
+        serde_json::json!([]),
+        "対応づけのない確認項目"
+    );
 }

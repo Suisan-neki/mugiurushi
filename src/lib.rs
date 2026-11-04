@@ -7,6 +7,7 @@ pub mod browser_evidence;
 pub mod browser_recipes;
 pub mod comparison;
 pub mod container;
+pub mod coverage;
 pub mod environment;
 pub mod error;
 pub mod execution;

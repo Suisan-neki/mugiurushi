@@ -126,6 +126,14 @@ pub struct Check {
     pub rule: Rule,
     pub dependencies: Vec<String>,
     pub questions: Vec<Question>,
+    /// 確認項目のうち確かめたい部分と、それぞれをどの観測・判定条件で確かめるかの宣言。
+    /// 試験の合否とは別に照合する。旧形式の記録にはない。
+    #[serde(default)]
+    pub aspects: Vec<crate::coverage::Aspect>,
+    /// 対応づけた時点の試験設定（環境変数の値を伏せた形）。対応づけが参照するものだけを置き、
+    /// 設定が変わったときに何が変わったかを示すために使う。旧形式の記録にはない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_settings: Vec<crate::coverage::SettingsRecord>,
 }
 
 /// 確認事項が参照するコード。実行したコードとの一致を証明する情報ではない。
@@ -305,6 +313,8 @@ pub enum ActionKind {
     InspectConflict,
     InspectFailure,
     ReviewLimits,
+    /// 試験は通ったが、確認項目のどの部分に答えたかの登録・観測が足りない。
+    LinkAspects,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,10 +328,15 @@ pub struct SuggestedAction {
 pub struct CheckView {
     pub check_id: String,
     pub check_version: u32,
+    /// 最新の適用できる試行の判定（選んだ判定条件がすべて通ったか）。確認項目全体への答えではない。
     pub verdict: Verdict,
+    /// 試行の判定が条件を満たし、かつ登録した確かめる部分をすべて観測した場合だけ真。
     #[serde(default)]
     pub verification_passed: bool,
     pub reason: String,
+    /// 確認項目のどの部分を、どの観測で確かめたか。旧形式の記録では未登録。
+    #[serde(default = "crate::coverage::undeclared")]
+    pub coverage: crate::coverage::Coverage,
     pub selected_evidence: Option<String>,
     pub evidence: Vec<EvidenceView>,
     pub unanswered: Vec<Question>,
@@ -414,6 +429,11 @@ pub enum Change {
     AddQuestion {
         check_id: String,
         question: Question,
+    },
+    /// 確認項目のどの部分を、どの観測・判定条件で確かめるかを登録し直す。条件の版は変えない。
+    SetAspects {
+        check_id: String,
+        aspects: Vec<crate::coverage::Aspect>,
     },
     ReviseCheck {
         check_id: String,
@@ -529,6 +549,8 @@ fn validate_check(check: &Check) -> io::Result<()> {
     }
     unique(check.dependencies.iter().map(String::as_str))?;
     unique(check.questions.iter().map(|q| q.id.as_str()))?;
+    crate::coverage::validate(&check.aspects)?;
+    crate::coverage::validate_settings(&check.aspects, &check.link_settings)?;
     for q in &check.questions {
         nonempty(&q.text, "質問")?;
         match (&q.answer, &q.origin) {
@@ -970,6 +992,15 @@ pub fn view(workspace: Workspace) -> WorkspaceView {
                     "この確認事項に対応する試行の根拠はまだない".into(),
                 )
             };
+            // 確かめる部分の照合は、適用できる最新の試行だけと行う。古い試行で補わない。
+            let applicable_last = last.filter(|e| e.applicable).and_then(|e| {
+                workspace
+                    .evidence
+                    .iter()
+                    .find(|raw| raw.id == e.id)
+            });
+            let coverage =
+                crate::coverage::assess(check, applicable_last, &workspace.evidence);
             let next = if let Some(question) = unanswered.first() {
                 SuggestedAction {
                     kind: ActionKind::Ask,
@@ -1020,6 +1051,19 @@ pub fn view(workspace: Workspace) -> WorkspaceView {
                     reason: reason.clone(),
                     text: "不足する観測箇所を確認し、追加の観測を伴う新しい試行を行う".into(),
                 }
+            } else if coverage.status != crate::coverage::CoverageStatus::Covered {
+                SuggestedAction {
+                    kind: ActionKind::LinkAspects,
+                    reason: coverage.summary.clone(),
+                    text: if coverage.status == crate::coverage::CoverageStatus::NotDeclared {
+                        "この確認項目のどの部分を、どの観測と判定条件で確かめるかを登録する。登録していない部分は未確認のまま残す".into()
+                    } else {
+                        format!(
+                            "未確認の部分を観測できる試験を用意するか、未確認として残す: {}",
+                            coverage.remaining.join("、")
+                        )
+                    },
+                }
             } else {
                 SuggestedAction {
                     kind: ActionKind::ReviewLimits,
@@ -1030,9 +1074,11 @@ pub fn view(workspace: Workspace) -> WorkspaceView {
             CheckView {
                 check_id: check.id.clone(),
                 check_version: check.version,
-                verification_passed: verdict == Verdict::Satisfied,
+                verification_passed: verdict == Verdict::Satisfied
+                    && coverage.status == crate::coverage::CoverageStatus::Covered,
                 verdict,
                 reason,
+                coverage,
                 selected_evidence: last.map(|e| e.id.clone()),
                 evidence,
                 unanswered,
@@ -1295,6 +1341,12 @@ pub fn change(directory: &Path, request: ChangeRequest) -> io::Result<WorkspaceV
             if check.version != 1 {
                 return Err(invalid("新しい条件の版は1です"));
             }
+            // 対応づけは set_aspects で登録する。指紋と対応づけた時点の設定は麦漆が作る。
+            if !check.aspects.is_empty() || !check.link_settings.is_empty() {
+                return Err(invalid(
+                    "確かめる部分の対応づけは、条件を記録した後に set_aspects で登録してください",
+                ));
+            }
             workspace.checks.push(check);
             "add_check"
         }
@@ -1346,6 +1398,19 @@ pub fn change(directory: &Path, request: ChangeRequest) -> io::Result<WorkspaceV
             check.questions.push(question);
             "add_question"
         }
+        Change::SetAspects { check_id, aspects } => {
+            let i = find_check(&workspace.checks, &check_id)?;
+            let (aspects, settings) = crate::coverage::normalize(aspects, &workspace.checks[i])?;
+            let check = &mut workspace.checks[i];
+            if check.aspects == aspects && check.link_settings == settings {
+                return Err(invalid("同じ対応づけが既に記録されています"));
+            }
+            // 対応づけは試行結果の解釈であり、条件の意味は変えない。既存の試行は適用できるまま、
+            // 現在の対応づけで照合し直す。
+            check.aspects = aspects;
+            check.link_settings = settings;
+            "set_aspects"
+        }
         Change::ReviseCheck {
             check_id,
             text,
@@ -1361,6 +1426,9 @@ pub fn change(directory: &Path, request: ChangeRequest) -> io::Result<WorkspaceV
                     question.answer = None;
                     question.origin = None;
                 }
+                // 条件の意味が変わると、前の文に対して登録した部分の対応づけは使えない。
+                check.aspects.clear();
+                check.link_settings.clear();
             }
             check.version = check
                 .version
@@ -1511,7 +1579,7 @@ pub fn change(directory: &Path, request: ChangeRequest) -> io::Result<WorkspaceV
             {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    "検証未通過です。全条件の現在の判定が条件を満たすまで、「採用する」という判断は記録できません",
+                    "検証未通過です。全条件で現在の試行の判定が条件を満たし、登録した確かめる部分をすべて観測するまで、「採用する」という判断は記録できません",
                 ));
             }
             if check_ids.is_empty()

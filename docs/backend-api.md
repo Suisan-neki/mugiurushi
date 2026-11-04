@@ -34,6 +34,8 @@ APIを呼ぶクライアントは`X-Review-Token`を指定する。POSTは`Conte
 | GET `/api/v1/execution` | 操作トークン | 起動時に許可した固定版実行の対象・方式・現在のジョブ |
 | POST `/api/v1/execute` | expected_revision、actor、reason、recipe | 指定したリポジトリの固定版実行を受付。HTTP 202 |
 | POST `/api/v1/understand` | UnderstandRequest | 公開GitHubの読取、サーバーが保存した読取記録の参照・解析。コード本文は受け付けない |
+| GET `/api/v1/observation-kinds` | 操作トークン | 確かめたい部分に対応づける観測の種類。判定に使える種類、記録のみ、推定、基盤が未対応の種類を区別する |
+| POST `/api/v1/link-changes` | `{check_id, recipe}` | 読み取り専用。確認項目に保存した対応づけごとに、これから実行する試験設定と指紋が一致するか（`unchanged`・`changed`・`not_in_trial`）と、対応づけた時点から変わった設定の値（区分・場所・前・後）を返す。比較できないことは`uncomparable`に示す。コンテナの環境変数の値は記録・比較しない |
 
 POST入力は1MiBまで。更新は`expected_revision`を照合し、別の更新があればHTTP 409を返す。不正な形式や対応しない操作は400、トークン・Origin・権限の不一致は403、未定義のパス、未保存の読取記録・構成図は404。HTTP受付にはaxumを使い、長い読取・AI処理は4件まで同時に処理する。超過時は503。失敗した更新を成功した事例版として保存しない。
 
@@ -60,6 +62,8 @@ POST入力は1MiBまで。更新は`expected_revision`を照合し、別の更�
   }
 }
 ```
+
+`set_aspects`は、確認項目のどの部分を、どの観測の種類とどの判定条件で確かめるかを登録し直す。`aspects`の各要素は`id`、`text`、`origin`、`observation`（`observation-kinds`のidか`null`）、`trial_checks`。`trial_checks`の各要素は`id`と、登録時に送る`definition`（`check`: 試験案の`TrialCheck`、`recipe`: その判定条件が属する試験設定）または内容の指紋`fingerprint`（試験案を使わない試行では`Criterion`の指紋）。指紋は判定条件の内容と、起動・引数・入力・故障・保存先・読み直し・待つプロセス・コンテナ・HTTP操作・ブラウザ操作（準備・操作・DBの問い合わせ先）から計算し、固定版（コミット）・確認項目ID・待機上限は含めない。サーバーは`definition`を指紋と説明`label`に変えて保存し、本体は残さない。`definition`を送らない対応づけは保存済みの指紋をそのまま保ち、現在の試験設定に合わせて更新しない。内容も指紋もない対応づけ、識別子と内容が食い違う対応づけ、判定に使えない種類への対応づけは400。登録は試行結果の解釈であり、条件の版は変えない。`WorkspaceView.checks[].coverage`は、適用できる最新の試行の判定条件ID・観測方法・内容の指紋に照合した部分ごとの状態（`observed`、`contradicted`、`not_observed`、`not_in_trial`、`method_mismatch`、`definition_changed`、`unlinked`、`undefined`、`unsupported`、`not_judged`、`no_evidence`）を返す。識別子と観測方法、判定条件の文面が同じでも、範囲・期待・対象、または操作対象・引数・観測先などの試験設定が変わった試験には前の対応づけを適用しない（`definition_changed`）。`verdict`は試行の判定、`verification_passed`は試行の判定が満たされ、かつ登録した部分をすべて観測した場合だけ真。部分が未登録の確認項目は通過にならず、「採用する」の判断を記録できない。文章の一致から対応づけを自動で決めない。
 
 actionのその他の型は`src/workspace.rs`の`Change`を参照する。HTTPでは、サーバー上の任意ディレクトリを読む`import`操作は受け付けない。ファイルのバックアップ・復元は下のCLIを使い、HTTPで復元先を指定する操作は提供しない。
 

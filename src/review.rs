@@ -170,6 +170,8 @@ fn handle_request(
             "browser-screenshot",
             "architecture",
             "understand",
+            "observation-kinds",
+            "link-changes",
         ];
         if app.is_some() {
             routes.extend(["prepare", "ai", "system-diagram", "browser-recipes"]);
@@ -347,6 +349,15 @@ fn handle_request(
         };
     }
     match (request.method.as_str(), api_path) {
+        ("GET", "/api/v1/observation-kinds") => json(
+            stream,
+            200,
+            &serde_json::json!({
+                "schema_version": 1,
+                "kinds": crate::coverage::catalog(),
+                "note": "基盤が判定に使える観測の種類と、記録だけの種類、未対応の種類。確認項目の各部分に対応づける",
+            }),
+        ),
         ("GET", "/api/v1/profiles") => json(
             stream,
             200,
@@ -385,6 +396,22 @@ fn handle_request(
             }
         }
         ("GET", "/api/v1/backup") => result_response(stream, crate::backup::snapshot(directory)),
+        ("POST", "/api/v1/link-changes") => {
+            // 読み取り専用。確認項目に保存した対応づけを、これから実行する試験設定と比べ、
+            // 指紋の一致と、対応づけた時点から変わった設定の値を返す。
+            let result = parse_body::<crate::coverage::LinkChangesRequest>(&request.body)
+                .and_then(|request| {
+                    crate::coverage::link_changes(&workspace::load(directory)?, &request)
+                })
+                .map(|links| {
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "links": links,
+                        "note": "指紋の一致は麦漆が判定する。違いの一覧は記録した設定どうしの比較で、記録しない値（コンテナの環境変数の値）の違いは示せない",
+                    })
+                });
+            result_response(stream, result)
+        }
         ("POST", "/api/v1/compare") => {
             let result = parse_body::<crate::comparison::CompareRequest>(&request.body).and_then(
                 |request| crate::comparison::compare(workspace::load(directory)?, request),

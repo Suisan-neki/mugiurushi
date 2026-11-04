@@ -128,6 +128,8 @@ fn add_check(case: &Path) {
                 rule: Rule::ManualOnly,
                 dependencies: vec![],
                 questions: vec![],
+                aspects: vec![],
+                link_settings: vec![],
             },
         },
     )

@@ -40,6 +40,8 @@ fn case() -> Case {
                 rule: Rule::ManualOnly,
                 dependencies: vec![],
                 questions: vec![],
+                aspects: vec![],
+                link_settings: vec![],
             },
         },
     );

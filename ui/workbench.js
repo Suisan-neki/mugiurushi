@@ -409,6 +409,10 @@ async function loadCase() {
       try { state.browserRecipes = (await api('GET', '/api/v1/browser-recipes')).recipes; }
       catch (e) { state.browserRecipesError = e.message; }
     }
+    if (!state.observationKinds) {
+      try { state.observationKinds = (await api('GET', '/api/v1/observation-kinds')).kinds; }
+      catch (e) { state.observationKindsError = e.message; }
+    }
   } catch (e) { showError(e); }
   renderCurrent();
   if (['open', 'repository'].includes(state.step)) $('current').hidden = true;
@@ -906,16 +910,126 @@ function trialFormView(check, form, plan, exec) {
   setTimeout(updatePreview);
   return container;
 }
+/// 実行前に分かる判定条件の一覧。実行時（runTrial）と同じ試験設定から作り、識別子も同じ c1, c2… になる。
+/// definition（判定条件とその試験設定）は登録時に麦漆へ送り、麦漆が内容の指紋に変えて保存する。
+/// 設定を試験設定にできない場合は null を返し、対応づけを選べない理由を error に入れる。
+function trialChecksOf(check, form) {
+  try {
+    const recipe = buildRecipe(check, form);
+    return { recipe, checks: (recipe.trial?.checks || []).map(c => ({ id: c.id, scope: c.scope || '（範囲が未入力）', method: c.method, definition: { check: structuredClone(c), recipe: structuredClone(recipe) } })) };
+  } catch (e) { return { recipe: null, checks: [], error: e.message }; }
+}
+const SUPPORT_LABEL = { judged: '判定に使える', recorded_only: '記録のみ（判定には使えない）', inference: '推定（実行の観測ではない）', unsupported: '麦漆では観測できない' };
+const ASPECT_STATUS_MARK = { observed: '○', contradicted: '×', not_observed: '？', not_in_trial: '－', method_mismatch: '！', definition_changed: '！', unlinked: '－', undefined: '－', unsupported: '×', not_judged: '－', no_evidence: '－' };
+function kindInfo(id) { return (state.observationKinds || []).find(k => k.id === id) || null; }
+/// 確認項目のどの部分を、どの観測・判定条件で確かめるかを人が登録する。文章の一致から自動で決めない。
+/// 戻り値の要素は hasUnsavedChanges() を持ち、未保存の変更があるうちは試験を始められない。
+function aspectEditor(check, trial) {
+  const kinds = state.observationKinds || [];
+  const trialChecks = trial.checks;
+  const linkOf = id => trialChecks.find(c => c.id === id);
+  // 保存済みの対応づけと、これから実行する試験設定の比較。指紋の一致と変わった設定の値は麦漆が求め、画面は表示するだけ。
+  let comparisons = null, comparisonError = null;
+  const fingerprintError = trial.error || null;
+  const comparisonOf = l => comparisons?.find(c => c.link_id === l.id && c.fingerprint === l.fingerprint) || null;
+  const changedLink = l => Boolean(l.fingerprint && comparisonOf(l)?.state === 'changed');
+  const drafts = (check.aspects || []).map(a => ({ ...a, trial_checks: (a.trial_checks || []).map(l => ({ ...l })) }));
+  const container = h('section', { class: 'box', 'aria-label': '確認項目のどの部分をこの試験で確かめるか', 'data-aspect-editor': '' });
+  const current = () => state.view?.workspace.checks.find(c => c.id === check.id) || check;
+  // 比較は保存済みの形（識別子と指紋）で行う。登録時に送る definition は麦漆が指紋に変えるため、画面では比べない。
+  const stored = list => list.map(a => ({ id: a.id, text: a.text.trim(), origin: a.origin, observation: a.observation || null, trial_checks: (a.trial_checks || []).map(l => ({ id: l.id, fingerprint: l.fingerprint || '' })) }));
+  const hasUnsavedChanges = () => JSON.stringify(stored(drafts)) !== JSON.stringify(stored(current().aspects || []));
+  container.hasUnsavedChanges = hasUnsavedChanges;
+  let save;
+  const refreshSave = () => { if (save) save.disabled = !hasUnsavedChanges(); container.dataset.unsaved = hasUnsavedChanges() ? 'true' : 'false'; };
+  const render = () => {
+    const rows = drafts.map((a, index) => {
+      const info = a.observation ? kindInfo(a.observation) : null;
+      const text = textarea({ rows: 2, value: a.text, maxlength: 2000 });
+      text.control.addEventListener('input', () => { a.text = text.control.value; refreshSave(); });
+      const kind = select([['', '観測の種類を選ぶ（未定）'], ...kinds.map(k => [k.id, `${k.label}｜${SUPPORT_LABEL[k.support] || k.support}`])]);
+      kind.control.value = a.observation || '';
+      kind.control.addEventListener('change', () => { a.observation = kind.control.value || null; if (!a.observation || kindInfo(a.observation)?.support !== 'judged') a.trial_checks = []; render(); });
+      const judged = info?.support === 'judged';
+      // この試験にない判定条件への対応づけは残したまま表示し、保存しても指紋を変えない（人が外すまで）。
+      const stale = a.trial_checks.filter(l => !linkOf(l.id));
+      const links = judged ? h('fieldset', { class: 'aspect-links' }, h('legend', {}, 'この部分に答える判定条件'),
+        fingerprintError ? h('p', { class: 'ref-unverified' }, `現在の設定を試験設定にできないため、判定条件を選べません: ${fingerprintError}`) : null,
+        comparisonError ? h('p', { class: 'ref-unverified', 'data-comparison-error': '' }, `保存済みの対応づけと現在の設定を比べられませんでした。変わった対応づけがあっても、ここには表示されません: ${comparisonError}`) : null,
+        stale.length ? h('p', { class: 'ref-unverified' }, `この試験にない判定条件への対応づけが残っています（${stale.map(l => l.id).join('、')}）。この試験では「最新の試行に判定条件がない」になります。`, ' ', button('外す', () => { a.trial_checks = a.trial_checks.filter(l => linkOf(l.id)); render(); }, 'text')) : null,
+        trialChecks.length ? trialChecks.map(c => {
+          const link = a.trial_checks.find(l => l.id === c.id);
+          const box = h('input', { type: 'checkbox', value: c.id });
+          box.checked = Boolean(link);
+          // 新しく選んだ判定条件だけ、現在の試験設定（definition）を添える。既存の対応づけは保存済みの指紋のまま。
+          box.addEventListener('change', () => { a.trial_checks = box.checked ? [...a.trial_checks.filter(l => l.id !== c.id), { id: c.id, fingerprint: '', label: '', definition: c.definition }] : a.trial_checks.filter(l => l.id !== c.id); render(); });
+          const mismatch = c.method !== a.observation;
+          const changed = link && changedLink(link);
+          return h('div', { class: 'aspect-link', 'data-link': c.id, 'data-link-changed': changed ? 'true' : null },
+            h('label', {}, box, ` ${c.id}：${c.scope}（${METHODS.find(m => m[0] === c.method)?.[1] || c.method}）`),
+            mismatch ? h('span', { class: 'ref-unverified' }, '　観測方法が宣言した種類と違うため、選んでも観測済みになりません') : null,
+            changed ? h('div', { class: 'link-changed' }, h('p', { class: 'ref-unverified' }, `対応づけた時点（${link.label || '説明なし'}）と、現在の試験の内容・操作・観測先が違います。選び直すまで前の対応づけを保ち、この試験には適用しません。下の違いを確認してから選び直してください。`),
+              linkChangesView(comparisonOf(link), '現在の設定'),
+              button('違いを確認した。現在の内容で対応づけ直す', () => { a.trial_checks = a.trial_checks.map(l => l.id === c.id ? { id: c.id, fingerprint: '', label: '', definition: c.definition } : l); render(); }, 'outlined', 'sm', { 'data-relink': c.id })) : null,
+            link && !link.fingerprint ? h('p', { class: 'note' }, '保存すると、現在の試験の内容で対応づけます。') : null);
+        }) : h('p', { class: 'note' }, 'この試験には判定条件がありません。')) : null;
+      return h('div', { class: 'box', 'data-aspect': a.id },
+        field({ label: `確かめたい部分 ${index + 1}`, support: `出所: ${a.origin}`, control: text }),
+        field({ label: '必要な観測の種類', support: info ? info.note : '麦漆が判定に使える種類と、記録だけ・推定・未対応の種類を区別して選びます。', control: kind }),
+        links,
+        judged && !a.trial_checks.length ? h('p', { class: 'note' }, 'この試験のどの判定条件が答えるかを選ぶまで、この部分は未対応づけとして残ります。') : null,
+        info && info.support !== 'judged' ? h('p', { class: 'ref-unverified' }, `${SUPPORT_LABEL[info.support]}。この部分は試験が通っても未確認として残ります。`) : null,
+        button('この部分を外す', () => { drafts.splice(index, 1); render(); }, 'text'));
+    });
+    const add = button('確かめたい部分を追加する', () => { drafts.push({ id: randomId('part'), text: '', origin: `${person().name || '記入者'}（${ROLE[person().role]}）が画面で記入`, observation: null, trial_checks: [] }); render(); });
+    save = button('対応づけを保存する', () => guarded(async () => {
+      requirePerson();
+      if (drafts.some(a => !a.text.trim())) throw Error('確かめたい部分の文を入力するか、外してください。');
+      // 新しく選んだ・選び直した判定条件だけ内容（definition）を送る。それ以外は保存済みの指紋と説明をそのまま送り、
+      // 麦漆は更新しない。別の部分を直して保存しても、変わった判定条件への対応づけは人が選び直すまで変わらない。
+      const aspects = drafts.map(a => ({ id: a.id, text: a.text.trim(), origin: a.origin, observation: a.observation || null,
+        trial_checks: a.trial_checks.map(l => l.definition ? { id: l.id, definition: l.definition } : { id: l.id, fingerprint: l.fingerprint, label: l.label || '' }) }));
+      const view = await change({ op: 'set_aspects', check_id: check.id, aspects }, '確認項目のどの部分を、どの観測・判定条件で確かめるかを登録した');
+      const saved = view.workspace.checks.find(c => c.id === check.id);
+      drafts.splice(0, drafts.length, ...(saved?.aspects || []).map(a => ({ ...a, trial_checks: (a.trial_checks || []).map(l => ({ ...l })) })));
+      setStatus('対応づけを保存しました。試験はまだ実行していません。');
+      render();
+    }), 'solid-fill', 'md');
+    const uncovered = drafts.filter(a => !(a.observation && kindInfo(a.observation)?.support === 'judged' && a.trial_checks.some(l => linkOf(l.id) && !changedLink(l))));
+    const changedCount = drafts.flatMap(a => a.trial_checks).filter(changedLink).length;
+    fill(container,
+      h('h3', {}, '確認項目のどの部分をこの試験で確かめるか'),
+      h('p', {}, h('strong', {}, '確認項目: '), check.text),
+      h('p', { class: 'note' }, '試験の判定条件がすべて通っても、ここで対応づけた部分だけが「観測した」になります。相談文と試験の文章が似ているかは自動で判断しません。AIの整理案から入った部分は、人が観測の種類と判定条件を選ぶまで未確認のままです。判定条件の内容が後で変わると、麦漆は対応づけを適用せず、人が確認し直します。'),
+      state.observationKindsError ? banner('warning', '観測の種類の一覧を読み込めませんでした', h('p', {}, state.observationKindsError)) : null,
+      rows.length ? rows : h('p', { class: 'note' }, '確かめたい部分はまだ登録されていません。登録しないまま実行すると、結果は「試験の判定」だけになり、確認項目には答えていない扱いになります。'),
+      changedCount ? h('p', { class: 'ref-unverified', 'data-changed-links': changedCount }, `対応づけた後に内容・操作・観測先が変わった判定条件が ${changedCount} 件あります。人が確認して選び直すまで、この試験には適用しません。`) : null,
+      uncovered.length ? h('p', { class: 'ref-unverified', 'data-uncovered': '' }, `この試験では確かめない部分: ${uncovered.map(a => a.text || '（未入力）').join('、')}`) : null,
+      h('div', { class: 'journey-actions' }, add, save));
+    refreshSave();
+  };
+  render();
+  if (trial.recipe) {
+    api('POST', '/api/v1/link-changes', { check_id: check.id, recipe: trial.recipe })
+      .then(r => { comparisons = r.links; })
+      .catch(e => { comparisonError = e.message; })
+      .finally(() => { container.dataset.linkChanges = comparisons ? 'loaded' : 'unavailable'; render(); });
+  } else container.dataset.linkChanges = 'unavailable';
+  return container;
+}
 function showTrialConfirmation(check, form, exec) {
   const body = $('trial-body');
+  const editor = aspectEditor(check, trialChecksOf(check, form));
   const run = button('試験を始める', async () => {
     if (run.disabled) return;
+    // 画面で変えた対応づけが保存されていないと、判定に使う保存済みの内容と食い違う。
+    if (editor.hasUnsavedChanges()) { showError(Error('対応づけに未保存の変更があります。「対応づけを保存する」を押すか、変更を元に戻してから試験を始めてください。')); return; }
     run.disabled = true;
     await runTrial(check, form);
     run.disabled = false;
   }, 'solid-fill', 'lg');
   run.disabled = !check.source;
-  body.replaceChildren(h('h3', {}, 'この内容で実行します'), h('p', {}, '次のボタンを押すと、固定版を取得して対象を起動します。'), previewBox(check, form, exec), h('div', { class: 'journey-actions' }, button('設定に戻る', () => { history.back(); }), run));
+  body.replaceChildren(h('h3', {}, 'この内容で実行します'), h('p', {}, '次のボタンを押すと、固定版を取得して対象を起動します。'), previewBox(check, form, exec), editor, h('div', { class: 'journey-actions' }, button('設定に戻る', () => { history.back(); }), run));
   history.pushState(null, '', location.href.replace(/#.*$/, '') + '#trial-confirm');
   $('trial').focus(); $('main').scrollIntoView({ block: 'start' });
 }
@@ -959,13 +1073,21 @@ function previewBox(check, f, exec) {
       h('dt', {}, '判定の条件'), h('dd', {}, h('ul', { class: 'items' }, f.checks.map(c => h('li', {}, `${c.scope || '（範囲が未入力）'}: ${METHODS.find(m => m[0] === c.method)?.[1]} が ${{ zero: '0で終わる', nonzero: '0以外で終わる', contains: `「${c.text}」を含む`, not_contains: `「${c.text}」を含まない` }[c.expect]}（${METHODS.find(m => m[0] === c.method)?.[2]}）`)))),
       h('dt', {}, '実行の方式'), h('dd', {}, `${exec?.mode || '不明'}方式。${exec?.mode === 'local' ? 'OSによる隔離は行いません。' : ''}固定コミットのファイルを読み取り専用で複製し、試行ごとの新しい作業ディレクトリで起動します。依存パッケージのインストールは行いません。既存の保存データは使わず、置き換えません。${f.server ? '先に起動するプロセスとの通信は 127.0.0.1 のポートで行います。' : ''}${f.containers_text?.trim() ? 'コンテナの待ち受けは 127.0.0.1 だけに公開し、試行の後に消します。' : ''}`)));
 }
+/// 画面の設定から実行要求の試験設定を作る。実行と、対応づけの指紋の計算に同じものを使う。
+function buildRecipe(check, f, criterion = { assertion: 'eel.trial', subject: check.id }) {
+  if (f.runtime === 'browser') return browserRecipeForCheck(check, f);
+  const python = pythonSetup(f), containers = parseContainers(f.containers_text);
+  return { schema_version: 1, check_id: check.id, source: check.source, runtime: f.runtime, launch: f.launch, entrypoint: f.runtime === 'http' ? (f.http?.path || '/') : f.entrypoint, args: f.args, input: {}, criterion, timeout_ms: f.timeout_ms,
+    python, server: f.server, containers, http: f.http,
+    trial: { schema_version: 1, fault: f.fault, storage: f.storage || null, readback: f.readback, checks: f.checks.map((c, i) => ({ id: `c${i + 1}`, scope: c.scope, method: c.method, expect: c.expect, text: c.method === 'exit_code' ? null : c.text, target: c.target || null })) } };
+}
 async function runTrial(check, f) {
   await guarded(async () => {
     requirePerson();
     if (!['http', 'browser'].includes(f.runtime) && !f.entrypoint) throw Error('起動対象を入力してください。');
     if (f.runtime === 'http' && !f.http) throw Error('HTTPの操作先を入力してください。');
     const python = pythonSetup(f);
-    const containers = parseContainers(f.containers_text);
+    parseContainers(f.containers_text); // 入力の検査。試験設定は buildRecipe で作る。
     if ([f.launch, f.readback?.launch, f.server?.launch].some(l => l && l !== 'file') && f.runtime !== 'python3') throw Error('モジュール・宣言されたコマンドでの起動は、Python 3 だけで使えます。');
     if (f.server && !f.server.args.some(a => a.includes('{{port}}'))) throw Error('先に起動するプロセスの引数に、ポートの位置として {{port}} を入れてください。');
     if (!f.checks.length || f.checks.some(c => !c.scope)) throw Error('判定の条件を入力し、それぞれの確認する範囲を書いてください。');
@@ -977,9 +1099,7 @@ async function runTrial(check, f) {
       await change({ op: 'configure_observation', check_id: check.id, criterion }, '試験案の判定条件で判定するように設定した');
       current = currentCheck();
     }
-    const recipe = f.runtime === 'browser' ? browserRecipeForCheck(current, f) : { schema_version: 1, check_id: check.id, source: current.source, runtime: f.runtime, launch: f.launch, entrypoint: f.runtime === 'http' ? (f.http?.path || '/') : f.entrypoint, args: f.args, input: {}, criterion, timeout_ms: f.timeout_ms,
-      python, server: f.server, containers, http: f.http,
-      trial: { schema_version: 1, fault: f.fault, storage: f.storage || null, readback: f.readback, checks: f.checks.map((c, i) => ({ id: `c${i + 1}`, scope: c.scope, method: c.method, expect: c.expect, text: c.method === 'exit_code' ? null : c.text, target: c.target || null })) } };
+    const recipe = buildRecipe(current, f, criterion);
     setStatus(`固定コミット ${shortCommit(current.source.commit)} を試験用に取得しています（git fetch のみ。まだ実行しません）。`);
     await api('POST', '/api/v1/prepare', { repository: current.source.repository, commit: current.source.commit });
     const p = person();
@@ -1116,12 +1236,12 @@ function renderResult() {
   fill(body,
     h('p', { class: 'note', role: 'status' }, state.view.verification_passed
       ? '記録した全条件の検証を通過。実運用の許可を示すものではありません。'
-      : '検証未通過。未確認または未達の条件があり、「採用する」という判断は記録できません。'),
+      : '検証未通過。未確認・未達の条件、または確かめる部分の登録・観測が足りない確認項目があり、「採用する」という判断は記録できません。'),
     retestNotice(check),
     field({ label: '確認項目', control: pick }),
     concern ? h('p', { 'data-result-concern': '' }, h('strong', {}, 'もとの不安・疑問: '), concern.text) : null,
     h('p', {}, h('strong', {}, '検証する動作: '), check.text, `（条件の版 ${check.version}）`),
-    h('p', { class: 'note', 'data-coverage-note': '' }, '判定は選択した試験条件の結果です。試験がこの確認項目の全体を確かめたかどうかは自動で判断していません。'),
+    coverageBlock(cv),
     unanswered.length ? h('section', { 'data-result-questions': '' }, h('h3', {}, '記録した未回答の質問'),
       h('p', { class: 'note' }, '相談や確認項目に残した質問です。試験結果を見て、回答が分かったか確認してください。'),
       h('ul', { class: 'items' }, unanswered.map(q => h('li', {}, q.text))),
@@ -1144,6 +1264,44 @@ function renderResult() {
       state.focusedEvidence = requested;
     }
   }
+}
+/// 対応づけた時点の設定と、現在（または試行）の設定の違い。麦漆が記録した設定どうしを比べた結果をそのまま示し、
+/// 比較できないことは推測で補わずに示す。
+function linkChangesView(c, afterLabel) {
+  if (!c) return h('p', { class: 'note' }, '対応づけた時点との比較を読み込んでいます。');
+  const value = v => v == null ? '（なし）' : codeText(v);
+  const sections = [...new Set(c.changes.map(x => x.section))];
+  // 区分ごとにまとめ、件数を先に示す。値は区分を開いて確かめる（件数が少ない区分は最初から開く）。
+  return h('div', { class: 'link-changes', 'data-link-comparison': c.link_id },
+    c.basis_source ? h('p', { class: 'note' }, `対応づけた時点の設定: ${c.basis_source}。指紋の一致は麦漆が判定し、下の一覧は記録した設定どうしを比べた結果です。`) : null,
+    c.changes.length ? h('p', {}, h('strong', {}, `判定条件 ${c.link_id} で変わった設定: `), sections.map(name => `${name}（${c.changes.filter(x => x.section === name).length} 件）`).join('、')) : null,
+    sections.map(name => {
+      const items = c.changes.filter(x => x.section === name);
+      return h('details', { 'data-change-section': name, open: items.length <= 3 || c.changes.length <= 6 },
+        h('summary', {}, `${name}（${items.length} 件）`),
+        h('ul', { class: 'items' }, items.map(x => h('li', { class: 'link-change' },
+          h('div', {}, h('strong', {}, '場所: '), codeText(x.path)),
+          h('div', {}, h('strong', {}, '対応づけた時点: '), value(x.before)),
+          h('div', {}, h('strong', {}, `${afterLabel}: `), value(x.after))))));
+    }),
+    c.uncomparable.map(u => h('p', { class: 'ref-unverified', 'data-uncomparable': '' }, `比較できないこと: ${u}`)));
+}
+/// 試験の判定とは別に、確認項目のどの部分を観測できたかを示す。
+function coverageBlock(cv) {
+  const c = cv.coverage;
+  const statusLabel = { not_declared: '未登録', covered: '登録した部分をすべて観測した', partial: '一部を観測した', not_covered: '観測できた部分はない' };
+  return h('section', { 'data-coverage': c.status }, h('h3', { class: 'dads-u-std-20B-150' }, '確認項目のどの部分を確かめたか'),
+    h('p', { 'data-coverage-note': '' }, h('strong', {}, `${statusLabel[c.status] || c.status}: `), c.summary),
+    h('p', { class: 'note' }, '判定は麦漆が選択した試験条件を照合した結果です。確認項目に答えたかは、人が登録した対応づけを麦漆が試行の判定条件IDと観測方法で照合した範囲に限ります。'),
+    c.aspects.length ? h('figure', { class: 'dads-table' }, h('figcaption', { class: 'dads-table__caption' }, '確かめたい部分ごとの状態'),
+      h('table', { class: 'dads-table__table', 'data-cell-border': 'bottom' },
+        h('thead', {}, h('tr', {}, ['確かめたい部分', '必要な観測', '対応づけた判定条件', '状態', '詳細'].map(t => h('th', { class: 'dads-table__col-header', scope: 'col' }, t)))),
+        h('tbody', {}, c.aspects.map(a => h('tr', { 'data-aspect-status': a.status }, h('td', {}, a.text, h('div', { class: 'note' }, `出所: ${a.origin}`)), h('td', {}, a.observation_label, a.support && a.support !== 'judged' ? h('div', { class: 'ref-unverified' }, SUPPORT_LABEL[a.support]) : null), h('td', {}, a.trial_checks.length ? a.trial_checks.map(l => h('div', {}, l.id, l.label ? h('div', { class: 'note' }, l.label) : null)) : '（なし）'), h('td', { 'data-observed': a.status === 'observed' ? 'pass' : a.status === 'contradicted' ? 'fail' : 'not_observed' }, `${ASPECT_STATUS_MARK[a.status] || ''} ${a.status_label}`), h('td', {}, a.detail)))))) : null,
+    c.aspects.filter(a => a.link_changes?.length).map(a => h('section', { 'data-aspect-changes': a.id }, h('h4', {}, `「${a.text}」の対応づけと、この試行の設定の違い`),
+      h('p', { class: 'note' }, '対応づけた時点と試行の設定が違うため、この部分は観測済みにしていません。違いを確認し、実行前の確認画面で対応づけ直すか、未確認として残してください。'),
+      a.link_changes.map(lc => linkChangesView(lc, 'この試行')))),
+    c.remaining.length ? h('p', { class: 'ref-unverified' }, `未確認として残る部分: ${c.remaining.length} 件`) : null,
+    button('対応づけを見直す（試験の設定に戻り、実行前の確認画面で編集する）', () => goto('trial'), 'text'));
 }
 function evidenceCard(check, v, e) {
   const s = v.summary;

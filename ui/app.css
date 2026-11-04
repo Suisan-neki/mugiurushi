@@ -249,3 +249,5 @@ body:has(.diagram-dialog[open]) { overflow:hidden; }
 .verification-history { margin-top:2.5rem; padding-top:1rem; border-top:1px solid var(--color-neutral-solid-gray-420); }
 .verification-item { padding:.75rem 0; border-bottom:1px solid var(--color-neutral-solid-gray-200); }
 .verification-item h3 { font-size:1rem; margin:.25rem 0; }
+.link-changes code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.link-change { margin-block: .5rem; }

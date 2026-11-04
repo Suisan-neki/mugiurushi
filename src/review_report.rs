@@ -25,6 +25,14 @@ pub struct EvidenceReference {
     pub kind: &'static str,
     pub scope: String,
 }
+fn without_setting_values(view: &mut CheckView) {
+    for aspect in &mut view.coverage.aspects {
+        for change in aspect.link_changes.iter_mut().flat_map(|c| &mut c.changes) {
+            change.before = None;
+            change.after = None;
+        }
+    }
+}
 #[derive(Debug, Serialize)]
 pub struct ReportCheck {
     pub definition: Check,
@@ -113,7 +121,7 @@ pub fn build(workspace: Workspace) -> io::Result<Report> {
         .checks
         .into_iter()
         .map(|mut current| {
-            let definition = view
+            let mut definition = view
                 .workspace
                 .checks
                 .iter()
@@ -161,6 +169,16 @@ pub fn build(workspace: Workspace) -> io::Result<Report> {
             for evidence in &mut current.evidence {
                 evidence.summary = None;
             }
+            // 対応づけた時点の設定と、変わった設定の値は載せない（入力・操作の詳細を含みうる）。区分と場所は残す。
+            definition.link_settings.clear();
+            for link in definition
+                .aspects
+                .iter_mut()
+                .flat_map(|a| &mut a.trial_checks)
+            {
+                link.basis = None;
+            }
+            without_setting_values(&mut current);
             Ok(ReportCheck {
                 definition,
                 current,
@@ -170,6 +188,7 @@ pub fn build(workspace: Workspace) -> io::Result<Report> {
         .collect::<io::Result<Vec<_>>>()?;
     for decision in &mut view.workspace.decisions {
         for check in &mut decision.basis {
+            without_setting_values(check);
             for evidence in &mut check.evidence {
                 evidence.summary = None;
             }
@@ -203,6 +222,7 @@ pub fn build(workspace: Workspace) -> io::Result<Report> {
         limits: vec![
             "この資料は記載した事例版の確認結果です。システム全体の安全性や医療業務への適合を保証するものではありません。",
             "確認できていない範囲と、観測していないことによる判定不能を残しています。",
+            "判定は麦漆が選んだ試験条件を照合した結果です。確認項目のどの部分を確かめたかは、人が登録した対応づけの範囲に限ります。",
             "原文ログ・入力データ・認証情報・画面写真は含めません。条件文・構成の説明・質問・判断理由に記入された情報は含まれるため、共有前に内容を確認してください。",
             "元の事例は更新される可能性があります。根拠IDと試行IDを使い、同じ事例版の記録で照合してください。",
             "人による試用の感想は自己申告です。自動試験の判定や合意とは区別します。試用先URLと内部の実行条件は省き、手順として記入した条件を含めます。共有前に試用者番号・操作・感想も確認してください。",
@@ -327,6 +347,51 @@ pub fn html(report: &Report) -> io::Result<String> {
             check.definition.version,
             escape(&check.definition.origin)
         ));
+        out.push_str(&format!(
+            "<h4>確認項目のどの部分を確かめたか</h4><p>{}</p>",
+            escape(&check.current.coverage.summary)
+        ));
+        if !check.current.coverage.aspects.is_empty() {
+            out.push_str("<ul>");
+            for aspect in &check.current.coverage.aspects {
+                // 変わった設定は区分の名前だけを示す。値には入力データや操作の詳細が含まれうるため載せない。
+                let sections: std::collections::BTreeSet<&str> = aspect
+                    .link_changes
+                    .iter()
+                    .flat_map(|c| c.changes.iter().map(|x| x.section.as_str()))
+                    .collect();
+                let uncomparable = aspect
+                    .link_changes
+                    .iter()
+                    .any(|c| !c.uncomparable.is_empty());
+                let changed = if sections.is_empty() && !uncomparable {
+                    String::new()
+                } else {
+                    format!(
+                        "。対応づけた時点から変わった設定：{}{}",
+                        if sections.is_empty() {
+                            "（示せない）".to_owned()
+                        } else {
+                            sections.into_iter().collect::<Vec<_>>().join("、")
+                        },
+                        if uncomparable {
+                            "。比較できない値がある"
+                        } else {
+                            ""
+                        }
+                    )
+                };
+                out.push_str(&format!(
+                    "<li>{}：{}（観測の種類：{}。{}{}）</li>",
+                    escape(&aspect.text),
+                    escape(&aspect.status_label),
+                    escape(&aspect.observation_label),
+                    escape(&aspect.detail),
+                    escape(&changed)
+                ));
+            }
+            out.push_str("</ul>");
+        }
         out.push_str("<h4>追加で確かめること</h4>");
         out.push_str(&format!(
             "<p>{}</p><p>{}</p>",

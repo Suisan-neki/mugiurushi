@@ -30,6 +30,8 @@ fn workspace() -> Workspace {
         rule: Rule::ManualOnly,
         dependencies: vec![],
         questions: vec![],
+        aspects: vec![],
+        link_settings: vec![],
     });
     w.architecture_models.push(m);
     w
@@ -101,6 +103,8 @@ fn reported_workspace() -> Workspace {
             rule: Rule::ReportedAssertion,
             dependencies: vec![format!("report-{id}")],
             questions: vec![],
+            aspects: vec![],
+            link_settings: vec![],
         });
         let mut e = synthetic_evidence();
         e.id = format!("reported-{id}");
