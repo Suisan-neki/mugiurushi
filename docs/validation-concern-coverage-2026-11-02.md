@@ -138,3 +138,44 @@
 - 患者A・B: この作業では実行していない。2026年11月1日のブランチのCI（run 41318950028、`tools/openemr-two-patients-smoke.mjs`、CLIから実行）で成功した記録があるが、PR #203の対応づけの画面を通した実行ではない。mainのOpenEMRワークフロー（週1回と手動）は通常時・DB停止のSOAPだけを実行する。
 
 次の実装単位の候補（未着手）: AIの検証案から判定条件の下書きを作り人が確認する変換、患者A・Bのレシピを対応づけの画面試験と定期のCIに入れること、環境変数の値の変更を値を残さずに示す方法（例: 事例ごとの鍵による値の要約）、試験設定の版の履歴。
+
+## 相互レビューの指摘への対応と実OpenEMRでの確認（2026年11月4日）
+
+### 指摘への対応（`18cbdc1`・`ecda08f`）
+
+| 指摘 | 再現（修正前に失敗） | 修正 |
+| --- | --- | --- |
+| 復旧の操作（`trial.recovery`）の有無が指紋と記録に入っていない。実行は `recover_and_compare`（DBの故障を解除し読み直す）の後に `snapshot` でログを読むため、復旧の有無で操作とログ・DBの観測範囲が変わる | `recovery_operation_is_part_of_the_fingerprint_but_its_wait_limit_is_not` | 復旧があるときだけ `"recovery": true` を指紋と記録に含める。待機上限の値は含めない。復旧のない設定の指紋は変わらない（保存済みの対応づけを無効にしない）。比較では「復旧の操作」として示す |
+| 設定の比較で、表示用に300文字へ省略してから同じかを比べていた。null・空配列・空オブジェクト、キーの未指定と明示的なnullも同じ「値なし」になっていた | `differences_are_decided_on_raw_values_before_shortening_or_empty_values` | 違いは生の値（キーの有無を含む）で判定し、表示はその後に作る。null・空文字列・空配列・空オブジェクト・未指定を区別して表示する |
+| 表示が同じ文字になる型の変更（"true"→true、42→"42"、[]→"[]"）を「省略した部分が異なる」と表示していた | `short_type_changes_are_shown_as_type_changes_not_as_omitted_parts` | 型が違えば両方に型を添える。「省略した部分が異なる」は実際に省略した値にだけ使う |
+
+### 作業環境での確認（合成データ）
+
+- `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`：成功。
+- `cargo test --locked --no-fail-fast`：上の再現テストを含めて成功。ただし既存の2件（`multi_process` の `a_failure_returned_only_to_the_sender_output_is_not_success`、`trial` の `read_only_storage_distinguishes_silent_failure_from_reported_failure`）が失敗する。この2件はこのPRの変更前のコードでもこの作業環境（root実行のコンテナ）で失敗し、CIでは成功している。
+
+### 実OpenEMRでの確認（#203と#205を含む一時ブランチ）
+
+PR #205（`claude/container-log-complete`）と `tools/browser-handoff-smoke.mjs` が重なるため、両方を含むローカルの一時ブランチ `tmp/review-203-205`（pushしていない）で実行した。
+
+- コミット：`a31cd8915088328192a0a496f5c2766c8bd9863d`（親：#203 `ecda08fd0c0597ff718fe501434a8f7cad2044a7`、#205 `01e7b3a8c8bacf44ddceafc613819a811ff6e701`。競合なし）
+- ツリー：`d87e726b5e6c98491ecc1e25a73be322046ae999`
+- 削除済みの患者A・Bのレシピは含まれない（同梱試験は通常時・DB停止・ログの3つ）。
+
+実行したコマンドと結果：
+
+1. `node tools/browser-handoff-smoke.mjs`（合成、実行直前で停止）：成功。
+2. `node tools/browser-handoff-smoke.mjs --live`（実OpenEMR）：成功。run `run-1793774152885-15039-0`。
+   - 画面から確かめる部分を2つ登録した（保存先のDBの行に対応づけた部分と、外部送信の部分）。DB停止の試験へ変えたときに変更内容の一覧（故障の条件・ブラウザの準備）と「比較できないこと」（環境変数の値）を示し、試験用の認証情報を表示・記録しないこと、別の部分の保存で前の指紋を保つこと、対応づけ直しを確かめたうえで、通常時の試験で実行した。
+   - **試験条件の判定：満たす**（`verdict: satisfied`）。画面からOpenEMRを起動し、SOAPを保存・再表示し、DBと照合した判定条件がすべて期待どおり。
+   - **確かめる部分：一部を観測した**（`coverage: partial`）。保存の部分は「麦漆が観測した」。外部送信の部分は「麦漆では観測できない」として残る。
+   - **確認項目の通過：偽**（`verification_passed: false`）。試験条件は満たしたが、外部送信の部分を観測できないため。「採用する」は記録できない。
+   - 参照したコード：`openemr/openemr` `d7ecc612e166c6f9f3adc9f50bc9f8cc68cac701`。実行したイメージ：`openemr/openemr:latest@sha256:f0bfbc17fae13503ab64bbd271f74d80dd4a0786f5a8d0683841aeef4e159700`、`mariadb:12.3.3@sha256:2bdff1534a7e569fecaf4b10b66ad0d410806e382d9db29ba305448addda97c4`。**イメージの中身と参照コミットのコードが同一かは確認していない。**
+
+実行環境（固定版 Chromium 151.0.7922.34、root でない試験用ユーザー、Docker Hub の認証）は [ログの試験の検証記録](validation-container-logs-2026-11-04.md) と同じ。証跡（`test-results/browser-handoff-live.json`、確認画面・比較表示の画面写真）は作業環境のローカルにあり、リポジトリには含めていない。
+
+### 未確認の範囲
+
+- 実AI・Difyとの通しの動作。
+- `ecda08f` 単独のツリーでの `--live`（一時ブランチでのみ実行）。
+- 実行したイメージと参照したGitコミットのコードの一致。
