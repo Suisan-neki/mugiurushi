@@ -554,3 +554,83 @@ fn recovery_is_only_allowed_for_faults_that_can_be_undone() {
             .contains("recovery")
     );
 }
+
+/// コンテナのログの判定は、記録用の末尾ではなく読み出した全文で行い、
+/// 最後まで読めていない場合は「含まない」を期待どおりにしない。
+#[test]
+fn container_log_checks_use_the_whole_log_and_never_pass_absence_on_a_partial_read() {
+    use mugiurushi::trial::{Observed, Outputs, evaluate};
+    let phase = |text: &str, complete: bool| {
+        let mut phase: mugiurushi::container::ContainerPhase = serde_json::from_value(serde_json::json!({
+            "engine": "合成", "network": "合成", "volumes": [], "leftovers": [],
+            "database_query": null, "http": null, "detail": "",
+            "services": [{"name": "app", "role": "app", "image": "合成", "digest": "", "container": "c",
+                "port": 1, "started": true, "ready": true, "ready_after_ms": null, "running_after_stop": false,
+                "log_excerpt": "末尾だけ", "detail": ""}]
+        }))
+        .unwrap();
+        phase.services[0].log_text = text.into();
+        phase.services[0].log_complete = complete;
+        phase
+    };
+    let spec = |expect: Expectation| TrialSpec {
+        schema_version: 1,
+        fault: TrialFault::Normal,
+        storage: None,
+        readback: None,
+        recovery: None,
+        checks: vec![TrialCheck {
+            id: "log".into(),
+            scope: "ログ".into(),
+            method: CheckMethod::ContainerLog,
+            expect,
+            text: Some("{{test_value}}".into()),
+            target: Some("app".into()),
+            relation: None,
+        }],
+    };
+    let judge = |phase: &mugiurushi::container::ContainerPhase, expect: Expectation| {
+        let out = Outputs {
+            exit_code: None,
+            completed: true,
+            stdout: "",
+            stderr: "",
+            readback: None,
+            state: None,
+            state_text: None,
+            server: None,
+            containers: Some(phase),
+        };
+        evaluate(&spec(expect), "EEL-TEST-1", &out)[0].observed
+    };
+    // 記録用の末尾には無いが、全文（前半や標準エラー）にある値は「含む」と判定する。
+    let leaked = phase("起動\nERROR saved EEL-TEST-1\n末尾だけ", true);
+    assert_eq!(judge(&leaked, Expectation::NotContains), Observed::Fail);
+    assert_eq!(judge(&leaked, Expectation::Contains), Observed::Pass);
+    let clean = phase("起動\n末尾だけ", true);
+    assert_eq!(judge(&clean, Expectation::NotContains), Observed::Pass);
+    // 最後まで読めていなければ、読めた範囲に無くても「含まない」とはしない。
+    let partial = phase("起動\n末尾だけ", false);
+    assert_eq!(
+        judge(&partial, Expectation::NotContains),
+        Observed::NotObserved
+    );
+    assert_eq!(
+        judge(&partial, Expectation::Contains),
+        Observed::NotObserved
+    );
+    // 読めた範囲にあれば、一部でも「含む」は確かめられる。
+    let partial_leak = phase("EEL-TEST-1", false);
+    assert_eq!(
+        judge(&partial_leak, Expectation::NotContains),
+        Observed::Fail
+    );
+    // 記録から読み直した場合（全文は残さない）も、「含まない」を期待どおりにはしない。
+    let reloaded: mugiurushi::container::ContainerPhase =
+        serde_json::from_str(&serde_json::to_string(&clean).unwrap()).unwrap();
+    assert!(reloaded.services[0].log_text.is_empty() && !reloaded.services[0].log_complete);
+    assert_eq!(
+        judge(&reloaded, Expectation::NotContains),
+        Observed::NotObserved
+    );
+}

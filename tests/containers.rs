@@ -1050,3 +1050,58 @@ fn openemr_browser_registers_patient_and_reads_back_visit() {
         }
     }
 }
+
+/// コンテナが標準エラーに書いた値も、ログの判定に入る（`docker logs`は対象の標準エラーを自身の標準エラーへ出す）。
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn container_log_checks_include_the_targets_standard_error() {
+    if !docker_available() {
+        return;
+    }
+    let (directory, root, commit) = fixture();
+    let mut web = nginx("web", ServiceRole::App);
+    web.command = vec![
+        "sh".into(),
+        "-c".into(),
+        "echo EEL-STDERR-MARK >&2; exec nginx -g 'daemon off;'".into(),
+    ];
+    let mut absent = check(
+        "absent",
+        "標準エラーの値",
+        CheckMethod::ContainerLog,
+        Expectation::NotContains,
+        "EEL-STDERR-MARK",
+    );
+    absent.target = Some("web".into());
+    let result = execute(
+        &root,
+        &directory.join("runs"),
+        recipe(&commit, vec![web], TrialFault::Normal, vec![absent]),
+        Condition {
+            id: "web".into(),
+            version: 1,
+            text: "標準エラーのログを読む".into(),
+            origin: "試験".into(),
+            kind: ConditionKind::Custom,
+        },
+        None,
+    )
+    .unwrap();
+    let trace: ExecutionTrace =
+        serde_json::from_str(&fs::read_to_string(result.directory.join("execution.json")).unwrap())
+            .unwrap();
+    let outcome = trace.trial.expect("trial");
+    assert_eq!(
+        outcome.results[0].observed,
+        Observed::Fail,
+        "{}",
+        outcome.results[0].detail
+    );
+    let service = &trace.containers.expect("containers").services[0];
+    assert!(service.log_excerpt.contains("EEL-STDERR-MARK"));
+    assert!(
+        service.log_note.contains("最後まで読んだ"),
+        "{}",
+        service.log_note
+    );
+}
