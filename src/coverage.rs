@@ -1148,6 +1148,28 @@ fn leaf(value: Option<&Value>) -> Option<String> {
     })
 }
 
+/// 値の型の名前。表示が同じ文字になる型の変更を示すために使う。
+fn kind(value: Option<&Value>) -> &'static str {
+    match value {
+        None => "未指定",
+        Some(Value::Null) => "null",
+        Some(Value::Bool(_)) => "真偽値",
+        Some(Value::Number(_)) => "数値",
+        Some(Value::String(_)) => "文字列",
+        Some(Value::Array(_)) => "配列",
+        Some(Value::Object(_)) => "オブジェクト",
+    }
+}
+
+/// 表示のときに省略されたか（`shown`の上限を超えたか）。
+fn shortened(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(s)) => s.chars().count() > MAX_SHOWN,
+        Some(Value::Null) | None => false,
+        Some(other) => other.to_string().chars().count() > MAX_SHOWN,
+    }
+}
+
 /// 二つの値を再帰的に比べる。違いの判定は生の値どうしで行い、表示の省略はその後に行う。
 /// キーが無いこと（None）と明示的なnullは区別する。識別子のある配列は要素を識別子で対応させ、
 /// 並び順の違いも示す。片方にしかない要素は一つの値として示す。
@@ -1191,14 +1213,21 @@ fn walk(
             }
         }
         _ => {
-            // ここに来るのは生の値が異なる場合だけ。省略後の表示が同じになっても、変更として残す。
-            let (a, mut b) = (leaf(before), leaf(after));
+            // ここに来るのは生の値が異なる場合だけ。表示が同じ文字になっても、変更として残し、理由を添える。
+            let (mut a, mut b) = (leaf(before), leaf(after));
             if a == b {
-                b = b.map(|text| {
-                    format!(
-                        "{text}［先頭{MAX_SHOWN}文字は対応づけた時点と同じ。省略した部分が異なる］"
-                    )
-                });
+                let (from, to) = (kind(before), kind(after));
+                if from != to {
+                    // 例: 文字列 "true" と真偽値 true。省略はしていない。
+                    a = a.map(|text| format!("{text}（{from}）"));
+                    b = b.map(|text| format!("{text}（{to}）"));
+                } else if shortened(before) || shortened(after) {
+                    b = b.map(|text| {
+                        format!("{text}［先頭{MAX_SHOWN}文字は対応づけた時点と同じ。省略した部分が異なる］")
+                    });
+                } else {
+                    b = b.map(|text| format!("{text}［表示は同じだが値が異なる］"));
+                }
             }
             out.push((path.into(), a, b));
         }
@@ -1873,5 +1902,53 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// 表示が同じ文字になる型の変更（文字列と真偽値・数値・配列など）は、型の違いとして示し、
+    /// 省略していない値に「省略した部分が異なる」とは書かない。
+    #[test]
+    fn short_type_changes_are_shown_as_type_changes_not_as_omitted_parts() {
+        let input = |v: serde_json::Value| serde_json::json!({"settings": {"input": {"a": v}}});
+        for (before, after, from, to) in [
+            (
+                serde_json::json!("true"),
+                serde_json::json!(true),
+                "文字列",
+                "真偽値",
+            ),
+            (
+                serde_json::json!(42),
+                serde_json::json!("42"),
+                "数値",
+                "文字列",
+            ),
+            (
+                serde_json::json!([]),
+                serde_json::json!("[]"),
+                "配列",
+                "文字列",
+            ),
+            (
+                serde_json::json!({}),
+                serde_json::json!("{}"),
+                "オブジェクト",
+                "文字列",
+            ),
+        ] {
+            let changes = diff(&input(before.clone()), &input(after.clone()));
+            assert_eq!(changes.len(), 1, "{before} → {after}: {changes:?}");
+            let (b, a) = (
+                changes[0].before.as_deref().unwrap(),
+                changes[0].after.as_deref().unwrap(),
+            );
+            assert!(
+                b.contains(from) && a.contains(to),
+                "{before} → {after}: {b} / {a}"
+            );
+            assert!(
+                !b.contains("省略") && !a.contains("省略"),
+                "{before} → {after}: {b} / {a}"
+            );
+        }
     }
 }
