@@ -195,10 +195,10 @@ pub fn catalog() -> Vec<KindInfo> {
 }
 
 /// 判定条件が依存する試験の設定。起動・引数・入力・故障・保存先・読み直し・待つプロセス・コンテナ・
-/// HTTP操作・ブラウザ操作（準備・操作・DBの問い合わせ先）を含む。固定版（コミット）と確認項目のIDは含めない。
-/// 固定版の違いは試行の適用可否で扱う。
+/// HTTP操作・ブラウザ操作（準備・操作・DBの問い合わせ先）と、復旧の操作の有無を含む。固定版（コミット）、
+/// 確認項目のID、復旧後の待機上限の値は含めない。固定版の違いは試行の適用可否で扱う。
 fn trial_context(recipe: &Recipe) -> serde_json::Value {
-    serde_json::json!({
+    let mut context = serde_json::json!({
         "runtime": recipe.runtime,
         "launch": recipe.launch,
         "entrypoint": recipe.entrypoint,
@@ -212,7 +212,13 @@ fn trial_context(recipe: &Recipe) -> serde_json::Value {
         "containers": recipe.containers,
         "http": recipe.http,
         "browser": recipe.browser,
-    })
+    });
+    // 復旧の操作（故障を解除して読み直す）は、実行する操作と、その後に読むログ・DBの範囲を変える。
+    // 有無だけを含め、待機上限の値は含めない。復旧のない設定は、この項目を持たない（保存済みの指紋を保つ）。
+    if recipe.trial.as_ref().is_some_and(|t| t.recovery.is_some()) {
+        context["recovery"] = serde_json::json!(true);
+    }
+    context
 }
 /// 判定条件の内容（範囲・観測方法・期待・対象・文）と、その判定条件が依存する試験の設定の指紋。
 /// 識別子と文面が同じでも、操作対象・引数・観測先などが変われば一致しない。
@@ -1099,6 +1105,7 @@ fn section(path: &str) -> &'static str {
         ("fault", "故障の条件"),
         ("storage", "保存先"),
         ("readback", "読み直し"),
+        ("recovery", "復旧の操作"),
         ("python", "Pythonの読み込み先と依存先"),
         ("server", "先に起動して待つプロセス"),
         ("containers", "試験用コンテナ"),
@@ -1131,40 +1138,36 @@ fn keyed(items: &[Value]) -> Option<Vec<String>> {
     })
 }
 
-fn leaf(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => None,
-        Value::Array(items) if items.is_empty() => None,
-        Value::Object(map) if map.is_empty() => None,
-        Value::String(s) => Some(shown(s)),
-        other => Some(shown(&other.to_string())),
-    }
+/// 表示用の文字列。キーが無い（未指定）ときは None。null・空文字列・空配列・空オブジェクトは区別して示す。
+fn leaf(value: Option<&Value>) -> Option<String> {
+    Some(match value? {
+        Value::Null => "null（明示的に値なし）".into(),
+        Value::String(s) if s.is_empty() => "\"\"（空文字列）".into(),
+        Value::String(s) => shown(s),
+        other => shown(&other.to_string()),
+    })
 }
 
-/// 二つの値を再帰的に比べる。識別子のある配列は要素を識別子で対応させ、並び順の違いも示す。
-/// 片方にしかない要素は一つの値として示す。
+/// 二つの値を再帰的に比べる。違いの判定は生の値どうしで行い、表示の省略はその後に行う。
+/// キーが無いこと（None）と明示的なnullは区別する。識別子のある配列は要素を識別子で対応させ、
+/// 並び順の違いも示す。片方にしかない要素は一つの値として示す。
 fn walk(
     path: &str,
-    before: &Value,
-    after: &Value,
+    before: Option<&Value>,
+    after: Option<&Value>,
     out: &mut Vec<(String, Option<String>, Option<String>)>,
 ) {
     if before == after {
         return;
     }
     match (before, after) {
-        (Value::Object(a), Value::Object(b)) => {
+        (Some(Value::Object(a)), Some(Value::Object(b))) => {
             let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
             for key in keys {
-                walk(
-                    &format!("{path}.{key}"),
-                    a.get(key).unwrap_or(&Value::Null),
-                    b.get(key).unwrap_or(&Value::Null),
-                    out,
-                );
+                walk(&format!("{path}.{key}"), a.get(key), b.get(key), out);
             }
         }
-        (Value::Array(a), Value::Array(b))
+        (Some(Value::Array(a)), Some(Value::Array(b)))
             if !a.is_empty() && !b.is_empty() && a.iter().chain(b).all(Value::is_object) =>
         {
             if let (Some(ka), Some(kb)) = (keyed(a), keyed(b)) {
@@ -1177,30 +1180,27 @@ fn walk(
                 }
                 let keys: BTreeSet<&String> = ka.iter().chain(&kb).collect();
                 for key in keys {
-                    let find = |keys: &[String], items: &[Value]| {
-                        keys.iter()
-                            .position(|k| k == key)
-                            .map(|n| items[n].clone())
-                            .unwrap_or(Value::Null)
-                    };
-                    walk(&format!("{path}[{key}]"), &find(&ka, a), &find(&kb, b), out);
+                    let before = ka.iter().position(|k| k == key).map(|n| &a[n]);
+                    let after = kb.iter().position(|k| k == key).map(|n| &b[n]);
+                    walk(&format!("{path}[{key}]"), before, after, out);
                 }
             } else {
                 for n in 0..a.len().max(b.len()) {
-                    walk(
-                        &format!("{path}[{}]", n + 1),
-                        a.get(n).unwrap_or(&Value::Null),
-                        b.get(n).unwrap_or(&Value::Null),
-                        out,
-                    );
+                    walk(&format!("{path}[{}]", n + 1), a.get(n), b.get(n), out);
                 }
             }
         }
         _ => {
-            let (a, b) = (leaf(before), leaf(after));
-            if a != b {
-                out.push((path.into(), a, b));
+            // ここに来るのは生の値が異なる場合だけ。省略後の表示が同じになっても、変更として残す。
+            let (a, mut b) = (leaf(before), leaf(after));
+            if a == b {
+                b = b.map(|text| {
+                    format!(
+                        "{text}［先頭{MAX_SHOWN}文字は対応づけた時点と同じ。省略した部分が異なる］"
+                    )
+                });
             }
+            out.push((path.into(), a, b));
         }
     }
 }
@@ -1208,7 +1208,7 @@ fn walk(
 /// 二つの記録の違いを、値ごとに示す。
 pub fn diff(before: &Value, after: &Value) -> Vec<SettingChange> {
     let mut out = vec![];
-    walk("", before, after, &mut out);
+    walk("", Some(before), Some(after), &mut out);
     out.into_iter()
         .map(|(full, before, after)| {
             let full = full.trim_start_matches('.');
@@ -1725,6 +1725,153 @@ mod tests {
         assert!(
             validate_settings(&[], &settings).is_err(),
             "参照されない記録"
+        );
+    }
+
+    /// 復旧の操作（故障を解除して読み直す）は、実行される操作とログに映る範囲を変えるため指紋に含める。
+    /// 復旧後の待機上限の値は含めない（観測の内容ではなく待ち方）。
+    #[test]
+    fn recovery_operation_is_part_of_the_fingerprint_but_its_wait_limit_is_not() {
+        let without = bundled(1);
+        assert!(without.trial.as_ref().unwrap().recovery.is_none());
+        let mut with = without.clone();
+        with.trial.as_mut().unwrap().recovery = Some(crate::trial::Recovery {
+            ready_timeout_ms: 180000,
+        });
+        let mut shorter = with.clone();
+        shorter.trial.as_mut().unwrap().recovery = Some(crate::trial::Recovery {
+            ready_timeout_ms: 60000,
+        });
+        let id = "soap-subjective-row";
+        let check = without
+            .trial
+            .as_ref()
+            .unwrap()
+            .checks
+            .iter()
+            .find(|c| c.id == id)
+            .unwrap()
+            .clone();
+        assert_ne!(
+            trial_check_fingerprint(&check, &without),
+            trial_check_fingerprint(&check, &with),
+            "復旧の操作の有無で指紋が変わる"
+        );
+        assert_eq!(
+            trial_check_fingerprint(&check, &with),
+            trial_check_fingerprint(&check, &shorter),
+            "待機上限の値だけでは指紋は変わらない"
+        );
+        // 復旧のない設定の指紋と記録は、この変更の前と同じ形（保存済みの対応づけが無効にならない）。
+        assert!(recorded_settings(&without).get("recovery").is_none());
+
+        // 復旧なしで対応づけ、別の部分を足して保存しても前の指紋を保つ。復旧ありの試行では内容が変わったとする。
+        let (aspects, settings) = link_to(&without, id);
+        let stored_check = stored(aspects.clone(), settings.clone());
+        let mut resent = aspects.clone();
+        resent.push(Aspect {
+            id: "other".into(),
+            ..aspect(None, &[])
+        });
+        let (kept, _) = normalize(resent, &stored_check).unwrap();
+        assert_eq!(kept[0].trial_checks[0], aspects[0].trial_checks[0]);
+        let mut changed = item(id, ObservationKind::DatabaseRows, Some(Observed::Pass));
+        changed.fingerprint = trial_check_fingerprint(&check, &with);
+        assert_eq!(
+            status_of(&kept[0], true, &[changed]).0,
+            AspectStatus::DefinitionChanged
+        );
+        // 比較では、復旧の操作が加わったことを操作の差として示す。
+        let c = compare_link(
+            &aspects[0].trial_checks[0],
+            &stored_check,
+            current(&with, id),
+            &[],
+        );
+        assert_eq!(c.state, LinkState::Changed);
+        let recovery: Vec<_> = c
+            .changes
+            .iter()
+            .filter(|x| x.section == "復旧の操作")
+            .collect();
+        assert_eq!(recovery.len(), 1, "{c:?}");
+        assert_eq!(recovery[0].before, None);
+        assert_eq!(recovery[0].after.as_deref(), Some("true"));
+        assert!(
+            !c.changes
+                .iter()
+                .any(|x| x.after.as_deref() == Some("180000")),
+            "待機上限は記録しない"
+        );
+    }
+
+    /// 違いの判定は省略・表示の前に生の値で行う。先頭300文字が同じ長い値、null・空配列・空オブジェクト、
+    /// キーの未指定と明示的なnullを、「変更なし」として落とさない。
+    #[test]
+    fn differences_are_decided_on_raw_values_before_shortening_or_empty_values() {
+        let long = |tail: &str| format!("{}{tail}", "x".repeat(MAX_SHOWN + 20));
+        let changes = diff(
+            &serde_json::json!({"settings": {"args": [long("A")]}}),
+            &serde_json::json!({"settings": {"args": [long("B")]}}),
+        );
+        assert_eq!(changes.len(), 1, "末尾だけが違う長い引数: {changes:?}");
+        assert_eq!(changes[0].section, "引数");
+        assert_ne!(
+            changes[0].before, changes[0].after,
+            "省略した部分が違うことを示す"
+        );
+        let text = |v: serde_json::Value| serde_json::json!({"settings": {"input": v}});
+        let cases = [
+            (
+                serde_json::json!({}),
+                serde_json::json!({"a": null}),
+                "未指定→null",
+            ),
+            (
+                serde_json::json!({"a": null}),
+                serde_json::json!({}),
+                "null→未指定",
+            ),
+            (
+                serde_json::json!({"a": null}),
+                serde_json::json!({"a": []}),
+                "null→空配列",
+            ),
+            (
+                serde_json::json!({"a": []}),
+                serde_json::json!({"a": {}}),
+                "空配列→空オブジェクト",
+            ),
+            (
+                serde_json::json!({"a": {}}),
+                serde_json::json!({"a": null}),
+                "空オブジェクト→null",
+            ),
+            (
+                serde_json::json!({"a": []}),
+                serde_json::json!({}),
+                "空配列→未指定",
+            ),
+            (
+                serde_json::json!({"a": ""}),
+                serde_json::json!({"a": null}),
+                "空文字列→null",
+            ),
+        ];
+        for (before, after, label) in cases {
+            let changes = diff(&text(before), &text(after));
+            assert_eq!(changes.len(), 1, "{label}: {changes:?}");
+            assert_eq!(changes[0].path, "input.a", "{label}");
+            assert_eq!(changes[0].section, "入力", "{label}");
+            assert_ne!(changes[0].before, changes[0].after, "{label}: 表示も異なる");
+        }
+        // 同じ値なら変更は出ない。
+        assert!(
+            diff(
+                &text(serde_json::json!({"a": null})),
+                &text(serde_json::json!({"a": null}))
+            )
+            .is_empty()
         );
     }
 }
