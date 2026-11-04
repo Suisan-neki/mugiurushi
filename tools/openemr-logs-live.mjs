@@ -8,12 +8,27 @@ const bin = process.env.REVIEW_BINARY || path.join(root, 'target/debug/mugiurush
 // 1. 同梱の一覧を、そのバイナリのappから取り出す（手で作り直さない）。
 const data = path.join(out, 'app-data'); fs.mkdirSync(data);
 const app = spawn(bin, ['app', data, '--port', '0'], {stdio: ['ignore', 'pipe', 'pipe']});
-const url = await new Promise((ok, no) => { let s = ''; const t = setTimeout(() => no(Error('app起動待ち')), 15000);
-  app.stdout.on('data', d => { s += d; const m = /http:\/\/127\.0\.0\.1:\d+/.exec(s); if (m) { clearTimeout(t); ok(m[0]); } }); });
-const html = await (await fetch(url + '/workbench')).text();
-const token = /name="review-token" content="([^"]+)"/.exec(html)[1];
-const catalog = await (await fetch(url + '/api/v1/browser-recipes', {headers: {'X-Review-Token': token}})).json();
-app.kill('SIGTERM');
+let catalog;
+try {
+  // 起動前の失敗（実行ファイルがない・すぐ終了した）は、上限まで待たずに理由を残して止める。
+  const url = await new Promise((ok, no) => {
+    let s = '', err = '';
+    const t = setTimeout(() => no(Error('appの起動待ちが上限（15秒）に達した: ' + err.slice(-2000))), 15000);
+    app.once('error', e => { clearTimeout(t); no(Error('appを起動できない: ' + e.message)); });
+    app.once('exit', (code, signal) => { clearTimeout(t); no(Error(`appが起動前に終了した（${code ?? signal}）: ` + err.slice(-2000))); });
+    app.stderr.on('data', d => { err += d; });
+    app.stdout.on('data', d => { s += d; const m = /http:\/\/127\.0\.0\.1:\d+/.exec(s); if (m) { clearTimeout(t); ok(m[0]); } });
+  });
+  const html = await (await fetch(url + '/workbench')).text();
+  const token = /name="review-token" content="([^"]+)"/.exec(html)?.[1];
+  assert(token, '画面から確認用の識別子を読めない');
+  const response = await fetch(url + '/api/v1/browser-recipes', {headers: {'X-Review-Token': token}});
+  assert.equal(response.status, 200, '同梱一覧を取得できない');
+  catalog = await response.json();
+} finally {
+  // 成功・失敗のどちらでも、待受のプロセスを残さない。
+  if (app.exitCode === null && app.signalCode === null) app.kill('SIGTERM');
+}
 const entry = catalog.recipes.find(r => r.id === 'openemr-soap-logs'); assert(entry, '同梱一覧にログの試験がない');
 const recipe = entry.recipe; fs.writeFileSync(path.join(out, 'recipe.json'), JSON.stringify(recipe, null, 2));
 // 2. レシピが参照するOpenEMRのコミットを取得する。
