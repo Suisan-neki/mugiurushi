@@ -777,8 +777,18 @@ pub fn evaluate(spec: &TrialSpec, test_value: &str, out: &Outputs) -> Vec<CheckR
                             .join("\n");
                         let complete = !services.is_empty() && services.iter().all(|s| s.log_complete);
                         let has = logs.contains(&text);
+                        // ブラウザ試験では、準備を終えて操作を一つ以上行った場合だけ、ログに無いことを
+                        // 操作の結果として扱う。操作していなければ、試験値がログに無いのは当然である。
+                        let acted = phase.browser.as_ref().is_none_or(|b| {
+                            b.prepared && b.steps.iter().any(|s| s.phase == "action")
+                        });
                         if services.is_empty() {
                             (Observed::NotObserved, "指定したコンテナのログがない".into())
+                        } else if !acted && !has {
+                            (
+                                Observed::NotObserved,
+                                format!("試験の操作を行っていないため、ログに「{text}」が無いことは操作の結果を示さない"),
+                            )
                         } else if !complete && !has {
                             // 読めた範囲に無いことは、ログ全体に無いことを示さない。
                             (

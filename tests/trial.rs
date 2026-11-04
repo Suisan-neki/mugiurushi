@@ -625,6 +625,36 @@ fn container_log_checks_use_the_whole_log_and_never_pass_absence_on_a_partial_re
         judge(&partial_leak, Expectation::NotContains),
         Observed::Fail
     );
+    // ブラウザ試験で操作を行っていない（準備で止まった）場合、ログに無いことは操作の結果を示さない。
+    let mut not_acted = phase("起動\n末尾だけ", true);
+    not_acted.browser = Some(
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "run_id": "合成", "version": "合成", "prepared": false, "completed": false,
+            "steps": [{"id": "login", "phase": "preparation", "completed": false, "text": null, "screenshot": null, "detail": ""}],
+            "responses": [], "blocked_requests": 0, "detail": "ブラウザの版が試験設定と異なる"
+        }))
+        .unwrap(),
+    );
+    assert_eq!(
+        judge(&not_acted, Expectation::NotContains),
+        Observed::NotObserved
+    );
+    // 準備の途中で試験値がログに出てから操作前に止まった場合、検出済みの値は隠さず「含まない」を失敗にする。
+    let mut leaked_in_preparation = not_acted.clone();
+    leaked_in_preparation.services[0].log_text = "準備中 EEL-TEST-1 を入力".into();
+    assert_eq!(
+        judge(&leaked_in_preparation, Expectation::NotContains),
+        Observed::Fail
+    );
+    assert_eq!(
+        judge(&leaked_in_preparation, Expectation::Contains),
+        Observed::Pass
+    );
+    let mut acted = not_acted.clone();
+    let browser = acted.browser.as_mut().unwrap();
+    browser.prepared = true;
+    browser.steps[0].phase = "action".into();
+    assert_eq!(judge(&acted, Expectation::NotContains), Observed::Pass);
     // 記録から読み直した場合（全文は残さない）も、「含まない」を期待どおりにはしない。
     let reloaded: mugiurushi::container::ContainerPhase =
         serde_json::from_str(&serde_json::to_string(&clean).unwrap()).unwrap();
