@@ -229,7 +229,13 @@ try {
     assert.equal((await view()).workspace.evidence.length, 0);
     await page.reload(); await page.locator('[data-browser-preset="openemr-soap"]').waitFor();
     assert.equal(new URL(await page.locator('#back-to-system').getAttribute('href'), url).searchParams.get('ref'), before);
-    assert.equal(await page.locator('[data-browser-preset]').count(), 2, '同梱の試験はSOAPの通常時とDB停止');
+    assert.equal(await page.locator('[data-browser-preset]').count(), 3, '同梱の試験はSOAPの通常時・DB停止・ログ');
+    await page.locator('[data-browser-preset="openemr-soap-logs"]').getByRole('button').click();
+    await page.getByRole('button', { name: '次へ：試す状況を選ぶ', exact: true }).click();
+    await page.getByRole('button', { name: '次へ：判定の条件を確認する', exact: true }).click();
+    const logPreview = await page.locator('#trial-body').innerText();
+    assert.match(logPreview, /OpenEMRのコンテナのログ（標準出力・標準エラー）に試験値が出ない/);
+    assert.doesNotMatch(logPreview, /undefined/);
   }
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ checks: ['版の相違を表示', '明示操作による参照先変更', '相談の出所を保持', '確認まで実行しない', 'ブラウザ手順・入力・観測先を保持', '確かめる部分を観測の種類と判定条件の内容で登録', '試す状況を変えた試験には前の対応づけを適用しない', ...(live ? ['画面から実OpenEMRを起動・保存・再表示・DB照合', '再読込後にブラウザ設定へ戻る'] : [])], actual_target_execution: live ? 'OpenEMR' : 'not_conducted' }));

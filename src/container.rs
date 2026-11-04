@@ -21,6 +21,8 @@ pub const PORT_PREFIX: &str = "{{port:";
 pub const MAX_READY_MS: u64 = 300_000;
 const MAX_SERVICES: usize = 8;
 const MAX_LOG: usize = 8192;
+/// 判定に使うログの上限（標準出力・標準エラーそれぞれ）。超えた分は読み捨て、ログは最後まで読めていない扱いにする。
+const MAX_FULL_LOG: usize = 4 * 1024 * 1024;
 const MAX_BODY: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +146,16 @@ pub struct ServicePhase {
     pub ready_after_ms: Option<u64>,
     pub running_after_stop: bool,
     pub log_excerpt: String,
+    /// ログをどこまで読めたかの説明（記録用）。旧形式の記録にはない。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub log_note: String,
+    /// 標準出力と標準エラーのログを、上限内で最後まで読めたか。判定にだけ使い、記録には残さない。
+    /// 記録から読み直した値は常に偽になり、全文のない記録で「含まない」が通ることはない。
+    #[serde(skip)]
+    pub log_complete: bool,
+    /// 判定に使うログの全文（標準出力と標準エラー）。試行の判定にだけ使い、記録には残さない。
+    #[serde(skip)]
+    pub log_text: String,
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_build: Option<crate::prepared_web::BuildBasis>,
@@ -1301,20 +1313,33 @@ impl Session {
             services: self
                 .services
                 .iter()
-                .map(|s| ServicePhase {
-                    name: s.spec.name.clone(),
-                    role: s.spec.role,
-                    image: s.spec.image.clone(),
-                    digest: s.digest.clone(),
-                    container: s.container.clone(),
-                    port: s.port,
-                    started: s.started,
-                    ready: s.ready,
-                    ready_after_ms: s.ready_after_ms,
-                    running_after_stop: inspect_running(&s.container).unwrap_or(false),
-                    log_excerpt: logs(&s.container),
-                    detail: s.detail.clone(),
-                    web_build: s.web_build.clone(),
+                .map(|s| {
+                    let (log_text, log_complete) = read_logs(&s.container);
+                    ServicePhase {
+                        name: s.spec.name.clone(),
+                        role: s.spec.role,
+                        image: s.spec.image.clone(),
+                        digest: s.digest.clone(),
+                        container: s.container.clone(),
+                        port: s.port,
+                        started: s.started,
+                        ready: s.ready,
+                        ready_after_ms: s.ready_after_ms,
+                        running_after_stop: inspect_running(&s.container).unwrap_or(false),
+                        log_excerpt: tail(&log_text),
+                        log_note: if log_complete {
+                            format!(
+                                "標準出力・標準エラーのログを最後まで読んだ（{}バイト）",
+                                log_text.len()
+                            )
+                        } else {
+                            "ログを最後まで読めていない（上限超過または読み出しの失敗）".into()
+                        },
+                        log_complete,
+                        log_text,
+                        detail: s.detail.clone(),
+                        web_build: s.web_build.clone(),
+                    }
                 })
                 .collect(),
             leftovers: leftovers.clone(),
@@ -1511,11 +1536,73 @@ fn inspect_network(container: &str, network: &str) -> io::Result<bool> {
 }
 
 fn logs(container: &str) -> String {
-    docker_text(&["logs", "--tail", "80", container])
-        .unwrap_or_default()
-        .chars()
-        .take(MAX_LOG)
-        .collect()
+    tail(&read_logs(container).0)
+}
+
+/// 表示と記録に残すログの末尾（80行、MAX_LOG文字まで）。
+fn tail(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let joined = lines[lines.len().saturating_sub(80)..].join("\n");
+    let skip = joined.chars().count().saturating_sub(MAX_LOG);
+    joined.chars().skip(skip).collect()
+}
+
+/// 上限までを残し、残りは読み捨てる。読み捨てないと、もう一方の出力を待つ間に対象が書き込みで止まる。
+fn drain(mut reader: impl Read) -> (Vec<u8>, bool) {
+    let mut kept = Vec::new();
+    let mut buffer = [0u8; 8192];
+    let mut whole = true;
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return (kept, whole),
+            Ok(n) => {
+                let room = MAX_FULL_LOG.saturating_sub(kept.len());
+                kept.extend_from_slice(&buffer[..n.min(room)]);
+                whole &= n <= room;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return (kept, false),
+        }
+    }
+}
+
+/// コンテナのログを、標準出力と標準エラーの両方から読む。`docker logs`は対象の標準エラーを
+/// 自身の標準エラーへ出すため、両方を読まないと対象の標準エラーが抜ける。
+/// 上限を超えた・読めなかった場合は、最後まで読めていない（偽）を返す。
+/// ログの保存方式（ログドライバー）の設定で古い行が消えている場合は、ここでは検出できない。
+fn read_logs(container: &str) -> (String, bool) {
+    let mut command = Command::new("docker");
+    command
+        .args(["logs", container])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(host) = std::env::var_os("DOCKER_HOST") {
+        command.env("DOCKER_HOST", host);
+    }
+    let Ok(mut child) = command.spawn() else {
+        return (String::new(), false);
+    };
+    let stdout = child.stdout.take().map(|p| thread::spawn(move || drain(p)));
+    let stderr = child.stderr.take().map(|p| thread::spawn(move || drain(p)));
+    let collect = |handle: Option<thread::JoinHandle<(Vec<u8>, bool)>>| {
+        handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or((Vec::new(), false))
+    };
+    let (out, out_whole) = collect(stdout);
+    let (err, err_whole) = collect(stderr);
+    let succeeded = child.wait().is_ok_and(|s| s.success());
+    let mut text = String::from_utf8_lossy(&out).into_owned();
+    if !err.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&err));
+    }
+    (text, succeeded && out_whole && err_whole)
 }
 
 fn labeled(trial: &str) -> Vec<String> {
@@ -1682,6 +1769,23 @@ fn parse_http(url: &str, method: &str, tls_insecure: bool, raw: &[u8]) -> io::Re
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn logs_are_kept_up_to_the_limit_and_overflow_is_reported() {
+        let (kept, whole) = drain(std::io::Cursor::new(b"line\n".repeat(3)));
+        assert!(whole);
+        assert_eq!(kept, b"line\n".repeat(3));
+        let large = vec![b'x'; MAX_FULL_LOG + 10];
+        let (kept, whole) = drain(std::io::Cursor::new(large));
+        assert!(!whole, "上限を超えたログは最後まで読めていない扱い");
+        assert_eq!(kept.len(), MAX_FULL_LOG);
+        let text: String = (1..=100).map(|n| format!("{n}\n")).collect();
+        let excerpt = tail(&text);
+        assert!(
+            excerpt.starts_with("21\n") && excerpt.ends_with("100"),
+            "{excerpt}"
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -764,25 +764,42 @@ pub fn evaluate(spec: &TrialSpec, test_value: &str, out: &Outputs) -> Vec<CheckR
                 },
                 CheckMethod::ContainerLog => match out.containers {
                     Some(phase) => {
-                        let logs = phase
+                        let services: Vec<_> = phase
                             .services
                             .iter()
                             .filter(|s| check.target.as_deref().is_none_or(|t| t == s.name))
-                            .map(|s| s.log_excerpt.as_str())
+                            .collect();
+                        // 判定には記録用の末尾ではなく、読み出した全文（標準出力と標準エラー）を使う。
+                        let logs = services
+                            .iter()
+                            .map(|s| s.log_text.as_str())
                             .collect::<Vec<_>>()
                             .join("\n");
-                        if check
-                            .target
-                            .as_ref()
-                            .is_some_and(|t| !phase.services.iter().any(|s| &s.name == t))
-                        {
+                        let complete = !services.is_empty() && services.iter().all(|s| s.log_complete);
+                        let has = logs.contains(&text);
+                        // ブラウザ試験では、準備を終えて操作を一つ以上行った場合だけ、ログに無いことを
+                        // 操作の結果として扱う。操作していなければ、試験値がログに無いのは当然である。
+                        let acted = phase.browser.as_ref().is_none_or(|b| {
+                            b.prepared && b.steps.iter().any(|s| s.phase == "action")
+                        });
+                        if services.is_empty() {
                             (Observed::NotObserved, "指定したコンテナのログがない".into())
+                        } else if !acted && !has {
+                            (
+                                Observed::NotObserved,
+                                format!("試験の操作を行っていないため、ログに「{text}」が無いことは操作の結果を示さない"),
+                            )
+                        } else if !complete && !has {
+                            // 読めた範囲に無いことは、ログ全体に無いことを示さない。
+                            (
+                                Observed::NotObserved,
+                                format!("コンテナのログを最後まで読めていない（上限超過または読み出しの失敗）。読めた範囲に「{text}」は含まれない"),
+                            )
                         } else {
-                            let has = logs.contains(&text);
                             (
                                 contains(check.expect, &logs, &text),
                                 format!(
-                                    "コンテナのログに「{text}」が{}",
+                                    "コンテナの標準出力・標準エラーのログに「{text}」が{}。コンテナ内のファイルに書かれたログは見ていない",
                                     if has { "含まれる" } else { "含まれない" }
                                 ),
                             )
@@ -1024,7 +1041,11 @@ pub fn describe(check: &TrialCheck, spec: &TrialSpec) -> String {
                 "一致しない"
             }
         ),
-        CheckMethod::ContainerLog => format!("コンテナのログに{text}{has}"),
+        CheckMethod::ContainerLog => {
+            format!(
+                "コンテナの標準出力・標準エラーのログに{text}{has}（コンテナ内のファイルのログは対象外）"
+            )
+        }
         CheckMethod::DatabaseQuery => {
             format!("基盤がデータベースを直接読み出した結果に{text}{has}")
         }
