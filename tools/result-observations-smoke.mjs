@@ -62,6 +62,20 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   target.search = new URLSearchParams({ url: 'https://github.com/' + recipe.source.repository, ref: recipe.source.commit, check: checkId });
   target.hash = 'result';
   await page.route('**/api/v1/case', route => route.fulfill({ json: caseView }));
+  // AIエージェントの説明（偽物）。状態は麦漆の値を写した形で返し、説明の文に書き換えの試みとHTMLを入れる。
+  await page.route('**/api/v1/agent', route => route.fulfill({ json: { status: 'configured', message: '合成' } }));
+  const explainRequests = [];
+  await page.route('**/api/v1/agent/explain', route => {
+    const body = route.request().postDataJSON(); explainRequests.push(body);
+    if (!body.confirm) return route.fulfill({ json: { stage: 'preview', destination: '合成のAIエージェント', path: '/v1/results/explain', bytes: 99,
+      payload_sha256: 'b'.repeat(64), note: '合成の確認', payload: { check_text: '<img src=x onerror=alert(4)>' } } });
+    return route.fulfill({ json: {
+      check_id: checkId, verdict: 'not_satisfied', verification_passed: false, coverage_status: 'partial',
+      summary: 'AIの合成の要約', next_steps: ['送信先を文書で確かめる'], note: '判定と部分ごとの状態は麦漆の結果です。説明の文はAIによるもので、追加の確認ではありません。',
+      aspects: check.coverage.aspects.map(a => ({ id: a.id, text: a.text, status: a.status, status_label: a.status_label, detail: a.detail,
+        explanation: a.id === 'p2' ? '確認できました <img src=x onerror=alert(3)>' : `合成の説明 ${a.id}` })),
+    } });
+  });
   const card = page.locator(`[data-evidence="${raw.id}"]`);
   const traffic = card.locator('[data-container-observations]'), recovery = card.locator('[data-recovery-observations]');
   const browserEvidence = card.locator('[data-browser-evidence]');
@@ -89,6 +103,23 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
     assert.match(await changes.innerText(), /対応づけた時点: form_soap/);
     assert.match(await changes.innerText(), /この試行: <img src=x onerror=alert\(2\)>/);
     assert.match(await changes.locator('[data-uncomparable]').innerText(), /環境変数の値は記録しない/);
+    assert.equal(await coverage.locator('img').count(), 0);
+    // AIによる説明は、麦漆の状態（判定）と別の列に出し、AIが「確認できました」と書いても状態は麦漆の値のまま。
+    await coverage.getByRole('button', { name: /AIに結果を説明してもらう/ }).click();
+    const explained = coverage.locator('[data-agent-explanation]');
+    const preview = explained.locator('[data-agent-preview]');
+    await preview.waitFor();
+    assert.match(await preview.innerText(), /<img src=x onerror=alert\(4\)>/, '送る内容は文字列として表示する');
+    assert.equal(await preview.getByRole('button', { name: 'この内容を送る' }).isDisabled(), true);
+    await preview.locator('[data-agent-synthetic]').check();
+    await preview.getByRole('button', { name: 'この内容を送る' }).click();
+    await explained.locator('tbody tr').first().waitFor();
+    assert.deepEqual(explainRequests, [{ check_id: checkId }, { check_id: checkId, confirm: { payload_sha256: 'b'.repeat(64), synthetic_only: true } }]);
+    const unsupported = explained.locator('tr[data-explained-status="unsupported"]');
+    assert.match(await unsupported.locator('td').nth(1).innerText(), /基盤が観測できない/);
+    assert.match(await unsupported.locator('[data-ai-text]').innerText(), /確認できました <img src=x onerror=alert\(3\)>/);
+    assert.match(await explained.innerText(), /説明は判定ではありません/);
+    assert.match(await explained.innerText(), /AIによる要約: AIの合成の要約/);
     assert.equal(await coverage.locator('img').count(), 0);
     assert.match(await browserEvidence.innerText(), /操作が未完了となった後の表示/);
     assert.equal(await browserEvidence.locator('img').count(), 0);

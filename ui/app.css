@@ -251,3 +251,4 @@ body:has(.diagram-dialog[open]) { overflow:hidden; }
 .verification-item h3 { font-size:1rem; margin:.25rem 0; }
 .link-changes code { overflow-wrap: anywhere; white-space: pre-wrap; }
 .link-change { margin-block: .5rem; }
+.agent-payload { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }

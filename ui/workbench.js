@@ -413,6 +413,10 @@ async function loadCase() {
       try { state.observationKinds = (await api('GET', '/api/v1/observation-kinds')).kinds; }
       catch (e) { state.observationKindsError = e.message; }
     }
+    // AIエージェントは運営者がサーバー側で設定する。未設定・取得失敗ならAIの欄を出さず、ほかの操作はそのまま使える。
+    if (state.agent === undefined) {
+      try { state.agent = await api('GET', '/api/v1/agent'); } catch { state.agent = null; }
+    }
   } catch (e) { showError(e); }
   renderCurrent();
   if (['open', 'repository'].includes(state.step)) $('current').hidden = true;
@@ -1005,6 +1009,7 @@ function aspectEditor(check, trial) {
       rows.length ? rows : h('p', { class: 'note' }, '確かめたい部分はまだ登録されていません。登録しないまま実行すると、結果は「試験の判定」だけになり、確認項目には答えていない扱いになります。'),
       changedCount ? h('p', { class: 'ref-unverified', 'data-changed-links': changedCount }, `対応づけた後に内容・操作・観測先が変わった判定条件が ${changedCount} 件あります。人が確認して選び直すまで、この試験には適用しません。`) : null,
       uncovered.length ? h('p', { class: 'ref-unverified', 'data-uncovered': '' }, `この試験では確かめない部分: ${uncovered.map(a => a.text || '（未入力）').join('、')}`) : null,
+      agentProposals(check, drafts, render),
       h('div', { class: 'journey-actions' }, add, save));
     refreshSave();
   };
@@ -1286,6 +1291,80 @@ function linkChangesView(c, afterLabel) {
     }),
     c.uncomparable.map(u => h('p', { class: 'ref-unverified', 'data-uncomparable': '' }, `比較できないこと: ${u}`)));
 }
+/// AIエージェントへ送る前の確認。サーバーが組み立てた送る内容をそのまま示し、人が「架空のデータだけ」と確かめたときだけ送る。
+/// 確認項目や自由記入欄に何が書かれているかを麦漆は判断しないため、固定の注意文だけで安全とみなさない。
+function confirmAndSend(out, path, body, onSent) {
+  return guarded(async () => {
+    const preview = await api('POST', path, body);
+    const agree = h('input', { type: 'checkbox', 'data-agent-synthetic': '' });
+    const send = button('この内容を送る', () => guarded(async () => {
+      send.disabled = true;
+      try { onSent(await api('POST', path, { ...body, confirm: { payload_sha256: preview.payload_sha256, synthetic_only: agree.checked } })); }
+      finally { send.disabled = !agree.checked; }
+    }), 'solid-fill', 'sm');
+    send.disabled = true;
+    agree.addEventListener('change', () => { send.disabled = !agree.checked; });
+    fill(out, h('div', { class: 'box', 'data-agent-preview': '' },
+      h('p', {}, h('strong', {}, '送り先: '), preview.destination),
+      h('p', { class: 'ref-unverified' }, preview.note),
+      h('details', { open: true }, h('summary', {}, `送る内容（${preview.bytes} バイト）`), h('pre', { class: 'agent-payload' }, JSON.stringify(preview.payload, null, 2))),
+      h('label', {}, agree, ' この内容は架空のデータだけで、実患者の情報・認証情報・生のログを含まないことを確かめた'),
+      h('div', { class: 'journey-actions' }, send)));
+  });
+}
+/// AIエージェントの「確かめる部分」の案。人がチェックした案だけを編集中の一覧に加え、保存は既存の「対応づけを保存する」で行う。
+/// 既存の部分（IDと判定条件への対応づけ）はそのまま残る。AIの案は観測の種類の候補だけで、判定条件は人が選ぶ。
+function agentProposals(check, drafts, render) {
+  if (state.agent?.status !== 'configured') return null;
+  const box = h('section', { class: 'box', 'data-agent-proposals': '' });
+  const request = textarea({ rows: 2, maxlength: 2000, placeholder: '（任意）AIへの追加の依頼。送る内容に含まれます。' });
+  const list = h('div', { 'data-agent-proposal-list': '' });
+  const show = result => {
+    const picks = result.proposals.map(p => ({ p, box: h('input', { type: 'checkbox', value: p.id }) }));
+    const adopt = button('選んだ案を確かめたい部分に加える（まだ保存されません）', () => {
+      const chosen = picks.filter(x => x.box.checked).map(x => x.p).filter(p => !drafts.some(d => d.id === p.id || d.text === p.text));
+      drafts.push(...chosen.map(p => ({ id: p.id, text: p.text, origin: p.origin, observation: p.observation || null, trial_checks: [] })));
+      render();
+    }, 'outlined', 'sm');
+    fill(list,
+      h('p', { class: 'note' }, h('strong', {}, 'AIの返答（下書き）: '), result.reply || ''),
+      result.questions?.length ? h('section', { 'data-agent-questions': '' }, h('h5', {}, 'AIからの質問'), h('ul', { class: 'items' }, result.questions.map(q => h('li', {}, q)))) : null,
+      picks.length ? h('ul', { class: 'items' }, picks.map(({ p, box }) => h('li', { 'data-proposal': p.id },
+        h('label', {}, box, ` ${p.text}`),
+        h('div', { class: 'note' }, `観測の種類の案: ${p.observation ? (kindInfo(p.observation)?.label || p.observation) + '｜' + (SUPPORT_LABEL[kindInfo(p.observation)?.support] || '') : '未定'}`),
+        p.rationale ? h('div', { class: 'note' }, `AIの理由: ${p.rationale}`) : null,
+        p.unknowns?.length ? h('div', { class: 'ref-unverified' }, `AIが分からないとしたこと: ${p.unknowns.join('、')}`) : null))) : h('p', { class: 'note' }, 'AIの案はありませんでした。'),
+      result.out_of_scope?.length ? h('section', { 'data-agent-out-of-scope': '' }, h('h5', {}, 'AIが試験で扱わないとした範囲（案）'),
+        h('p', { class: 'note' }, '扱わない範囲は未確認のまま残ります。範囲を決めるのは人です。'),
+        h('ul', { class: 'items' }, result.out_of_scope.map(o => h('li', {}, `${o.text}（理由: ${o.reason}）`)))) : null,
+      picks.length ? adopt : null);
+  };
+  const ask = button('AIに確かめる範囲の案を出してもらう（送る内容を先に確認します）', () =>
+    confirmAndSend(list, '/api/v1/agent/propose', { check_id: check.id, request: request.control.value || null }, show), 'outlined', 'sm');
+  fill(box,
+    h('h4', {}, 'AIエージェントの案（下書き）'),
+    h('p', { class: 'note' }, 'AIの案は、選んで加えて保存するまで確認項目に入りません。加えた部分も、観測の種類と判定条件を人が選ぶまで未確認です。送る内容は、送る前に表示します。'),
+    field({ label: 'AIへの追加の依頼', control: request }), ask, list);
+  return box;
+}
+/// 結果の説明。判定と部分ごとの状態は麦漆の結果で、AIの文は説明の欄だけに示す。
+function agentExplanation(cv) {
+  if (state.agent?.status !== 'configured' || !cv.coverage.aspects.length) return null;
+  const out = h('div', { 'data-agent-explanation': '' });
+  const show = r => fill(out,
+    h('p', { class: 'note' }, r.note),
+    h('figure', { class: 'dads-table' }, h('figcaption', { class: 'dads-table__caption' }, '麦漆の状態と、AIによる説明（説明は判定ではありません）'),
+      h('table', { class: 'dads-table__table', 'data-cell-border': 'bottom' },
+        h('thead', {}, h('tr', {}, ['確かめたい部分', '麦漆の状態（判定）', 'AIによる説明'].map(t => h('th', { class: 'dads-table__col-header', scope: 'col' }, t)))),
+        h('tbody', {}, r.aspects.map(a => h('tr', { 'data-explained-status': a.status },
+          h('td', {}, a.text), h('td', {}, `${ASPECT_STATUS_MARK[a.status] || ''} ${a.status_label}`), h('td', { 'data-ai-text': '' }, a.explanation)))))),
+    r.summary ? h('p', {}, h('strong', {}, 'AIによる要約: '), r.summary) : null,
+    r.next_steps?.length ? h('ul', { class: 'items' }, r.next_steps.map(s => h('li', {}, `AIの提案: ${s}`))) : null);
+  const ask = button('AIに結果を説明してもらう（送る内容を先に確認します）', () =>
+    confirmAndSend(out, '/api/v1/agent/explain', { check_id: cv.check_id }, show), 'outlined', 'sm');
+  return h('section', { 'data-agent-explain': '' }, h('h4', {}, 'AIエージェントによる説明'),
+    h('p', { class: 'note' }, '送る内容（確認項目の文、部分ごとの文・観測の種類・状態・詳細、判定）は、送る前に表示します。'), ask, out);
+}
 /// 試験の判定とは別に、確認項目のどの部分を観測できたかを示す。
 function coverageBlock(cv) {
   const c = cv.coverage;
@@ -1301,6 +1380,7 @@ function coverageBlock(cv) {
       h('p', { class: 'note' }, '対応づけた時点と試行の設定が違うため、この部分は観測済みにしていません。違いを確認し、実行前の確認画面で対応づけ直すか、未確認として残してください。'),
       a.link_changes.map(lc => linkChangesView(lc, 'この試行')))),
     c.remaining.length ? h('p', { class: 'ref-unverified' }, `未確認として残る部分: ${c.remaining.length} 件`) : null,
+    agentExplanation(cv),
     button('対応づけを見直す（試験の設定に戻り、実行前の確認画面で編集する）', () => goto('trial'), 'text'));
 }
 function evidenceCard(check, v, e) {

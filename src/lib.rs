@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod ai;
 mod ai_response;
 pub mod architecture;
