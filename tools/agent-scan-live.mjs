@@ -110,6 +110,21 @@ try {
   assert.equal(after.revision, before.revision, '照合で事例の記録は変わらない');
   await scan.locator('details').evaluateAll(ds => ds.forEach(d => { d.open = true; }));
   await scan.screenshot({ path: join(output, 'agent-scan-live-result.png') });
+
+  // 5. 人が候補を1件選び、確認項目の文に直して保存する。出所に照合の候補と出典が残り、観測の種類と判定条件は未設定のまま。
+  const pick = findings[0];
+  await scan.locator('[data-scan-finding="0"]').getByRole('button', { name: /この候補をもとに確認項目を書く/ }).click();
+  assert.equal(await page.locator('#expect-text').inputValue(), pick.requirement);
+  const written = `架空の職員がタスク一覧を開いたとき、${pick.requirement}`;
+  await page.locator('#expect-text').fill(written);
+  await page.getByRole('button', { name: 'この動作を確かめる' }).click();
+  let saved;
+  for (let i = 0; i < 60 && !saved; i++) { saved = (await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await page.locator('meta[name=review-token]').getAttribute('content') } })).json()).workspace.checks.find(c => c.text === written); if (!saved) await new Promise(r => setTimeout(r, 250)); }
+  assert(saved, '確認項目が保存されていない');
+  assert.match(saved.origin, /ガイドライン照合のAI候補/); assert.match(saved.origin, new RegExp(pick.citations[0].sha256));
+  assert.equal(saved.observation, null); assert.deepEqual(saved.aspects ?? [], []);
+  record.saved_check = { id: saved.id, text: saved.text, origin: saved.origin };
+  stage('人が候補を1件選び、文を直して確認項目として保存した', { id: saved.id });
   assert.deepEqual(errors, []);
   record.completed = true;
 } catch (error) {
