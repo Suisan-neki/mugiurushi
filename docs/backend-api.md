@@ -38,6 +38,7 @@ APIを呼ぶクライアントは`X-Review-Token`を指定する。POSTは`Conte
 | GET `/api/v1/agent` | — | 画面版のみ。AIエージェント（mugiurushi-ai）の設定の有無。接続先と共有トークンは返さない |
 | POST `/api/v1/agent/propose` | `{check_id, request?, confirm?}` | 画面版のみ。読み取り専用。`confirm` が無ければ送らずに、送る内容（確認項目の文・追加の依頼・確かめたい部分のID・文・観測の種類と、固定の説明文）とその SHA-256 を返す（`stage: "preview"`）。`confirm: {payload_sha256, synthetic_only: true}` のときだけ、組み立て直した内容が同じ SHA-256 なら送り、「確かめる部分」の案（下書き）・質問・試験で扱わない範囲を返す。判定条件の対応づけを含む案・麦漆にない観測の種類の案は受け取らない。保存はしない（人が選んだ案を画面から `set_aspects` で追加する） |
 | POST `/api/v1/agent/explain` | `{check_id, confirm?}` | 画面版のみ。読み取り専用。送る内容は確認項目の文（Check）と、判定・確認項目の通過・部分ごとのID・文・観測の種類の名前・状態・詳細（CheckView）。`confirm` の扱いは propose と同じ。判定と状態は麦漆の値で上書きして返し、AIの文は `explanation` だけ |
+| POST `/api/v1/agent/scan` | `{summary, confirm?}` | 画面版のみ。事例の記録は読まず、保存もしない。送る内容は人が書いたシステムの説明だけ（`{system: {summary, excerpts: []}}`。コード・実行記録・ログは送らない）。`confirm` の扱いは propose と同じ。ガイドラインとの照合の候補（要求・該当の見込み・出典・確かめ方・未確認の点）、照合できなかったこと、出典ごとの状態を返す。文書・ページ・SHA-256のそろった出典がない候補を含む応答は受け取らない。麦漆の試験で確かめられるか（`executable_check`・`support`）は、AIの値ではなく麦漆の観測の種類の一覧で決める。候補は適合・準拠・安全性の判断ではなく、確認項目にも判定にも入らない |
 | POST `/api/v1/link-changes` | `{check_id, recipe}` | 読み取り専用。確認項目に保存した対応づけごとに、これから実行する試験設定と指紋が一致するか（`unchanged`・`changed`・`not_in_trial`）と、対応づけた時点から変わった設定の値（区分・場所・前・後）を返す。比較できないことは`uncomparable`に示す。コンテナの環境変数の値は記録・比較しない |
 
 POST入力は1MiBまで。更新は`expected_revision`を照合し、別の更新があればHTTP 409を返す。不正な形式や対応しない操作は400、トークン・Origin・権限の不一致は403、未定義のパス、未保存の読取記録・構成図は404。HTTP受付にはaxumを使い、長い読取・AI処理は4件まで同時に処理する。超過時は503。失敗した更新を成功した事例版として保存しない。

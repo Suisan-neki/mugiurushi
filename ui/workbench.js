@@ -522,7 +522,7 @@ function renderExpect() {
       h('p', {}, state.pendingAI.candidate.reason), h('span', {}, state.pendingAI.candidate.refs.map(r => refLinksFor({ ...state.pendingAI.source, path: r.path, line: r.line, end_line: r.end_line }))),
       h('ul', { class: 'items' }, [...state.pendingAI.unknowns, ...state.pendingAI.candidate.unknowns].map(u => h('li', {}, u))),
       button('この候補を使わず書き直す', () => { state.pendingAI = null; state.expectDraft = ''; renderExpect(); }, 'text')) : null,
-    h('h3', { class: 'dads-u-std-20B-150' }, '確認したい動作を書く'), form, proposals(), scopeHelp(),
+    h('h3', { class: 'dads-u-std-20B-150' }, '確認したい動作を書く'), form, proposals(), scopeHelp(), guidelineScan(),
     h('h3', { class: 'dads-u-std-20B-150' }, `登録した確認項目（${checks.length} 件）`),
     checks.length ? checks.map(expectationCard) : h('p', { class: 'note' }, '確認項目はまだ登録されていません。'));
 }
@@ -1346,6 +1346,54 @@ function agentProposals(check, drafts, render) {
     h('p', { class: 'note' }, 'AIの案は、選んで加えて保存するまで確認項目に入りません。加えた部分も、観測の種類と判定条件を人が選ぶまで未確認です。送る内容は、送る前に表示します。'),
     field({ label: 'AIへの追加の依頼', control: request }), ask, list);
   return box;
+}
+/// ガイドラインとの照合（候補）。送るのは人が書いたシステムの説明だけで、コード・実行記録・ログは送らない。
+/// 返る候補は適合の判断ではなく、確認項目にも判定にも入らない。麦漆の試験で確かめられるかは麦漆の観測の種類の一覧で示す。
+const RELEVANCE = { likely: '該当しうる（見込みが高い）', possible: '該当する可能性がある', unclear: '該当するか分からない' };
+function guidelineScan() {
+  if (state.agent?.status !== 'configured') return null;
+  const summary = textarea({ rows: 4, maxlength: 8000, value: state.scanSummary || '', placeholder: '例: 架空の診療所で使う予約システム。患者の氏名と予約日時をサーバーのDBに保存し、受付の職員がブラウザで一覧を見る。' });
+  summary.control.addEventListener('input', () => { state.scanSummary = summary.control.value; });
+  const out = h('div', { 'data-scan-result': '' });
+  const show = r => { state.scanResult = r; fill(out, scanView(r)); };
+  if (state.scanResult) fill(out, scanView(state.scanResult));
+  const ask = button('ガイドラインと照らす（送る内容を先に確認します）', () => {
+    if (!summary.control.value.trim()) { summary.control.setAttribute('aria-invalid', 'true'); summary.control.focus(); setStatus('照合するシステムの説明を書いてください。'); return; }
+    return confirmAndSend(out, '/api/v1/agent/scan', { summary: summary.control.value }, show);
+  }, 'outlined', 'sm');
+  return h('section', { class: 'box', 'data-guideline-scan': '' },
+    h('h3', { class: 'dads-u-std-20B-150' }, 'ガイドラインとの照合（AIの候補）'),
+    h('p', { class: 'note' }, '書いたシステムの説明を、AIエージェントに取り込まれたガイドライン・規制・公開基準の断片と照らし、該当しうる要求の候補を出典つきで返します。送るのはこの説明だけで、コード・実行記録・ログは送りません。送る内容は、送る前に表示します。'),
+    h('p', { class: 'ref-unverified' }, '候補は適合・準拠・安全性の判断ではありません。確認項目にも判定にも入りません。'),
+    field({ label: '照合するシステムの説明（架空のデータだけで書く）', control: summary }), ask, out);
+}
+function scanView(r) {
+  const shortSha = x => x ? x.slice(0, 12) : '（なし）';
+  return h('div', {},
+    h('p', { class: 'note' }, r.note),
+    r.limits ? h('p', { class: 'ref-unverified', 'data-scan-limits': '' }, `AIエージェントが示した限界: ${r.limits}`) : null,
+    h('h4', {}, `照合の候補（${r.findings.length} 件）`),
+    r.findings.length ? h('ul', { class: 'items' }, r.findings.map((f, i) => h('li', { 'data-scan-finding': String(i), 'data-executable': String(f.verification.executable_check) },
+      h('p', {}, h('strong', {}, '要求の候補: '), f.requirement),
+      h('div', { class: 'note' }, `該当の見込み（AIの見立て）: ${RELEVANCE[f.relevance] || f.relevance}`),
+      h('div', { 'data-scan-method': '' }, h('strong', {}, '確かめ方の候補: '), f.verification.method_label,
+        h('div', { class: f.verification.executable_check ? 'note' : 'ref-unverified' },
+          f.verification.executable_check ? `麦漆の試験の判定条件として観測できる種類です（${f.verification.support_note}）。確認項目と判定条件は人が作ります。` : `麦漆の試験では確かめられません: ${f.verification.support_note}`),
+        f.verification.how ? h('div', { class: 'note' }, `AIの説明: ${f.verification.how}`) : null),
+      f.unknowns.length ? h('div', { class: 'ref-unverified' }, `AIが未確認とした点: ${f.unknowns.join('、')}`) : null,
+      h('details', {}, h('summary', {}, `出典（${f.citations.length} 件）`),
+        h('ul', { class: 'items' }, f.citations.map(c => h('li', { 'data-scan-citation': c.passage_id || '' },
+          h('div', {}, `${c.document}（${c.publisher}）${c.version ? ` ${c.version}` : ''} ページ ${c.page}`),
+          h('div', { class: 'note' }, `取得元: ${c.origin}｜取得日時: ${c.fetched_at}｜SHA-256: ${shortSha(c.sha256)}…`),
+          c.excerpt ? h('blockquote', { class: 'note' }, c.excerpt) : null))))))) : h('p', { class: 'note' }, '照合の候補はありませんでした。該当する要求が無いことは意味しません。'),
+    r.not_covered?.length ? h('section', { 'data-scan-not-covered': '' }, h('h4', {}, 'AIが照合できなかったとしたこと'), h('ul', { class: 'items' }, r.not_covered.map(t => h('li', {}, t)))) : null,
+    h('figure', { class: 'dads-table', 'data-scan-sources': '' }, h('figcaption', { class: 'dads-table__caption' }, '出典ごとの状態（AIエージェントのサーバーが記録した値）'),
+      h('table', { class: 'dads-table__table', 'data-cell-border': 'bottom' },
+        h('thead', {}, h('tr', {}, ['文書', '状態', '取り込んだ文書'].map(t => h('th', { class: 'dads-table__col-header', scope: 'col' }, t)))),
+        h('tbody', {}, r.sources.map(s => h('tr', { 'data-source-status': s.status },
+          h('td', {}, s.title || s.source_id), h('td', {}, s.status_label),
+          h('td', {}, (s.documents || []).map(d => h('div', { class: 'note' }, `${d.document_id}: ${d.ingested ? `取り込み済み（SHA-256 ${shortSha(d.sha256)}…、渡した断片 ${d.passages_used} 件）` : '取り込まれていない'}`)))))))),
+    r.model_call ? h('p', { class: 'note' }, `モデル: ${r.model_call.response_model || r.model_call.requested_model || ''}｜応答ID: ${r.model_call.response_id || ''}`) : null);
 }
 /// 結果の説明。判定と部分ごとの状態は麦漆の結果で、AIの文は説明の欄だけに示す。
 function agentExplanation(cv) {

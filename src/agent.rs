@@ -399,6 +399,101 @@ pub fn explain(
     }))
 }
 
+/// ① ガイドラインとの照合。画面から受け取るのは、人が書いたシステムの説明（架空のデータだけ）と送る前の確認だけ。
+/// コード・実行記録・ログは自動では送らない。返すのは照合の候補で、適合・準拠・安全性の判断ではない。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanRequest {
+    pub summary: String,
+    #[serde(default)]
+    pub confirm: Option<Confirm>,
+}
+
+const MAX_SUMMARY: usize = 8000;
+
+pub fn scan(config: Option<&Config>, request: ScanRequest) -> io::Result<Value> {
+    let config = config.ok_or_else(|| invalid("AIエージェントは設定されていません"))?;
+    let summary = request.summary.trim();
+    if summary.is_empty() {
+        return Err(invalid("照合するシステムの説明を書いてください"));
+    }
+    if summary.chars().count() > MAX_SUMMARY {
+        return Err(invalid("システムの説明は8000文字以内にしてください"));
+    }
+    let payload = json!({"system": {"summary": summary, "excerpts": []}});
+    if let Some(preview) = preview_or_check("/v1/scan", &payload, request.confirm.as_ref())? {
+        return Ok(preview);
+    }
+    let answer = config.post("/v1/scan", &payload)?;
+    let items = answer["findings"]
+        .as_array()
+        .ok_or_else(|| invalid("AIエージェントの照合の形が不正です"))?;
+    let mut findings = vec![];
+    for item in items {
+        let requirement = item["requirement"].as_str().unwrap_or_default().trim();
+        let citations = item["citations"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        // 出典は取り込んだ文書の断片だけ。文書・ページ・SHA-256のない引用を含む候補は受け取らない。
+        let cited = citations.iter().all(|c| {
+            c["document"].as_str().is_some_and(|d| !d.is_empty())
+                && c["page"].as_str().is_some()
+                && c["sha256"]
+                    .as_str()
+                    .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        });
+        if requirement.is_empty() || citations.is_empty() || !cited {
+            return Err(invalid(
+                "要求の文か、文書・ページ・SHA-256のそろった出典がない照合の候補は受け取りません",
+            ));
+        }
+        let method = item["verification"]["method"].as_str().unwrap_or_default();
+        // 麦漆の試験で確かめられるかは、麦漆の観測の種類の一覧で決める。AIの応答の値は使わない。
+        let kind: Option<ObservationKind> = serde_json::from_value(json!(method)).ok();
+        let (support, method_label) = match kind {
+            Some(k) => (Some(k.support()), k.label().to_owned()),
+            None => (
+                None,
+                item["verification"]["method_label"]
+                    .as_str()
+                    .unwrap_or(method)
+                    .to_owned(),
+            ),
+        };
+        let executable = support == Some(crate::coverage::Support::Judged);
+        findings.push(json!({
+            "status": "candidate",
+            "requirement": requirement,
+            "relevance": item["relevance"],
+            "citations": citations,
+            "verification": {
+                "method": method,
+                "method_label": method_label,
+                "observation": kind,
+                "support": support,
+                "support_note": match kind {
+                    Some(k) => k.note(),
+                    None => "人が確かめる方法。試験が通っても未確認のまま残る",
+                },
+                "executable_check": executable,
+                "how": item["verification"]["how"],
+            },
+            "unknowns": strings(&item["unknowns"]),
+        }));
+    }
+    Ok(json!({
+        "stage": "sent",
+        "status": "candidate",
+        "limits": answer["limits"],
+        "findings": findings,
+        "not_covered": strings(&answer["not_covered"]),
+        "sources": answer["sources"].as_array().cloned().unwrap_or_default(),
+        "model_call": answer["model_call"],
+        "note": "照合の候補です。適合・準拠・安全性の判断ではなく、確認項目にも判定にも使いません。該当するかと確かめ方は人が確かめます。",
+    }))
+}
+
 fn strings(value: &Value) -> Vec<String> {
     value
         .as_array()
