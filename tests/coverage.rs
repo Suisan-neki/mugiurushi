@@ -1057,6 +1057,31 @@ impl FakeAgent {
     }
 }
 
+/// 画面と同じく、まず送らずに内容を確かめ、その SHA-256 と架空のデータの確認を添えて送る。
+fn propose_confirmed(
+    config: &mugiurushi::agent::Config,
+    case: &Path,
+    request: Option<&str>,
+) -> std::io::Result<serde_json::Value> {
+    use mugiurushi::agent::{Confirm, ProposeRequest, propose};
+    let ask = |confirm| ProposeRequest {
+        check_id: "concern".into(),
+        request: request.map(str::to_owned),
+        confirm,
+    };
+    let preview = propose(Some(config), load(case).unwrap(), ask(None))?;
+    assert_eq!(preview["stage"], "preview");
+    let sha = preview["payload_sha256"].as_str().unwrap().to_owned();
+    propose(
+        Some(config),
+        load(case).unwrap(),
+        ask(Some(Confirm {
+            payload_sha256: sha,
+            synthetic_only: true,
+        })),
+    )
+}
+
 fn proposal(text: &str, observation: Option<&str>, links: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "aspect": {"id": format!("ai-{}", text.len()), "text": text, "origin": "mugiurushi-ai の案（試験）",
@@ -1090,7 +1115,7 @@ fn agent_proposals_are_adopted_by_a_person_and_results_are_explained_with_mugiur
                     "status": "draft", "reply": "読み出しも確かめます", "questions": ["保存先はどこですか"],
                     "aspects": [proposal("別のプロセスで読み出すと同じ内容が出る", Some("readback_output"), serde_json::json!([])),
                                 proposal("外部へ送信されない", Some("external_destination"), serde_json::json!([]))],
-                    "out_of_scope": [], "model_call": {"response_id": "fake-1"}
+                    "out_of_scope": [{"text": "本番環境の保存", "reason": "試験環境だけを扱う"}], "model_call": {"response_id": "fake-1"}
                 }),
             ),
             (
@@ -1107,16 +1132,33 @@ fn agent_proposals_are_adopted_by_a_person_and_results_are_explained_with_mugiur
         ],
     );
     let config = agent.config();
-    let proposals = mugiurushi::agent::propose(
+    // 確認だけでは送らない。
+    let preview = mugiurushi::agent::propose(
         Some(&config),
         load(&f.case).unwrap(),
         mugiurushi::agent::ProposeRequest {
             check_id: "concern".into(),
             request: None,
+            confirm: None,
         },
     )
     .unwrap();
+    assert!(
+        agent.received.lock().unwrap().is_empty(),
+        "確認の段階では送らない"
+    );
+    assert_eq!(
+        preview["payload"]["concern"],
+        "追加したメモは保存され、後から読み出せる"
+    );
+    let shown = preview["payload"].to_string();
+    assert!(
+        !shown.contains("example/notes") && !shown.contains("notes.py"),
+        "対象のリポジトリ・パスは送らない"
+    );
+    let proposals = propose_confirmed(&config, &f.case, None).unwrap();
     assert_eq!(proposals["status"], "draft");
+    assert_eq!(proposals["out_of_scope"][0]["reason"], "試験環境だけを扱う");
     let sent = agent.received.lock().unwrap()[0].clone();
     assert_eq!(sent.0, "/v1/dialogue/turn");
     assert_eq!(sent.1, "synthetic-agent-token-0123456789");
@@ -1164,6 +1206,25 @@ fn agent_proposals_are_adopted_by_a_person_and_results_are_explained_with_mugiur
         load(&f.case).unwrap(),
         mugiurushi::agent::ExplainRequest {
             check_id: "concern".into(),
+            confirm: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        explained["stage"], "preview",
+        "結果の説明も、まず送らずに内容を返す"
+    );
+    assert_eq!(agent.received.lock().unwrap().len(), 1);
+    let sha = explained["payload_sha256"].as_str().unwrap().to_owned();
+    let explained = mugiurushi::agent::explain(
+        Some(&config),
+        load(&f.case).unwrap(),
+        mugiurushi::agent::ExplainRequest {
+            check_id: "concern".into(),
+            confirm: Some(mugiurushi::agent::Confirm {
+                payload_sha256: sha,
+                synthetic_only: true,
+            }),
         },
     )
     .unwrap();
@@ -1214,6 +1275,7 @@ fn without_a_working_agent_existing_verification_still_works() {
     let request = || mugiurushi::agent::ProposeRequest {
         check_id: "concern".into(),
         request: None,
+        confirm: None,
     };
     assert!(mugiurushi::agent::propose(None, load(&f.case).unwrap(), request()).is_err());
     let failing = FakeAgent::start(
@@ -1224,9 +1286,7 @@ fn without_a_working_agent_existing_verification_still_works() {
             serde_json::json!({"detail": "合成の失敗"}),
         )],
     );
-    let error =
-        mugiurushi::agent::propose(Some(&failing.config()), load(&f.case).unwrap(), request())
-            .unwrap_err();
+    let error = propose_confirmed(&failing.config(), &f.case, None).unwrap_err();
     assert!(error.to_string().contains("HTTP 500"), "{error}");
     for bad in [
         proposal(
@@ -1244,10 +1304,7 @@ fn without_a_working_agent_existing_verification_still_works() {
                 serde_json::json!({"reply": "r", "aspects": [bad], "questions": []}),
             )],
         );
-        assert!(
-            mugiurushi::agent::propose(Some(&agent.config()), load(&f.case).unwrap(), request())
-                .is_err()
-        );
+        assert!(propose_confirmed(&agent.config(), &f.case, None).is_err());
     }
     let before = load(&f.case).unwrap().revision;
     let v = f.run("add", storage_trial(TrialFault::Normal));

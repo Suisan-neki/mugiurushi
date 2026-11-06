@@ -40,10 +40,13 @@ try {
   await page.addInitScript(() => sessionStorage.setItem('eel-person', JSON.stringify({ name: '合成の試験担当', role: 'developer' })));
   // AIエージェントの案（偽物）。採用は画面で人が選び、保存は麦漆の set_aspects で行う。
   await page.route('**/api/v1/agent', route => route.fulfill({ json: { status: 'configured', message: '合成' } }));
-  let proposeRequest;
+  const proposeRequests = [];
   await page.route('**/api/v1/agent/propose', route => {
-    proposeRequest = route.request().postDataJSON();
-    return route.fulfill({ json: { status: 'draft', reply: 'DBと再表示を分けて確かめます', questions: ['保存先の表はどれですか'], out_of_scope: [],
+    const body = route.request().postDataJSON(); proposeRequests.push(body);
+    if (!body.confirm) return route.fulfill({ json: { stage: 'preview', destination: '合成のAIエージェント', path: '/v1/dialogue/turn', bytes: 42,
+      payload_sha256: 'a'.repeat(64), note: '合成の確認', payload: { concern: '合成の確認項目', current_aspects: [] } } });
+    return route.fulfill({ json: { stage: 'sent', status: 'draft', reply: 'DBと再表示を分けて確かめます', questions: ['保存先の表はどれですか'],
+      out_of_scope: [{ text: '本番環境の保存', reason: '試験環境だけを扱う' }],
       note: '合成', proposals: [
         { id: 'ai-readback', text: 'AIの案: 再表示した画面にSOAPの主訴が出る', origin: 'mugiurushi-ai の案（合成）', observation: 'browser_text', rationale: '画面で確かめる', unknowns: [] },
         { id: 'ai-unused', text: 'AIの案: 採用しない案', origin: 'mugiurushi-ai の案（合成）', observation: null, rationale: '', unknowns: ['不明'] },
@@ -117,9 +120,19 @@ try {
   assert.equal(savedLink.fingerprint.length, 64, '麦漆が判定条件の内容を指紋にして保存する'); assert.equal(savedLink.definition, undefined); assert.match(savedLink.label, /SOAP subjectiveの保存/);
   // AIの案は、人がチェックした案だけを加え、保存しても既存の部分のIDと対応づけは変わらない。加えた部分の対応づけは空。
   const proposals = editor.locator('[data-agent-proposals]');
-  await proposals.getByRole('button', { name: 'AIに確かめる範囲の案を出してもらう' }).click();
+  await proposals.getByRole('button', { name: /AIに確かめる範囲の案を出してもらう/ }).click();
+  // まず送る内容を表示し、架空のデータだけと確かめるまで送れない。
+  const preview = proposals.locator('[data-agent-preview]');
+  await preview.waitFor();
+  assert.match(await preview.innerText(), /送り先: 合成のAIエージェント[\s\S]*合成の確認項目/);
+  assert.equal(await preview.getByRole('button', { name: 'この内容を送る' }).isDisabled(), true);
+  assert.deepEqual(proposeRequests, [{ check_id: 'soap-dialogue-check', request: null }], '確認の段階では確認項目のIDと任意の依頼だけ');
+  await preview.locator('[data-agent-synthetic]').check();
+  await preview.getByRole('button', { name: 'この内容を送る' }).click();
   await proposals.locator('[data-proposal="ai-readback"]').waitFor();
-  assert.deepEqual(proposeRequest, { check_id: 'soap-dialogue-check', request: null }, '画面からは確認項目のIDと任意の依頼だけを送る');
+  assert.deepEqual(proposeRequests[1].confirm, { payload_sha256: 'a'.repeat(64), synthetic_only: true });
+  assert.match(await proposals.locator('[data-agent-out-of-scope]').innerText(), /本番環境の保存（理由: 試験環境だけを扱う）/);
+  assert.match(await proposals.locator('[data-agent-questions]').innerText(), /保存先の表はどれですか/);
   assert.equal((await view()).workspace.checks[0].aspects.length, 2, '案を出しただけでは確認項目は変わらない');
   await proposals.locator('[data-proposal="ai-readback"] input[type=checkbox]').check();
   await proposals.getByRole('button', { name: /選んだ案を確かめたい部分に加える/ }).click();
