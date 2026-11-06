@@ -57,7 +57,9 @@ try {
   record.commit = commit;
 
   // 3. 麦漆の画面版を、AIエージェントの設定つきで起動する。
-  const app = spawn(binary, ['app', data, '--port', '0', '--execution-mode', 'local'], { env: { ...process.env, EEL_AGENT_URL: agentUrl, EEL_AGENT_TOKEN_FILE: tokenFile }, stdio: ['ignore', 'pipe', 'pipe'] });
+  // AIの認証（OPENAI_API_KEY など）はAIサービスの起動環境だけに渡し、麦漆本体の子プロセスの環境からは外す。
+  const appEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(OPENAI_|MUGIURUSHI_AI_)/.test(k)));
+  const app = spawn(binary, ['app', data, '--port', '0', '--execution-mode', 'local'], { env: { ...appEnv, EEL_AGENT_URL: agentUrl, EEL_AGENT_TOKEN_FILE: tokenFile }, stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(app);
   const url = await started(app, /理解と試験の画面: (http:\/\/127\.0\.0\.1:\d+)/, '麦漆');
   stage('麦漆を起動（AIエージェントの設定つき）');
@@ -102,10 +104,15 @@ try {
   await page.screenshot({ path: join(output, 'agent-live-proposals.png'), fullPage: true });
 
   // 5. 人が1件を採用し、観測の種類と判定条件（後からの読み出し c3）を選んで保存する。
-  // 判定条件 c3 は別のプロセスで一覧を読み直す観測なので、AIが読み直しを観測の案に挙げた案を選ぶ（無ければ最初の案）。
-  const readback = sent.body.proposals.find(p => p.observation === 'readback_output');
-  const first = readback || sent.body.proposals[0];
-  record.selection = readback ? 'AIが観測の種類に readback_output を挙げた案を選んだ' : 'readback_output を挙げた案が無く、最初の案を選んだ（内容と判定条件の対応は要確認）';
+  // 判定条件 c3 は別のプロセスで一覧を読み直す観測なので、AIが読み直しを観測の案に挙げた案だけを選ぶ。
+  // 合う案が無い回は、合わない案に c3 を付けて進めず、その回を明示して止める。
+  const first = sent.body.proposals.find(p => p.observation === 'readback_output');
+  if (!first) {
+    record.stopped = 'AIの案に、観測の種類 readback_output（判定条件 c3 に合う観測）を挙げた案が無かったため、採用と試験に進まず止めた';
+    stage('案：判定条件 c3 に合う観測の案が無く、ここで止めた', { proposals: sent.body.proposals.map(p => ({ id: p.id, observation: p.observation })) });
+    throw Error(record.stopped);
+  }
+  record.selection = 'AIが観測の種類に readback_output を挙げた案を選んだ';
   await proposals.locator(`[data-proposal="${first.id}"] input[type=checkbox]`).check();
   await proposals.getByRole('button', { name: /選んだ案を確かめたい部分に加える/ }).click();
   const row = editor.locator(`[data-aspect="${first.id}"]`);
@@ -125,6 +132,10 @@ try {
   const checkView = (await view()).checks.find(c => c.check_id === checkId);
   record.trial = { verdict: checkView.verdict, verification_passed: checkView.verification_passed, coverage: checkView.coverage.status, aspects: checkView.coverage.aspects.map(a => ({ id: a.id, status: a.status })) };
   stage('既存の判定条件で試験を実行した', record.trial);
+  // 結果は麦漆の判定をそのまま記録し、通した扱いにするのは、判定・通過・部分の観測がそろった場合だけ。
+  assert.equal(checkView.verdict, 'satisfied', '試験の判定が「満たす」ではない');
+  assert.equal(checkView.verification_passed, true, '確認項目が通過していない');
+  assert.deepEqual(record.trial.aspects, [{ id: first.id, status: 'observed' }], '採用した部分が「観測した」ではない');
   await page.screenshot({ path: join(output, 'agent-live-result.png'), fullPage: true });
 
   // 7. 結果の説明：送る内容を確認 → 送る → 麦漆の状態とAIの説明を分けて表示。
