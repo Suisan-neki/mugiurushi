@@ -190,12 +190,19 @@ try {
   await scan.locator('[data-scan-sources]').waitFor();
   assert.deepEqual(scanRequests[1].confirm, { payload_sha256: 'b'.repeat(64), synthetic_only: true });
   assert.equal(await scan.locator('[data-scan-finding]').count(), 2);
-  assert.match(await scan.locator('[data-scan-finding="0"]').innerText(), /判定条件として観測できる種類/);
-  assert.match(await scan.locator('[data-scan-finding="1"]').innerText(), /麦漆の試験では確かめられません/);
+  assert.match(await scan.locator('[data-scan-finding="0"]').innerText(), /判定条件にできます。ただし、この要求をこの観測で確かめられるかは確かめていません/);
+  assert.match(await scan.locator('[data-scan-finding="1"]').innerText(), /この確かめ方は、麦漆の試験では観測しません/);
   assert.match(await scan.locator('[data-scan-sources]').innerText(), /合成の未取り込み[\s\S]*取り込まれていない/);
   assert.match(await scan.locator('[data-scan-not-covered]').innerText(), /合成の照合できなかった点/);
   assert.doesNotMatch(await scan.innerText(), /undefined/);
   assert.equal((await view()).workspace.revision, beforeScan, '照合で事例の記録は変わらない');
+  // 候補から確認項目を書く：入力欄に写すだけで保存しない。使わない場合は消せる。
+  await scan.locator('[data-scan-finding="0"]').getByRole('button', { name: /この候補をもとに確認項目を書く/ }).click();
+  assert.equal(await page.locator('#expect-text').inputValue(), '合成の要求: 記録を残す');
+  assert.match(await page.locator('#expect-body').innerText(), /ガイドライン照合の候補から確認項目を書いています（未保存）[\s\S]*SHA-256 c{64}/);
+  assert.equal((await view()).workspace.revision, beforeScan, '写しただけでは保存しない');
+  await page.getByRole('button', { name: 'この候補を使わず書き直す' }).click();
+  assert.equal(await page.locator('#expect-text').inputValue(), '');
   // 判定条件 soap-subjective-row は同じまま、試す状況（DB停止）だけを変えた試験では、前の対応づけを適用しない。
   await page.locator('a.step-link[href="#trial"]').click();
   await page.locator('[data-browser-preset="openemr-soap-db-stopped"]').getByRole('button').click();

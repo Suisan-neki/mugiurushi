@@ -5,7 +5,7 @@ import { h, button, field, input, textarea, select, fill, disclosure } from "./w
 const $ = id => document.getElementById(id);
 const state = {
   source: null, overview: null, overviewRefs: null, plan: null, view: null, execution: null, ai: null,
-  files: new Map(), code: null, selectedLine: null, fn: null, checkId: null, pendingRef: null, pendingAI: null, aiSequence: 0, lastRun: null, step: 'understand',
+  files: new Map(), code: null, selectedLine: null, fn: null, checkId: null, pendingRef: null, pendingAI: null, pendingScan: null, aiSequence: 0, lastRun: null, step: 'understand',
 };
 
 const ROLE = { operator: '運用担当', developer: '開発者', other: 'その他' };
@@ -351,7 +351,7 @@ function aiCandidates(response, source) {
         if (source.repository !== state.source?.repository || source.commit !== state.source?.commit) throw Error('対象の版が変わりました。現在のコードで問い合わせ直してください。');
         if (state.expectDraft?.trim()) throw Error('書きかけの確認項目があります。「検証する動作を決める」で保存するか、入力を消してから候補を選んでください。');
         state.pendingAI = { source, model: response.model, provenance: candidate.provenance, candidate, unknowns: response.unknowns };
-        state.pendingRef = null;
+        state.pendingRef = null; state.pendingScan = null;
         state.expectDraft = candidate.expectation; goto('expect'); $('expect-text').focus();
       })) : h('p', { class: 'ref-unverified' }, candidate.unavailable_reason || '今回AIへ渡した抜粋に根拠をそろえられないため、この候補は取り込めません。'))));
 }
@@ -522,6 +522,11 @@ function renderExpect() {
       h('p', {}, state.pendingAI.candidate.reason), h('span', {}, state.pendingAI.candidate.refs.map(r => refLinksFor({ ...state.pendingAI.source, path: r.path, line: r.line, end_line: r.end_line }))),
       h('ul', { class: 'items' }, [...state.pendingAI.unknowns, ...state.pendingAI.candidate.unknowns].map(u => h('li', {}, u))),
       button('この候補を使わず書き直す', () => { state.pendingAI = null; state.expectDraft = ''; renderExpect(); }, 'text')) : null,
+    state.pendingScan ? banner('info', 'ガイドライン照合の候補から確認項目を書いています（未保存）',
+      h('p', {}, `候補: ${state.pendingScan.requirement}`),
+      h('p', {}, '照合の候補は適合の判断ではありません。保存しても試験済みにはならず、観測の種類と判定条件は人が選びます。'),
+      h('p', { class: 'note' }, state.pendingScan.provenance),
+      button('この候補を使わず書き直す', () => { state.pendingScan = null; state.expectDraft = ''; renderExpect(); }, 'text')) : null,
     h('h3', { class: 'dads-u-std-20B-150' }, '確認したい動作を書く'), form, proposals(), scopeHelp(), guidelineScan(),
     h('h3', { class: 'dads-u-std-20B-150' }, `登録した確認項目（${checks.length} 件）`),
     checks.length ? checks.map(expectationCard) : h('p', { class: 'note' }, '確認項目はまだ登録されていません。'));
@@ -537,12 +542,15 @@ async function addExpectation(control) {
     const id = `${prefix}-${n}`;
     const draft = state.pendingAI;
     if (draft && (draft.source.repository !== state.source.repository || draft.source.commit !== state.source.commit)) throw Error('AI候補の対象の版が変わりました。現在のコードから候補を選び直してください。');
-    const origin = draft ? `AIの未検証の確認候補から${p.name}が確認項目を保存。出所: ${draft.provenance}` : `${p.name}（${ROLE[p.role]}）が画面で入力した確認項目`;
+    const scanDraft = state.pendingScan;
+    const origin = draft ? `AIの未検証の確認候補から${p.name}が確認項目を保存。出所: ${draft.provenance}`
+      : scanDraft ? `ガイドライン照合のAI候補「${scanDraft.requirement}」から${p.name}が確認項目を書いて保存。照合の候補は適合の判断ではない。${scanDraft.provenance}`
+      : `${p.name}（${ROLE[p.role]}）が画面で入力した確認項目`;
     const ref = draft?.candidate.refs[0];
     const source = ref ? { ...draft.source, path: ref.path, line: ref.line, end_line: ref.end_line } : null;
     await change({ op: 'add_check', check: { id, version: 1, text: value, origin, source, observation: null, rule: 'manual_only', dependencies: [], questions: [] } }, '期待する動作を記録した');
-    await change({ op: 'add_statement', statement: { id: randomId('s'), kind: draft ? 'proposal' : 'statement', role: p.role, text: value, origin: draft ? origin : `${p.name}が自分の言葉で書いた確認項目`, source, check_ids: [id] } }, draft ? 'AI候補から編集した提案として残した' : '確認項目を書いた人の発言として残した');
-    state.checkId = id; state.expectDraft = ''; state.pendingAI = null;
+    await change({ op: 'add_statement', statement: { id: randomId('s'), kind: draft || scanDraft ? 'proposal' : 'statement', role: p.role, text: value, origin: draft || scanDraft ? origin : `${p.name}が自分の言葉で書いた確認項目`, source, check_ids: [id] } }, draft || scanDraft ? 'AI候補から編集した提案として残した' : '確認項目を書いた人の発言として残した');
+    state.checkId = id; state.expectDraft = ''; state.pendingAI = null; state.pendingScan = null;
     renderCurrent(); goto('expect-edit');
     setStatus('確認項目を登録しました。次に、該当するコードと検証方法を指定してください。');
   });
@@ -1367,6 +1375,17 @@ function guidelineScan() {
     h('p', { class: 'ref-unverified' }, '候補は適合・準拠・安全性の判断ではありません。確認項目にも判定にも入りません。'),
     field({ label: '照合するシステムの説明（架空のデータだけで書く）', control: summary }), ask, out);
 }
+/// 照合の候補を、確認項目の入力欄の下書きにする。文は人が直してから保存し、出所に照合の候補と出典を残す。
+function useScanFinding(r, f) {
+  if (state.expectDraft?.trim()) { showError(Error('書きかけの確認項目があります。保存するか、入力を消してから候補を選んでください。')); return; }
+  const cite = c => `${c.document} ページ ${c.page}（SHA-256 ${c.sha256}）`;
+  state.pendingAI = null; state.pendingRef = null;
+  state.pendingScan = { requirement: f.requirement, citations: f.citations, method_label: f.verification.method_label,
+    provenance: `出典: ${f.citations.map(cite).join('／')}。モデル: ${r.model_call?.response_model || r.model_call?.requested_model || '不明'}、応答ID: ${r.model_call?.response_id || '不明'}` };
+  state.expectDraft = f.requirement;
+  renderExpect(); $('expect-text').focus();
+  setStatus('照合の候補を確認項目の入力欄に写しました。誰が何をしたとき何がどうなってほしいかの形に直してから保存してください。');
+}
 function scanView(r) {
   const shortSha = x => x ? x.slice(0, 12) : '（なし）';
   return h('div', {},
@@ -1378,9 +1397,10 @@ function scanView(r) {
       h('div', { class: 'note' }, `該当の見込み（AIの見立て）: ${RELEVANCE[f.relevance] || f.relevance}`),
       h('div', { 'data-scan-method': '' }, h('strong', {}, '確かめ方の候補: '), f.verification.method_label,
         h('div', { class: f.verification.executable_check ? 'note' : 'ref-unverified' },
-          f.verification.executable_check ? `麦漆の試験の判定条件として観測できる種類です（${f.verification.support_note}）。確認項目と判定条件は人が作ります。` : `麦漆の試験では確かめられません: ${f.verification.support_note}`),
+          f.verification.executable_check ? `この観測の種類は、麦漆の試験の判定条件にできます。ただし、この要求をこの観測で確かめられるかは確かめていません。人が判断し、確認項目と判定条件を作ります。` : `この確かめ方は、麦漆の試験では観測しません: ${f.verification.support_note}`),
         f.verification.how ? h('div', { class: 'note' }, `AIの説明: ${f.verification.how}`) : null),
       f.unknowns.length ? h('div', { class: 'ref-unverified' }, `AIが未確認とした点: ${f.unknowns.join('、')}`) : null,
+      button('この候補をもとに確認項目を書く（まだ保存されません）', () => useScanFinding(r, f), 'outlined', 'sm'),
       h('details', {}, h('summary', {}, `出典（${f.citations.length} 件）`),
         h('ul', { class: 'items' }, f.citations.map(c => h('li', { 'data-scan-citation': c.passage_id || '' },
           h('div', {}, `${c.document}（${c.publisher}）${c.version ? ` ${c.version}` : ''} ページ ${c.page}`),
