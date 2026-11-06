@@ -268,6 +268,12 @@ fn handle_request(
                     });
                 return result_response(stream, result);
             }
+            ("POST", "/api/v1/agent/scan") => {
+                // 事例の記録は読まず、保存もしない。送るのは人が書いたシステムの説明だけ。
+                let result = parse_body::<crate::agent::ScanRequest>(&request.body)
+                    .and_then(|r| crate::agent::scan(app.agent.as_ref(), r));
+                return result_response(stream, result);
+            }
             ("GET", "/api/v1/browser-recipes") => {
                 return result_response(stream, crate::browser_recipes::catalog());
             }

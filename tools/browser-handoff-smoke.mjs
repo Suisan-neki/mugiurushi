@@ -52,6 +52,21 @@ try {
         { id: 'ai-unused', text: 'AIの案: 採用しない案', origin: 'mugiurushi-ai の案（合成）', observation: null, rationale: '', unknowns: ['不明'] },
       ] } });
   });
+  // ガイドラインとの照合（偽物）。送るのは人が書いた説明だけで、候補は確認項目にも判定にも入らない。
+  const scanRequests = [];
+  await page.route('**/api/v1/agent/scan', route => {
+    const body = route.request().postDataJSON(); scanRequests.push(body);
+    if (!body.confirm) return route.fulfill({ json: { stage: 'preview', destination: '合成のAIエージェント', path: '/v1/scan', bytes: 42,
+      payload_sha256: 'b'.repeat(64), note: '合成の確認', payload: { system: { summary: body.summary, excerpts: [] } } } });
+    const citation = { passage_id: 'synthetic:p3:1', source: '合成の指針', publisher: '合成の公開元', document: '合成の指針 本編', version: null, page: '3',
+      origin: 'https://example.invalid/a.pdf', sha256: 'c'.repeat(64), fetched_at: '2026-11-06T00:00:00+00:00', excerpt: '合成の断片' };
+    const finding = (requirement, method, executable_check, support) => ({ status: 'candidate', requirement, relevance: 'likely', citations: [citation], unknowns: ['合成の未確認点'],
+      verification: { method, method_label: method, observation: support ? method : null, support, support_note: '合成の注記', executable_check, how: '合成の確かめ方' } });
+    return route.fulfill({ json: { stage: 'sent', status: 'candidate', limits: '合成の限界', note: '照合の候補です（合成）', not_covered: ['合成の照合できなかった点'], model_call: null,
+      findings: [finding('合成の要求: 記録を残す', 'container_log', true, 'judged'), finding('合成の要求: 手順書を整える', 'document_review', false, null)],
+      sources: [{ source_id: 'synthetic', title: '合成の指針', status: 'used', status_label: '断片をモデルに渡した', documents: [{ document_id: 'synthetic-main', ingested: true, sha256: 'c'.repeat(64), passages_used: 1 }] },
+        { source_id: 'missing', title: '合成の未取り込み', status: 'not_ingested', status_label: '取り込まれていない', documents: [] }] } });
+  });
   await page.goto(url + '/workbench');
   const token = await page.locator('meta[name=review-token]').getAttribute('content'), headers = { 'X-Review-Token': token, 'Content-Type': 'application/json' };
   const view = async () => (await page.request.get(url + '/api/v1/case', { headers })).json();
@@ -161,6 +176,26 @@ try {
   assert.equal(v.workspace.evidence.length, 0);
   await page.locator('[data-aspect-editor][data-link-changes="loaded"]').waitFor();
   assert.equal(await editor.locator('[data-link-changed]').count(), 0, '同じ試験設定なら変更なし');
+  // ガイドラインとの照合：送る内容を表示してから送り、候補・出典・出典ごとの状態を示す。事例の記録は変わらない。
+  const beforeScan = (await view()).workspace.revision;
+  await page.locator('a.step-link[href="#expect"]').click();
+  const scan = page.locator('[data-guideline-scan]'); await scan.waitFor();
+  await scan.locator('textarea').fill('合成のシステムの説明');
+  await scan.getByRole('button', { name: /ガイドラインと照らす/ }).click();
+  const scanPreview = scan.locator('[data-agent-preview]'); await scanPreview.waitFor();
+  assert.deepEqual(scanRequests, [{ summary: '合成のシステムの説明' }], '確認の段階では書いた説明だけ');
+  assert.equal(await scanPreview.getByRole('button', { name: 'この内容を送る' }).isDisabled(), true);
+  await scanPreview.locator('[data-agent-synthetic]').check();
+  await scanPreview.getByRole('button', { name: 'この内容を送る' }).click();
+  await scan.locator('[data-scan-sources]').waitFor();
+  assert.deepEqual(scanRequests[1].confirm, { payload_sha256: 'b'.repeat(64), synthetic_only: true });
+  assert.equal(await scan.locator('[data-scan-finding]').count(), 2);
+  assert.match(await scan.locator('[data-scan-finding="0"]').innerText(), /判定条件として観測できる種類/);
+  assert.match(await scan.locator('[data-scan-finding="1"]').innerText(), /麦漆の試験では確かめられません/);
+  assert.match(await scan.locator('[data-scan-sources]').innerText(), /合成の未取り込み[\s\S]*取り込まれていない/);
+  assert.match(await scan.locator('[data-scan-not-covered]').innerText(), /合成の照合できなかった点/);
+  assert.doesNotMatch(await scan.innerText(), /undefined/);
+  assert.equal((await view()).workspace.revision, beforeScan, '照合で事例の記録は変わらない');
   // 判定条件 soap-subjective-row は同じまま、試す状況（DB停止）だけを変えた試験では、前の対応づけを適用しない。
   await page.locator('a.step-link[href="#trial"]').click();
   await page.locator('[data-browser-preset="openemr-soap-db-stopped"]').getByRole('button').click();

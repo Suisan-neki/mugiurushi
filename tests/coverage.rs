@@ -1316,3 +1316,152 @@ fn without_a_working_agent_existing_verification_still_works() {
         "外部への http は使わない"
     );
 }
+
+/// ガイドラインとの照合。送るのは人が書いた説明だけで、まず送らずに内容を返す。麦漆の試験で確かめられるかは、
+/// AIの値ではなく麦漆の観測の種類の一覧で決める。出典の欠けた候補は受け取らない。
+#[test]
+fn guideline_scan_sends_only_the_written_description_and_uses_mugiurushi_support() {
+    use mugiurushi::agent::{Confirm, ScanRequest, scan};
+    let f = Fixture::new("追加したメモは保存される");
+    let sha = "a".repeat(64);
+    let citation = serde_json::json!({"passage_id": "doc:p3:1", "source": "架空の指針", "publisher": "架空の公開元",
+        "document": "架空の指針 本編", "version": null, "page": "3", "origin": "https://example.invalid/a.pdf",
+        "sha256": sha, "fetched_at": "2026-11-06T00:00:00+00:00", "excerpt": "アクセスの記録を残す"});
+    let finding = |method: &str, executable: bool, citations: serde_json::Value| {
+        serde_json::json!({
+        "status": "candidate", "requirement": "アクセスの記録を残す", "relevance": "likely", "citations": citations,
+        "system_refs": [], "unknowns": ["保存期間"],
+        // AIの判定可否の値は使わない。
+        "verification": {"method": method, "method_label": "AIの表示名", "support": "judged", "executable_check": executable, "how": "記録を読む"}})
+    };
+    let answer = |findings| {
+        serde_json::json!({"status": "candidate", "limits": "照合の候補", "findings": findings,
+        "not_covered": ["版の確認"], "sources": [{"source_id": "s", "title": "架空の指針", "status": "used", "status_label": "使った", "documents": []}],
+        "model_call": {"response_id": "fake-scan"}})
+    };
+    let agent = FakeAgent::start(
+        &f.directory,
+        vec![(
+            "/v1/scan",
+            200,
+            answer(serde_json::json!([
+                finding("container_log", true, serde_json::json!([citation.clone()])),
+                finding(
+                    "code_inspection",
+                    true,
+                    serde_json::json!([citation.clone()])
+                ),
+                finding(
+                    "document_review",
+                    true,
+                    serde_json::json!([citation.clone()])
+                ),
+            ])),
+        )],
+    );
+    let config = agent.config();
+    let ask = |summary: &str, confirm| ScanRequest {
+        summary: summary.into(),
+        confirm,
+    };
+    assert!(scan(Some(&config), ask("  ", None)).is_err());
+    assert!(scan(None, ask("架空の予約システム", None)).is_err());
+    let preview = scan(Some(&config), ask("架空の予約システム", None)).unwrap();
+    assert_eq!(preview["stage"], "preview");
+    assert_eq!(
+        preview["payload"],
+        serde_json::json!({"system": {"summary": "架空の予約システム", "excerpts": []}}),
+        "送るのは書いた説明だけ"
+    );
+    assert!(
+        agent.received.lock().unwrap().is_empty(),
+        "確認の段階では送らない"
+    );
+    let sha256 = preview["payload_sha256"].as_str().unwrap().to_owned();
+    assert!(
+        scan(
+            Some(&config),
+            ask(
+                "架空の予約システム（変更）",
+                Some(Confirm {
+                    payload_sha256: sha256.clone(),
+                    synthetic_only: true
+                })
+            )
+        )
+        .is_err(),
+        "確認した内容と違えば送らない"
+    );
+    let result = scan(
+        Some(&config),
+        ask(
+            "架空の予約システム",
+            Some(Confirm {
+                payload_sha256: sha256,
+                synthetic_only: true,
+            }),
+        ),
+    )
+    .unwrap();
+    let sent = agent.received.lock().unwrap()[0].clone();
+    assert_eq!(sent.0, "/v1/scan");
+    assert_eq!(sent.2["system"]["summary"], "架空の予約システム");
+    let executable: Vec<_> = result["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["verification"]["executable_check"].clone())
+        .collect();
+    assert_eq!(
+        executable,
+        [true, false, false],
+        "推定・人による確認は試験で確かめられない"
+    );
+    assert_eq!(
+        result["findings"][1]["verification"]["support"],
+        "inference"
+    );
+    assert!(result["findings"][2]["verification"]["support"].is_null());
+    assert_eq!(result["findings"][0]["citations"][0]["page"], "3");
+    assert_eq!(result["sources"][0]["status"], "used");
+    assert_eq!(
+        load(&f.case).unwrap().checks[0].aspects,
+        vec![],
+        "照合は確認項目を変えない"
+    );
+
+    for citations in [
+        serde_json::json!([]),
+        serde_json::json!([{"document": "x", "page": "1", "sha256": "short"}]),
+    ] {
+        let bad = FakeAgent::start(
+            &f.directory,
+            vec![(
+                "/v1/scan",
+                200,
+                answer(serde_json::json!([finding(
+                    "container_log",
+                    true,
+                    citations
+                )])),
+            )],
+        );
+        let config = bad.config();
+        let preview = scan(Some(&config), ask("架空", None)).unwrap();
+        let sha = preview["payload_sha256"].as_str().unwrap().to_owned();
+        assert!(
+            scan(
+                Some(&config),
+                ask(
+                    "架空",
+                    Some(Confirm {
+                        payload_sha256: sha,
+                        synthetic_only: true
+                    })
+                )
+            )
+            .is_err(),
+            "出典の欠けた候補は受け取らない"
+        );
+    }
+}
