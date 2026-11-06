@@ -985,3 +985,277 @@ fn a_new_check_cannot_carry_links() {
     );
     assert!(result.is_err());
 }
+
+/// 試験用の偽のAIエージェント（mugiurushi-ai の代わり）。経路ごとに決めた応答を返し、受け取った要求を記録する。
+struct FakeAgent {
+    url: String,
+    token_file: PathBuf,
+    received: std::sync::Arc<std::sync::Mutex<Vec<(String, String, serde_json::Value)>>>,
+}
+impl FakeAgent {
+    fn start(directory: &Path, answers: Vec<(&'static str, u16, serde_json::Value)>) -> Self {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let token_file = directory.join("agent-token");
+        fs::write(&token_file, "synthetic-agent-token-0123456789\n").unwrap();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let log = received.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let path = line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_owned();
+                let (mut length, mut token) = (0, String::new());
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    let (name, value) = header.split_once(':').unwrap();
+                    match name.to_ascii_lowercase().as_str() {
+                        "content-length" => length = value.trim().parse().unwrap(),
+                        "x-mugiurushi-ai-token" => token = value.trim().to_owned(),
+                        _ => {}
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                log.lock().unwrap().push((
+                    path.clone(),
+                    token,
+                    serde_json::from_slice(&body).unwrap(),
+                ));
+                let (status, answer) = answers
+                    .iter()
+                    .find(|(p, _, _)| *p == path)
+                    .map(|(_, s, a)| (*s, a.to_string()))
+                    .unwrap_or((404, "{}".into()));
+                let mut stream = stream;
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    answer.len()
+                )
+                .unwrap();
+            }
+        });
+        Self {
+            url,
+            token_file,
+            received,
+        }
+    }
+    fn config(&self) -> mugiurushi::agent::Config {
+        mugiurushi::agent::Config::new(&self.url, self.token_file.clone()).unwrap()
+    }
+}
+
+fn proposal(text: &str, observation: Option<&str>, links: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "aspect": {"id": format!("ai-{}", text.len()), "text": text, "origin": "mugiurushi-ai の案（試験）",
+                   "observation": observation, "trial_checks": links},
+        "support": "judged", "rationale": "合成の理由", "unknowns": []
+    })
+}
+
+/// AIの案を人が選んで追加し、既存の部分と対応づけを保ったまま、既存の判定条件で試験し、麦漆の結果をAIに説明させる。
+/// 返す状態は麦漆の値で、AIの文は説明だけ。
+#[test]
+fn agent_proposals_are_adopted_by_a_person_and_results_are_explained_with_mugiurushi_statuses() {
+    let f = Fixture::new("追加したメモは保存され、後から読み出せる");
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![aspect(
+            "stored",
+            "保存先に書き込まれる",
+            Some(ObservationKind::StoredFile),
+            &["written"],
+        )],
+    });
+    let existing = v.workspace.checks[0].aspects.clone();
+    let agent = FakeAgent::start(
+        &f.directory,
+        vec![
+            (
+                "/v1/dialogue/turn",
+                200,
+                serde_json::json!({
+                    "status": "draft", "reply": "読み出しも確かめます", "questions": ["保存先はどこですか"],
+                    "aspects": [proposal("別のプロセスで読み出すと同じ内容が出る", Some("readback_output"), serde_json::json!([])),
+                                proposal("外部へ送信されない", Some("external_destination"), serde_json::json!([]))],
+                    "out_of_scope": [], "model_call": {"response_id": "fake-1"}
+                }),
+            ),
+            (
+                "/v1/results/explain",
+                200,
+                serde_json::json!({
+                    "summary": "AIの要約",
+                    // AIが状態を書き換えても使わない。
+                    "aspects": [{"id": "stored", "explanation": "保存先を読んだ", "status": "unsupported"},
+                                {"id": "ai-57", "explanation": "読み出しも確認した"}],
+                    "next_steps": [], "model_call": {"response_id": "fake-2"}
+                }),
+            ),
+        ],
+    );
+    let config = agent.config();
+    let proposals = mugiurushi::agent::propose(
+        Some(&config),
+        load(&f.case).unwrap(),
+        mugiurushi::agent::ProposeRequest {
+            check_id: "concern".into(),
+            request: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(proposals["status"], "draft");
+    let sent = agent.received.lock().unwrap()[0].clone();
+    assert_eq!(sent.0, "/v1/dialogue/turn");
+    assert_eq!(sent.1, "synthetic-agent-token-0123456789");
+    assert_eq!(
+        sent.2["concern"],
+        "追加したメモは保存され、後から読み出せる"
+    );
+    assert_eq!(sent.2["current_aspects"][0]["id"], "stored");
+    // 案の取得だけでは確認項目は変わらない。
+    assert_eq!(load(&f.case).unwrap().checks[0].aspects, existing);
+
+    // 人が一つ目の案だけを採用し、既存の判定条件 readback に対応づける。既存の部分は送られた形のまま保つ。
+    let chosen = &proposals["proposals"][0];
+    assert_eq!(chosen["observation"], "readback_output");
+    let mut adopted = aspect_for(
+        &base_recipe("add", &[], storage_trial(TrialFault::Normal)),
+        chosen["id"].as_str().unwrap(),
+        chosen["text"].as_str().unwrap(),
+        Some(ObservationKind::ReadbackOutput),
+        &["readback"],
+    );
+    adopted.origin = chosen["origin"].as_str().unwrap().into();
+    let mut aspects = existing.clone();
+    aspects.push(adopted);
+    let v = f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects,
+    });
+    assert_eq!(
+        v.workspace.checks[0].aspects[0], existing[0],
+        "既存の部分のIDと対応づけを保つ"
+    );
+    assert_eq!(
+        v.workspace.checks[0].aspects.len(),
+        2,
+        "採用しなかった案は入らない"
+    );
+
+    let v = f.run("add", storage_trial(TrialFault::Normal));
+    assert_eq!(status(&v, "stored"), AspectStatus::Observed);
+    assert!(v.checks[0].verification_passed);
+
+    let explained = mugiurushi::agent::explain(
+        Some(&config),
+        load(&f.case).unwrap(),
+        mugiurushi::agent::ExplainRequest {
+            check_id: "concern".into(),
+        },
+    )
+    .unwrap();
+    let sent = agent.received.lock().unwrap()[1].clone();
+    assert_eq!(
+        sent.2["check_text"], "追加したメモは保存され、後から読み出せる",
+        "確認項目の文は Check から"
+    );
+    assert_eq!(
+        sent.2["coverage"]["aspects"][0]["status"], "observed",
+        "状態は CheckView から"
+    );
+    assert_eq!(
+        explained["aspects"][0]["status"], "observed",
+        "AIが書き換えた状態は使わない"
+    );
+    assert_eq!(explained["aspects"][0]["explanation"], "保存先を読んだ");
+    assert_eq!(explained["verification_passed"], true);
+    let body = serde_json::to_string(
+        &agent
+            .received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| &r.2)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert!(
+        !body.contains("EEL-TEST") && !body.contains("stdout"),
+        "実行記録の生ログ・試験値を送らない"
+    );
+}
+
+/// AIが未設定・失敗・不正な案を返しても、事例は変わらず、既存の検証と採用の判断は今までどおり行える。
+#[test]
+fn without_a_working_agent_existing_verification_still_works() {
+    let f = Fixture::new("追加したメモは保存される");
+    f.apply(Change::SetAspects {
+        check_id: "concern".into(),
+        aspects: vec![aspect(
+            "stored",
+            "保存先に書き込まれる",
+            Some(ObservationKind::StoredFile),
+            &["written"],
+        )],
+    });
+    let request = || mugiurushi::agent::ProposeRequest {
+        check_id: "concern".into(),
+        request: None,
+    };
+    assert!(mugiurushi::agent::propose(None, load(&f.case).unwrap(), request()).is_err());
+    let failing = FakeAgent::start(
+        &f.directory,
+        vec![(
+            "/v1/dialogue/turn",
+            500,
+            serde_json::json!({"detail": "合成の失敗"}),
+        )],
+    );
+    let error =
+        mugiurushi::agent::propose(Some(&failing.config()), load(&f.case).unwrap(), request())
+            .unwrap_err();
+    assert!(error.to_string().contains("HTTP 500"), "{error}");
+    for bad in [
+        proposal(
+            "リンク付き",
+            Some("stored_file"),
+            serde_json::json!([{"id": "written", "fingerprint": "f"}]),
+        ),
+        proposal("未知の種類", Some("telepathy"), serde_json::json!([])),
+    ] {
+        let agent = FakeAgent::start(
+            &f.directory,
+            vec![(
+                "/v1/dialogue/turn",
+                200,
+                serde_json::json!({"reply": "r", "aspects": [bad], "questions": []}),
+            )],
+        );
+        assert!(
+            mugiurushi::agent::propose(Some(&agent.config()), load(&f.case).unwrap(), request())
+                .is_err()
+        );
+    }
+    let before = load(&f.case).unwrap().revision;
+    let v = f.run("add", storage_trial(TrialFault::Normal));
+    assert!(v.checks[0].verification_passed);
+    assert!(f.release().is_ok(), "AIなしで採用の判断を記録できる");
+    assert!(load(&f.case).unwrap().revision > before);
+    assert!(
+        mugiurushi::agent::Config::new("http://example.com", f.directory.join("t")).is_err(),
+        "外部への http は使わない"
+    );
+}

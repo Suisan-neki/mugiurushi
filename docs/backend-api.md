@@ -35,6 +35,9 @@ APIを呼ぶクライアントは`X-Review-Token`を指定する。POSTは`Conte
 | POST `/api/v1/execute` | expected_revision、actor、reason、recipe | 指定したリポジトリの固定版実行を受付。HTTP 202 |
 | POST `/api/v1/understand` | UnderstandRequest | 公開GitHubの読取、サーバーが保存した読取記録の参照・解析。コード本文は受け付けない |
 | GET `/api/v1/observation-kinds` | 操作トークン | 確かめたい部分に対応づける観測の種類。判定に使える種類、記録のみ、推定、基盤が未対応の種類を区別する |
+| GET `/api/v1/agent` | — | 画面版のみ。AIエージェント（mugiurushi-ai）の設定の有無。接続先と共有トークンは返さない |
+| POST `/api/v1/agent/propose` | `{check_id, request?}` | 画面版のみ。読み取り専用。確認項目の文と、確かめたい部分の文・観測の種類をAIエージェントへ送り、「確かめる部分」の案（下書き）を返す。判定条件の対応づけを含む案・麦漆にない観測の種類の案は受け取らない。保存はしない（人が選んだ案を画面から `set_aspects` で追加する） |
+| POST `/api/v1/agent/explain` | `{check_id}` | 画面版のみ。読み取り専用。サーバーが確認項目の文（Check）と判定・部分ごとの状態・説明（CheckView）を組み合わせて送り、部分ごとの説明を返す。判定と状態は麦漆の値で上書きして返し、AIの文は `explanation` だけ |
 | POST `/api/v1/link-changes` | `{check_id, recipe}` | 読み取り専用。確認項目に保存した対応づけごとに、これから実行する試験設定と指紋が一致するか（`unchanged`・`changed`・`not_in_trial`）と、対応づけた時点から変わった設定の値（区分・場所・前・後）を返す。比較できないことは`uncomparable`に示す。コンテナの環境変数の値は記録・比較しない |
 
 POST入力は1MiBまで。更新は`expected_revision`を照合し、別の更新があればHTTP 409を返す。不正な形式や対応しない操作は400、トークン・Origin・権限の不一致は403、未定義のパス、未保存の読取記録・構成図は404。HTTP受付にはaxumを使い、長い読取・AI処理は4件まで同時に処理する。超過時は503。失敗した更新を成功した事例版として保存しない。

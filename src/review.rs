@@ -50,6 +50,8 @@ fn app_styles() -> io::Result<String> {
 pub struct App {
     pub store: crate::understanding::Store,
     pub ai: Option<crate::ai::Config>,
+    /// 運営者が設定したAIエージェント（mugiurushi-ai）。未設定でも確認項目・試験・判定は使える。
+    pub agent: Option<crate::agent::Config>,
     pub dify: Option<crate::system_diagram::dialogue::DifyConfig>,
 }
 
@@ -174,7 +176,13 @@ fn handle_request(
             "link-changes",
         ];
         if app.is_some() {
-            routes.extend(["prepare", "ai", "system-diagram", "browser-recipes"]);
+            routes.extend([
+                "prepare",
+                "ai",
+                "system-diagram",
+                "browser-recipes",
+                "agent",
+            ]);
         }
         return json(
             stream,
@@ -241,6 +249,24 @@ fn handle_request(
             }
             ("GET", "/api/v1/ai") => {
                 return result_response(stream, Ok(crate::ai::status(app.ai.as_ref())));
+            }
+            ("GET", "/api/v1/agent") => {
+                return result_response(stream, Ok(crate::agent::status(app.agent.as_ref())));
+            }
+            ("POST", "/api/v1/agent/propose") => {
+                // 読み取りだけ。採用は画面から set_aspects で行い、AIの案はここでは保存しない。
+                let result =
+                    parse_body::<crate::agent::ProposeRequest>(&request.body).and_then(|r| {
+                        crate::agent::propose(app.agent.as_ref(), workspace::load(directory)?, r)
+                    });
+                return result_response(stream, result);
+            }
+            ("POST", "/api/v1/agent/explain") => {
+                let result =
+                    parse_body::<crate::agent::ExplainRequest>(&request.body).and_then(|r| {
+                        crate::agent::explain(app.agent.as_ref(), workspace::load(directory)?, r)
+                    });
+                return result_response(stream, result);
             }
             ("GET", "/api/v1/browser-recipes") => {
                 return result_response(stream, crate::browser_recipes::catalog());
@@ -505,6 +531,7 @@ pub fn serve_app(
     let app = App {
         store: crate::understanding::Store::new(data.join("snapshots"))?,
         ai: crate::ai::Config::for_app(&data)?,
+        agent: crate::agent::Config::from_env()?,
         dify: crate::system_diagram::dialogue::DifyConfig::for_app(&data)?,
     };
     println!(
