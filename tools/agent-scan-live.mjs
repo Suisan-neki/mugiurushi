@@ -86,8 +86,12 @@ try {
   await page.screenshot({ path: join(output, 'agent-scan-live-preview.png'), fullPage: true });
   await preview.locator('[data-agent-synthetic]').check();
   await preview.getByRole('button', { name: 'この内容を送る' }).click();
-  await scan.locator('[data-scan-sources]').waitFor({ timeout: 300000 });
+  // 麦漆からAIエージェントへの要求は300秒で打ち切る。失敗なら画面の警告と応答を記録して止める。
+  const sentAt = Date.now();
+  await Promise.race([scan.locator('[data-scan-sources]').waitFor({ timeout: 330000 }), page.locator('#alert .dads-notification-banner').waitFor({ timeout: 330000 })]);
+  record.scan_seconds = Math.round((Date.now() - sentAt) / 1000);
   const sent = agentResponses.at(-1);
+  if (sent?.status !== 200) record.alert = await page.locator('#alert').innerText().catch(() => null);
   assert.equal(sent.status, 200, JSON.stringify(sent.body));
   record.scan = sent.body;
   const findings = sent.body.findings;
