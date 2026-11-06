@@ -1642,4 +1642,10 @@ if (params.get('from') === 'system' && params.get('url')) {
   if (params.get('diagram')) back.searchParams.set('diagram', params.get('diagram'));
   $('back-to-system').href = back.pathname + back.search;
 }
+if (params.get('url')) {
+  // 新しい流れ（ガイドラインの照合から試験・修正・再試験まで）へ、同じリポジトリとコミットで移る。
+  const flow = new URL('/flow', location.origin);
+  flow.searchParams.set('url', params.get('url')); flow.searchParams.set('ref', params.get('ref') || 'HEAD');
+  $('to-flow').href = flow.pathname + flow.search; $('to-flow').hidden = false;
+}
 restoreLocation();

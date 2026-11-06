@@ -147,7 +147,10 @@ fn handle_request(
     // 画面の復元用クエリはブラウザが読む。APIの経路は曖昧にしない。
     if request.method == "GET"
         && let Some((path, _)) = request.path.split_once('?')
-        && matches!(path, "/" | "/architecture" | "/workbench" | "/user-trial")
+        && matches!(
+            path,
+            "/" | "/architecture" | "/workbench" | "/user-trial" | "/flow"
+        )
     {
         request.path = path.to_owned();
     }
@@ -182,6 +185,7 @@ fn handle_request(
                 "system-diagram",
                 "browser-recipes",
                 "agent",
+                "flow",
             ]);
         }
         return json(
@@ -273,6 +277,49 @@ fn handle_request(
                 let result = parse_body::<crate::agent::ScanRequest>(&request.body)
                     .and_then(|r| crate::agent::scan(app.agent.as_ref(), r));
                 return result_response(stream, result);
+            }
+            ("POST", "/api/v1/agent/flow-scan") => {
+                let result = parse_body::<crate::agent::FlowScanRequest>(&request.body)
+                    .and_then(|r| crate::agent::flow_scan(app.agent.as_ref(), &app.store, r));
+                return result_response(stream, result);
+            }
+            ("POST", "/api/v1/agent/ask") => {
+                let result = parse_body::<crate::agent::AskRequest>(&request.body)
+                    .and_then(|r| crate::agent::ask(app.agent.as_ref(), r));
+                return result_response(stream, result);
+            }
+            ("POST", "/api/v1/agent/plan") => {
+                let result = parse_body::<crate::agent::PlanRequest>(&request.body)
+                    .and_then(|r| crate::agent::plan(app.agent.as_ref(), &app.store, r));
+                return result_response(stream, result);
+            }
+            ("GET", "/api/v1/flow") => {
+                return result_response(stream, crate::agent::flow_read(directory));
+            }
+            ("POST", "/api/v1/flow") => {
+                let result = parse_body::<crate::agent::FlowSave>(&request.body)
+                    .and_then(|r| crate::agent::flow_save(directory, r));
+                return result_response(stream, result);
+            }
+            ("GET", "/flow") => {
+                return html_response(
+                    stream,
+                    &styled_app(
+                        &assets::text("ui/flow.html").expect("画面の資材を読み取れません"),
+                        token,
+                    ),
+                );
+            }
+            ("GET", "/ui/flow.js") => {
+                return script_response(stream, &assets::text("ui/flow.js")?);
+            }
+            ("GET", "/ui/flow.css") => {
+                return respond(
+                    stream,
+                    200,
+                    "text/css; charset=utf-8",
+                    assets::text("ui/flow.css")?.as_bytes(),
+                );
             }
             ("GET", "/api/v1/browser-recipes") => {
                 return result_response(stream, crate::browser_recipes::catalog());

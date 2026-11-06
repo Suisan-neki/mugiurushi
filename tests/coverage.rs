@@ -1465,3 +1465,218 @@ fn guideline_scan_sends_only_the_written_description_and_uses_mugiurushi_support
         );
     }
 }
+
+/// 新しい流れ：選んだファイルの抜粋を送る照合、ヒアリングの質問と優先度、試験の案の検査、流れの記録。
+#[test]
+fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
+    use mugiurushi::agent::{
+        AskRequest, Confirm, FlowSave, FlowScanRequest, PlanFinding, PlanRequest, ask, flow_read,
+        flow_save, flow_scan, plan,
+    };
+    let f = Fixture::new("照合の流れ");
+    let commit = "a".repeat(40);
+    let snapshots = f.directory.join("snapshots");
+    fs::create_dir_all(snapshots.join("example/clinic")).unwrap();
+    fs::write(
+        snapshots.join(format!("example/clinic/{commit}.json")),
+        serde_json::json!({"schema": 1, "fullName": "example/clinic", "reference": commit, "commit": commit,
+            "inventory": [{"path": "app/auth.py", "mode": "100644"}, {"path": "README.md", "mode": "100644"}],
+            "files": {"app/auth.py": "def login(user, password):\n    return True\n", "README.md": "架空の診療所"}, "omitted": []})
+        .to_string(),
+    )
+    .unwrap();
+    let store = mugiurushi::understanding::Store::new(snapshots).unwrap();
+    let sha = "b".repeat(64);
+    let citation = serde_json::json!({"passage_id": "p:1", "source_id": "provider-security", "document": "架空の指針", "page": "37", "sha256": sha, "origin": "x", "excerpt": "多要素認証"});
+    let agent = FakeAgent::start(
+        &f.directory,
+        vec![
+            (
+                "/v1/scan",
+                200,
+                serde_json::json!({"findings": [{"requirement": "二要素認証", "relevance": "likely", "citations": [citation.clone()], "system_refs": ["app/auth.py"],
+                "verification": {"method": "browser_text", "how": "ログイン画面を見る"}, "unknowns": [], "patient_data": true, "priority": "high"}],
+                "questions": [{"id": "q1", "text": "院外から使いますか", "why": "外部接続の項目に使う", "options": ["はい", "いいえ"]}], "sources": [], "not_covered": [], "model_call": {"response_id": "fake-scan"}}),
+            ),
+            (
+                "/v1/plan",
+                200,
+                serde_json::json!({"tests": [{"id": "t-1", "name": "ログイン", "kind": "browser", "finding_ids": ["f-1"], "steps": ["ログインする"], "pass": ["2つ目の認証を求められる"], "observation": "browser_text"}],
+                "not_planned": [], "model_call": {"response_id": "fake-plan"}}),
+            ),
+            (
+                "/v1/ask",
+                200,
+                serde_json::json!({"answer": "保存する", "citations": [{"document": "x", "page": "1", "sha256": "short"}]}),
+            ),
+        ],
+    );
+    let config = agent.config();
+    let request = |files: Vec<&str>, confirm| FlowScanRequest {
+        repository: "example/clinic".into(),
+        commit: commit.clone(),
+        files: files.into_iter().map(str::to_owned).collect(),
+        summary: String::new(),
+        answers: vec![],
+        confirm,
+    };
+    assert!(
+        flow_scan(Some(&config), &store, request(vec![], None)).is_err(),
+        "ファイルを選ばない照合は送らない"
+    );
+    assert!(
+        flow_scan(
+            Some(&config),
+            &store,
+            request(vec!["app/auth.py"; 41], None)
+        )
+        .is_err()
+    );
+    let preview = flow_scan(Some(&config), &store, request(vec!["app/auth.py"], None)).unwrap();
+    assert_eq!(
+        preview["payload"]["system"]["excerpts"][0]["ref"],
+        "app/auth.py"
+    );
+    assert!(
+        preview["payload"]["system"]["excerpts"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("def login"),
+        "読取記録のファイルを送る"
+    );
+    assert!(
+        !preview["payload"].to_string().contains("架空の診療所"),
+        "選んでいないファイルは送らない"
+    );
+    assert!(
+        agent.received.lock().unwrap().is_empty(),
+        "確認の段階では送らない"
+    );
+    let sha_preview = preview["payload_sha256"].as_str().unwrap().to_owned();
+    let scanned = flow_scan(
+        Some(&config),
+        &store,
+        request(
+            vec!["app/auth.py"],
+            Some(Confirm {
+                payload_sha256: sha_preview,
+                synthetic_only: true,
+            }),
+        ),
+    )
+    .unwrap();
+    assert_eq!(scanned["findings"][0]["priority"], "high");
+    assert_eq!(scanned["findings"][0]["patient_data"], true);
+    assert_eq!(
+        scanned["findings"][0]["verification"]["executable_check"],
+        true
+    );
+    assert_eq!(scanned["questions"][0]["id"], "q1");
+
+    let plan_request = |findings: Vec<&str>, confirm| PlanRequest {
+        repository: "example/clinic".into(),
+        commit: commit.clone(),
+        files: vec!["app/auth.py".into()],
+        summary: String::new(),
+        answers: vec![],
+        findings: findings
+            .into_iter()
+            .map(|id| PlanFinding {
+                id: id.into(),
+                requirement: "二要素認証".into(),
+                how: String::new(),
+            })
+            .collect(),
+        confirm,
+    };
+    let preview = plan(Some(&config), &store, plan_request(vec!["f-1"], None)).unwrap();
+    let sha_plan = preview["payload_sha256"].as_str().unwrap().to_owned();
+    let planned = plan(
+        Some(&config),
+        &store,
+        plan_request(
+            vec!["f-1"],
+            Some(Confirm {
+                payload_sha256: sha_plan,
+                synthetic_only: true,
+            }),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        planned["tests"][0]["finding_ids"],
+        serde_json::json!(["f-1"])
+    );
+    assert_eq!(planned["tests"][0]["observation"], "browser_text");
+    // 渡していない候補を含む案は受け取らない（案は f-1 を含むが、渡した候補は f-2 だけ）。
+    let preview = plan(Some(&config), &store, plan_request(vec!["f-2"], None)).unwrap();
+    let sha_bad = preview["payload_sha256"].as_str().unwrap().to_owned();
+    assert!(
+        plan(
+            Some(&config),
+            &store,
+            plan_request(
+                vec!["f-2"],
+                Some(Confirm {
+                    payload_sha256: sha_bad,
+                    synthetic_only: true
+                })
+            )
+        )
+        .is_err()
+    );
+
+    let preview = ask(
+        Some(&config),
+        AskRequest {
+            question: "ログは？".into(),
+            confirm: None,
+        },
+    )
+    .unwrap();
+    let sha_ask = preview["payload_sha256"].as_str().unwrap().to_owned();
+    assert!(
+        ask(
+            Some(&config),
+            AskRequest {
+                question: "ログは？".into(),
+                confirm: Some(Confirm {
+                    payload_sha256: sha_ask,
+                    synthetic_only: true
+                })
+            }
+        )
+        .is_err(),
+        "SHA-256のそろわない出典の回答は受け取らない"
+    );
+
+    assert_eq!(
+        flow_read(&f.directory).unwrap()["records"],
+        serde_json::json!({})
+    );
+    assert!(
+        flow_save(
+            &f.directory,
+            FlowSave {
+                repository: "example/clinic".into(),
+                commit: "short".into(),
+                record: serde_json::json!({})
+            }
+        )
+        .is_err()
+    );
+    let saved = flow_save(
+        &f.directory,
+        FlowSave {
+            repository: "example/clinic".into(),
+            commit: commit.clone(),
+            record: serde_json::json!({"files": ["app/auth.py"]}),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        saved["records"][format!("example/clinic@{commit}")]["record"]["files"][0],
+        "app/auth.py"
+    );
+    assert_eq!(flow_read(&f.directory).unwrap(), saved);
+}
