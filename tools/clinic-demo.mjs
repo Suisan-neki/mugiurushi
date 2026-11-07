@@ -114,7 +114,7 @@ try {
 
   // 5. 試験の設定と実行。結果の画面の「試験を設定して実行する」から設定画面を開き、人が入力する内容を入力する。
   const findingText = Object.fromEntries(scan.findings.map((f, i) => [`f-${i + 1}`, f.requirement]));
-  const kindOf = text => /ファイル名|パス|トラバーサル|ディレクトリ|保存先の外/.test(text) ? 'path' : /記録|ログ/.test(text) ? 'log' : /閲覧|アクセス(権|制御|管理)|範囲|担当|認可|権限/.test(text) ? 'scope' : null;
+  const kindOf = text => /ファイル名|パス|トラバーサル|ディレクトリ|保存先の外/.test(text) ? 'path' : /記録|ログ/.test(text) ? 'log' : /閲覧|アクセス(権|制御|管理)|アクセスを(原則)?(制御|制限|拒否)|原則拒否|所有(権|者)|範囲|担当|認可|権限/.test(text) ? 'scope' : null;
   const configs = {
     access: { entry: 'clinic_tasks.py', args: ['--dir', '.', '--user', 'nurse1', 'add', 'P001', '{{test_value}}'], storage: 'access.log',
       readback: ['--dir', '.', '--user', 'nurse2', 'list'],
