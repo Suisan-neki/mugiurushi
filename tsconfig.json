@@ -9,5 +9,5 @@
     "moduleResolution": "Bundler",
     "lib": ["ES2022", "DOM"]
   },
-  "include": ["ui/api.js"]
+  "include": ["ui/api.js", "ui/flow-record.js"]
 }

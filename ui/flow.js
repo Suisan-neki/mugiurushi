@@ -3,6 +3,7 @@
 // 判定と観測の状態は事例の記録（/api/v1/case）が正。流れの記録（/api/v1/flow）は画面を続けるための控え。
 // AIへ送る内容は、送る前にサーバーが組み立てた内容をそのまま表示し、人が確かめたときだけ送る。
 import { apiRequest as api } from './api.js';
+import { applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate } from './flow-record.js';
 
 /** @param {string} tag @param {Record<string, any>} [attrs] @param {...any} children */
 function h(tag, attrs = {}, ...children) {
@@ -50,7 +51,8 @@ function renderChrome() {
     h('div', {}, h('span', { class: 'k' }, 'コミット'), '\u3000', h('strong', {}, short(s?.commit || '')) ),
     state.record?.files ? h('div', {}, h('span', { class: 'k' }, '読んだコード'), `\u3000${state.record.files.length}ファイル`) : null);
   const done = state.record || {};
-  const reachable = [true, !!done.scan, !!done.plan, !!done.approved && Object.keys(done.approved).length > 0, !!done.approved && Object.keys(done.approved).length > 0, true];
+  const approvedAny = approvedTests(done).length > 0;
+  const reachable = [true, !!done.scan, planIsCurrent(done), approvedAny, approvedAny, true];
   fill($('steps'), STEPS.map((t, i) => h('button', { type: 'button', 'aria-current': state.step === i + 1 ? 'step' : null, disabled: !reachable[i], onclick: () => go(i + 1) }, (i ? '▸ ' : '') + t)));
   $('person').textContent = person() ? `記録者：${person()}` : '';
   $('foot-left').textContent = done.scan?.model_call?.response_id ? `照合の応答ID ${done.scan.model_call.response_id}` : '';
@@ -115,15 +117,11 @@ async function step1() {
         if (!person()) return showError('記録者の名前を入力してください。');
         const files = [...chosen];
         state.record = { ...(state.record || {}), files, summary: /** @type {HTMLTextAreaElement} */ (desc).value.trim() };
-        return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files, summary: state.record.summary, answers: answersOf(state.record) }, async (/** @type {any} */ r) => {
-          state.record.scan = withIds(r); delete state.record.plan; await saveRecord(); go(2);
+        const answers = answersOf(state.record), at = scanGeneration(state.record);
+        return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files, summary: state.record.summary, answers }, async (/** @type {any} */ r) => {
+          applyScan(state.record, r, answers, at); await saveRecord(); go(2);
         });
       }, 'primary')), out)));
-}
-function withIds(/** @type {any} */ scan) { scan.findings.forEach((/** @type {any} */ f, /** @type {number} */ i) => { f.id = `f-${i + 1}`; }); return scan; }
-function answersOf(/** @type {any} */ record) {
-  const qs = record?.scan?.questions || [];
-  return qs.filter((/** @type {any} */ q) => record.answers?.[q.id]).map((/** @type {any} */ q) => ({ question: q.text, answer: record.answers[q.id] }));
 }
 function testable() { return (state.record?.scan?.findings || []).filter((/** @type {any} */ f) => f.verification?.executable_check); }
 function sectionOf(/** @type {any} */ f) {
@@ -153,8 +151,8 @@ async function step2() {
       r.scan.questions?.length ? [h('p', {}, 'コードだけでは決められないことを確認します。回答は照合と試験の案に使います。'),
         r.scan.questions.map((/** @type {any} */ q, /** @type {number} */ i) => h('fieldset', { 'data-question': q.id }, h('legend', {}, `質問${i + 1}`), h('div', {}, q.text), h('div', { class: 'note', style: 'font-size:12px' }, q.why),
           h('div', { style: 'display:flex;flex-wrap:wrap;gap:12px;margin-top:4px' }, q.options.map((/** @type {string} */ o) => {
-            const radio = h('input', { type: 'radio', name: q.id, checked: r.answers?.[q.id] === o });
-            radio.addEventListener('change', () => { r.answers = { ...(r.answers || {}), [q.id]: o }; });
+            const radio = h('input', { type: 'radio', name: q.id, checked: answerTo(r, q) === o });
+            radio.addEventListener('change', () => setAnswer(r, q, o));
             return h('label', { style: 'display:inline-flex;gap:6px;align-items:center' }, radio, o);
           }))))] : h('p', { class: 'note' }, '確認したいことはありません。'),
       h('label', { for: 'ask', style: 'font-weight:700;display:block;margin-top:8px' }, 'こちらから聞きたいこと'), ask,
@@ -165,30 +163,34 @@ async function step2() {
       (r.asks || []).slice().reverse().map((/** @type {any} */ a) => h('div', { class: 'box', 'data-asked': '' }, h('div', { class: 'pad' }, h('strong', {}, `質問：${a.question}`), h('div', {}, a.answer),
         a.citations?.map((/** @type {any} */ c) => h('div', { class: 'note', style: 'font-size:12px' }, `出典：${c.document} ${c.page}ページ（SHA-256 ${c.sha256.slice(0, 12)}…）`))))),
       h('div', { class: 'actions' },
-        btn('回答して照合し直す', () => confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers: answersOf(r) }, async (/** @type {any} */ s) => { r.scan = withIds(s); delete r.plan; await saveRecord(); render(); })),
+        btn('回答して照合し直す', () => { const answers = answersOf(r), at = scanGeneration(r); return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers }, async (/** @type {any} */ s) => { applyScan(r, s, answers, at); await saveRecord(); render(); }); }),
         btn('試験の案を作る', () => {
           const findings = testable().map((/** @type {any} */ f) => ({ id: f.id, requirement: f.requirement, how: f.verification.how || '' }));
           if (!findings.length) return showError('試験で確かめられる項目がありません。');
-          return confirmAndSend(out, '/api/v1/agent/plan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers: answersOf(r), findings }, async (/** @type {any} */ p) => { r.plan = p; r.chosen = Object.fromEntries(p.tests.map((/** @type {any} */ t) => [t.id, true])); await saveRecord(); go(3); });
-        }, 'primary')), out)));
+          const at = planGeneration(r);
+          return confirmAndSend(out, '/api/v1/agent/plan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers: answersOf(r), findings }, async (/** @type {any} */ p) => { applyPlan(r, p, at); await saveRecord(); go(3); });
+        }, 'primary')),
+      r.plan ? h('p', { class: 'note', 'data-rescan-note': '' }, '照合し直すと、今の試験の案・了承・結果は履歴に移し、新しい照合では使いません。了承した確認項目と試験の記録は残ります。') : null,
+      r.history?.length ? h('p', { class: 'note', style: 'font-size:12px' }, `前の照合・試験の案 ${r.history.length}件を履歴に残しています。`) : null, out)));
 }
 
 // ---------- 3 検証案の了承 ----------
 async function step3() {
   const r = state.record; const findings = Object.fromEntries((r.scan.findings || []).map((/** @type {any} */ f) => [f.id, f]));
+  if (!planIsCurrent(r)) return go(2);
   const out = h('div', {});
-  const approved = r.approved || {};
+  const done = (/** @type {any} */ t) => approvedCheck(r, t);
   fill($('main'), h('div', { class: 'pad' },
     h('h2', {}, `試験の案（${r.plan.tests.length}件）`),
     h('p', {}, '同じ操作で確かめられる項目は一つの試験にまとめています。了承した試験は確認項目として登録し、試験の設定（起動・操作・判定条件）を確かめてから実行します。'),
     r.plan.tests.map((/** @type {any} */ t) => {
-      const box = h('input', { type: 'checkbox', checked: r.chosen?.[t.id] !== false, disabled: !!approved[t.id] });
+      const box = h('input', { type: 'checkbox', checked: r.chosen?.[t.id] !== false, disabled: !!done(t) });
       box.addEventListener('change', () => { r.chosen = { ...(r.chosen || {}), [t.id]: /** @type {HTMLInputElement} */ (box).checked }; });
       return h('div', { class: 'box', 'data-test': t.id },
         h('div', { class: 'head' }, h('label', { style: 'display:inline-flex;gap:8px;align-items:center;font-weight:700;font-size:14px' }, box, t.name),
           h('span', { class: 'note' }, { browser: 'ブラウザ操作', http: 'HTTP', cli: 'コマンド', other: 'その他' }[t.kind] || t.kind),
           h('span', { class: 'note' }, `確かめる項目：${t.finding_ids.map((/** @type {string} */ i) => findings[i]?.requirement || i).join('、')}`),
-          approved[t.id] ? h('span', { style: 'margin-left:auto' }, h('a', { href: workbenchUrl(approved[t.id]) }, '登録済み：試験の設定を開く')) : null),
+          done(t) ? h('span', { style: 'margin-left:auto' }, h('a', { href: workbenchUrl(/** @type {string} */ (done(t))) }, '登録済み：試験の設定を開く')) : null),
         h('div', { class: 'cols' },
           h('div', { class: 'main', style: 'border-right:1px solid #D3D8DD' }, h('strong', {}, '手順'), h('ol', { style: 'margin:4px 0 0;padding-left:20px' }, t.steps.map((/** @type {string} */ s) => h('li', {}, s)))),
           h('div', { class: 'side', style: 'background:#fff' }, h('strong', {}, '合格の条件'), h('ul', { style: 'margin:4px 0 0;padding-left:18px' }, t.pass.map((/** @type {string} */ p) => h('li', {}, p))),
@@ -196,11 +198,16 @@ async function step3() {
     }),
     r.plan.not_planned?.length ? h('p', { class: 'note' }, `試験の案にしなかった項目：${r.plan.not_planned.map((/** @type {any} */ n) => `${findings[n.finding_id]?.requirement || n.finding_id}（${n.reason}）`).join('、')}`) : null,
     h('div', { class: 'actions' }, btn('了承して確認項目に登録する', () => guarded(async () => {
+      if (registering) return; // 連打で同じ試験を二重に登録しない
       if (!person()) throw Error('記録者の名前を「1 照合の準備」で入力してください。');
-      const tests = r.plan.tests.filter((/** @type {any} */ t) => r.chosen?.[t.id] !== false && !approved[t.id]);
+      const tests = r.plan.tests.filter((/** @type {any} */ t) => r.chosen?.[t.id] !== false && !done(t));
       if (!tests.length) throw Error('了承する試験を選んでください。');
-      for (const t of tests) approved[t.id] = await register(t, findings);
-      r.approved = approved; await saveRecord(); go(4);
+      registering = true; setStatus('確認項目に登録しています。');
+      try {
+        // 1件ずつ登録して控える。途中で失敗しても、登録できた分は了承済みとして残り、やり直しで二重に作らない。
+        for (const t of tests) { approve(r, t, await register(t, findings)); await saveRecord(); }
+      } finally { registering = false; setStatus(''); }
+      go(4);
     }), 'primary'), h('span', { class: 'note' }, '手順はAIエージェントの案です。'), out)));
 }
 /** 試験の結果をコードへたどれるように、案の候補が関係するとしたファイル（なければ照合で読んだ最初のファイル）を対応づける。 */
@@ -219,15 +226,22 @@ async function change(/** @type {any} */ action, /** @type {string} */ reason) {
   await loadCase();
   state.view = await api('POST', '/api/v1/change', { expected_revision: state.view.workspace.revision, actor: `${person()}（開発者）`, reason, action });
 }
+let registering = false;
 async function register(/** @type {any} */ t, /** @type {Record<string, any>} */ findings) {
   const r = state.record;
-  let id = `flow-${short(state.source.commit)}-${t.id.replace(/[^a-z0-9-]/gi, '').slice(0, 20)}`;
-  await loadCase();
-  while (state.view.workspace.checks.some((/** @type {any} */ c) => c.id === id)) id += '-2';
+  const base = `flow-${short(state.source.commit)}-${t.id.replace(/[^a-z0-9-]/gi, '').slice(0, 20)}`;
   const call = r.plan.model_call || {};
   const origin = `ガイドライン照合の試験の案（${call.response_model || call.requested_model || 'AI'}・応答ID ${call.response_id || '不明'}）を${person()}が了承して登録。対象 ${state.source.repository}@${short(state.source.commit)}`;
   const text = `${t.name}：${t.pass.join('／')}`.slice(0, 1000);
-  await change({ op: 'add_check', check: { id, version: 1, text, origin, source: codeRef(t, findings), observation: null, rule: 'manual_only', dependencies: [], questions: [] } }, 'ガイドライン照合の試験の案を了承した');
+  await loadCase();
+  const checks = state.view.workspace.checks;
+  // 前回の登録が確認項目を作ったところで止まっていたら（同じ案・同じ了承者・部分が未登録）、作り直さずに続きから登録する。
+  const partial = checks.find((/** @type {any} */ c) => (c.id === base || c.id.startsWith(base + '-')) && c.text === text && c.origin === origin && !(c.aspects || []).length);
+  let id = partial?.id || base;
+  if (!partial) {
+    while (checks.some((/** @type {any} */ c) => c.id === id)) id += '-2';
+    await change({ op: 'add_check', check: { id, version: 1, text, origin, source: codeRef(t, findings), observation: null, rule: 'manual_only', dependencies: [], questions: [] } }, 'ガイドライン照合の試験の案を了承した');
+  }
   const aspects = t.finding_ids.map((/** @type {string} */ fid) => {
     const f = findings[fid]; const c = f.citations?.[0] || {};
     return { id: fid, text: f.requirement.slice(0, 2000), origin: `照合の候補。出典：${c.document || ''} ${c.page || ''}ページ（SHA-256 ${(c.sha256 || '').slice(0, 12)}…）`.slice(0, 1000), observation: t.observation, trial_checks: [] };
@@ -239,10 +253,10 @@ async function register(/** @type {any} */ t, /** @type {Record<string, any>} */
 // ---------- 4 結果 ----------
 function resultOf(/** @type {any} */ f) {
   const r = state.record;
-  const testId = Object.keys(r.approved || {}).find(t => r.plan.tests.find((/** @type {any} */ x) => x.id === t)?.finding_ids.includes(f.id));
-  if (!testId) return { state: 'none' };
-  const checkId = r.approved[testId];
-  const test = r.plan.tests.find((/** @type {any} */ x) => x.id === testId);
+  // 今の照合から作った今の案で、了承した中身のまま登録した試験だけを見る。前の照合・案の確認項目の観測は使わない。
+  const test = approvedTests(r).find((/** @type {any} */ t) => t.finding_ids.includes(f.id));
+  if (!test) return { state: 'none' };
+  const checkId = /** @type {string} */ (approvedCheck(r, test));
   const cv = state.view.checks.find((/** @type {any} */ c) => c.check_id === checkId);
   const a = cv?.coverage?.aspects?.find((/** @type {any} */ x) => x.id === f.id);
   const applicable = (cv?.evidence || []).filter((/** @type {any} */ e) => e.applicable);
@@ -376,10 +390,10 @@ async function init() {
   state.agent = await api('GET', '/api/v1/agent').catch(() => null);
   if (state.agent?.status !== 'configured') showError('AIエージェントが設定されていません。運営者が EEL_AGENT_URL と EEL_AGENT_TOKEN_FILE を設定して起動してください。');
   state.flow = await api('GET', '/api/v1/flow');
-  state.record = state.flow.records?.[key()]?.record || null;
+  state.record = migrate(state.flow.records?.[key()]?.record || null);
   await loadCase();
   setStatus('');
-  state.step = state.record?.approved && Object.keys(state.record.approved).length ? 4 : state.record?.plan ? 3 : state.record?.scan ? 2 : 1;
+  state.step = startStep(state.record);
   render();
 }
 function renderChromeEmpty() { fill($('steps')); fill($('target')); }

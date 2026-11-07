@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, relative } from 'node:path';
 import { createServer } from 'node:net';
 import { chromium } from 'playwright';
+import { checkIdOf } from '../ui/flow-record.js';
 
 const root = resolve(import.meta.dirname, '..');
 const binary = process.env.REVIEW_BINARY || join(root, 'target/debug/mugiurushi');
@@ -220,5 +221,5 @@ async function view(page, url) {
   const v = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': token } })).json();
   const flow = await (await page.request.get(url + '/api/v1/flow', { headers: { 'X-Review-Token': token } })).json();
   const rec = Object.values(flow.records)[0]?.record || {};
-  return { view: v, revision: v.workspace.revision, flowChecks: (rec.plan?.tests || []).map(t => rec.approved?.[t.id]) };
+  return { view: v, revision: v.workspace.revision, flowChecks: (rec.plan?.tests || []).map(t => checkIdOf(rec.approved?.[t.id])) };
 }
