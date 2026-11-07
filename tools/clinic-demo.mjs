@@ -68,8 +68,11 @@ try {
   const url = await started(app, /理解と試験の画面: (http:\/\/127\.0\.0\.1:\d+)/, 'mugiurushi');
   stage('mugiurushi-ai と mugiurushi を起動した', { agent_commit: record.agent_commit });
 
-  browser = await chromium.launch({ headless: true, executablePath: process.env.REVIEW_BROWSER_EXECUTABLE || undefined });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 2 }); page.setDefaultTimeout(30000);
+  // DEMO_VIDEO_DIR を指定すると、画面の操作を編集なしで録画する（DEMO_SLOWMO で操作の間隔をミリ秒で空ける）。
+  const video = process.env.DEMO_VIDEO_DIR;
+  browser = await chromium.launch({ headless: true, executablePath: process.env.REVIEW_BROWSER_EXECUTABLE || undefined, slowMo: Number(process.env.DEMO_SLOWMO || 0) });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: video ? 1 : 2, ...(video ? { recordVideo: { dir: video, size: { width: 1440, height: 1000 } } } : {}) });
+  const page = await context.newPage(); page.setDefaultTimeout(30000);
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   const sent = [];
   page.on('response', async r => { if (r.url().includes('/api/v1/agent/')) sent.push({ path: new URL(r.url()).pathname, status: r.status(), body: await r.json().catch(() => null) }); });
@@ -203,6 +206,7 @@ try {
     stage('修正用のプロンプトを表示した', { chars: record.prompt.length });
   } else stage('試験で不足を確認した項目が無く、修正用のプロンプトは作らなかった');
   assert.deepEqual(errors, []);
+  if (video) await page.waitForTimeout(5000);
   record.completed = true;
 } catch (error) {
   record.completed = false; record.error = String(error.message || error).slice(0, 4000);
