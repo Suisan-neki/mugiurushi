@@ -203,9 +203,16 @@ async function step3() {
       r.approved = approved; await saveRecord(); go(4);
     }), 'primary'), h('span', { class: 'note' }, '手順はAIエージェントの案です。'), out)));
 }
+/** 試験の結果をコードへたどれるように、案の候補が関係するとしたファイル（なければ照合で読んだ最初のファイル）を対応づける。 */
+function codeRef(/** @type {any} */ t, /** @type {Record<string, any>} */ findings) {
+  const files = state.record.files || [];
+  const refs = t.finding_ids.flatMap((/** @type {string} */ id) => findings[id]?.system_refs || []);
+  const path = refs.find((/** @type {string} */ p) => files.includes(p)) || files[0];
+  return path ? { repository: state.source.repository, commit: state.source.commit, path, line: 1, end_line: 1 } : null;
+}
 function workbenchUrl(/** @type {string} */ checkId) {
   const u = new URL('/workbench', location.origin);
-  u.search = new URLSearchParams({ url: `https://github.com/${state.source.repository}`, ref: state.source.commit, check: checkId }).toString(); u.hash = 'trial';
+  u.search = new URLSearchParams({ url: `https://github.com/${state.source.repository}`, ref: state.source.commit, check: checkId, from: 'flow' }).toString(); u.hash = 'trial';
   return u.pathname + u.search + u.hash;
 }
 async function change(/** @type {any} */ action, /** @type {string} */ reason) {
@@ -220,7 +227,7 @@ async function register(/** @type {any} */ t, /** @type {Record<string, any>} */
   const call = r.plan.model_call || {};
   const origin = `ガイドライン照合の試験の案（${call.response_model || call.requested_model || 'AI'}・応答ID ${call.response_id || '不明'}）を${person()}が了承して登録。対象 ${state.source.repository}@${short(state.source.commit)}`;
   const text = `${t.name}：${t.pass.join('／')}`.slice(0, 1000);
-  await change({ op: 'add_check', check: { id, version: 1, text, origin, source: null, observation: null, rule: 'manual_only', dependencies: [], questions: [] } }, 'ガイドライン照合の試験の案を了承した');
+  await change({ op: 'add_check', check: { id, version: 1, text, origin, source: codeRef(t, findings), observation: null, rule: 'manual_only', dependencies: [], questions: [] } }, 'ガイドライン照合の試験の案を了承した');
   const aspects = t.finding_ids.map((/** @type {string} */ fid) => {
     const f = findings[fid]; const c = f.citations?.[0] || {};
     return { id: fid, text: f.requirement.slice(0, 2000), origin: `照合の候補。出典：${c.document || ''} ${c.page || ''}ページ（SHA-256 ${(c.sha256 || '').slice(0, 12)}…）`.slice(0, 1000), observation: t.observation, trial_checks: [] };
@@ -238,9 +245,25 @@ function resultOf(/** @type {any} */ f) {
   const test = r.plan.tests.find((/** @type {any} */ x) => x.id === testId);
   const cv = state.view.checks.find((/** @type {any} */ c) => c.check_id === checkId);
   const a = cv?.coverage?.aspects?.find((/** @type {any} */ x) => x.id === f.id);
-  const ev = cv?.evidence?.find((/** @type {any} */ e) => e.id === cv.selected_evidence) || cv?.evidence?.[0];
-  const st = a?.status === 'observed' ? 'ok' : a?.status === 'contradicted' ? 'ng' : 'pending';
-  return { state: st, checkId, test, aspect: a, record: ev ? `試行 ${ev.run_id}` : '—' };
+  const applicable = (cv?.evidence || []).filter((/** @type {any} */ e) => e.applicable);
+  const ev = applicable.find((/** @type {any} */ e) => e.id === cv.selected_evidence) || applicable[0];
+  // 状態は事例の記録の値だけで決める。実行していない試験を成功・失敗として表示しない。
+  // 実行したが判定条件に対応づけていない部分などは「未確認」とし、理由（mugiurushi の状態の説明）を添える。
+  const st = !ev ? 'pending' : a?.status === 'observed' ? 'ok' : a?.status === 'contradicted' ? 'ng' : 'unconfirmed';
+  const linked = (a?.trial_checks || []).length > 0;
+  return { state: st, checkId, test, aspect: a, linked, record: ev ? `試行 ${ev.run_id}` : '—' };
+}
+/** 抜粋の表示用に、Markdownの強調記号と余分な空白を外す。 */
+function plain(/** @type {string} */ text) { return (text || '').replace(/\*\*/g, '').replace(/(^|\s)\*(?=\s|$)/g, '$1・').replace(/\s+・?\s*$/, '').replace(/\s+/g, ' ').trim(); }
+/** 実際に確かめた判定条件（mugiurushi の試験設定の文言）。対応づけた判定条件が無ければ書かない。 */
+function checkedBy(/** @type {any} */ aspect) {
+  return (aspect?.trial_checks || []).map((/** @type {any} */ l) => `- 確かめた判定条件: ${l.id} ${l.label || ''}`.trim());
+}
+const NEXT = { pending: '試験を設定して実行する', unconfirmed: '判定条件に対応づける', ng: '試験の詳細を開く', ok: '試験の詳細を開く' };
+function stateLabel(/** @type {any} */ res) {
+  if (res.state === 'pending') return res.linked ? '未実行' : '未実行（判定条件への対応づけ前）';
+  if (res.state === 'unconfirmed') return `未確認：${res.aspect?.status_label || '状態を読み取れない'}`;
+  return res.state === 'ok' ? '期待どおり' : '';
 }
 async function step4() {
   await loadCase();
@@ -257,28 +280,29 @@ async function step4() {
     if (!f) return fill(detail, h('p', { class: 'note' }, '項目を選ぶと詳細を表示します。'));
     const c = f.citations?.[0] || {};
     fill(detail, h('h2', {}, '詳細'), h('div', { style: 'font-size:15px;font-weight:700;margin-bottom:8px' }, f.requirement),
-      h('div', { style: 'font-weight:700' }, 'ガイドラインの該当箇所（抜粋）'), h('blockquote', {}, c.excerpt || ''),
+      h('div', { style: 'font-weight:700' }, 'ガイドラインの該当箇所（抜粋）'), h('blockquote', {}, plain(c.excerpt)),
       h('div', { class: 'note', style: 'font-size:12px;margin:4px 0 10px' }, `${c.document || ''} ${c.page || ''}ページ（取得元 ${c.origin || ''}、SHA-256 ${(c.sha256 || '').slice(0, 12)}…）`),
       h('table', {}, h('tbody', {},
         h('tr', {}, h('th', { scope: 'row' }, '優先度'), h('td', {}, prio(f.priority), ' ', f.patient_data ? '患者の情報に関わる' : '', f.relevance === 'likely' ? '・該当の見込みが高い' : '')),
         h('tr', {}, h('th', { scope: 'row' }, '試験'), h('td', {}, f.res.test.name)),
         h('tr', {}, h('th', { scope: 'row' }, '手順'), h('td', {}, h('ol', { style: 'margin:0;padding-left:18px' }, f.res.test.steps.map((/** @type {string} */ s) => h('li', {}, s))))),
         h('tr', {}, h('th', { scope: 'row' }, '合格の条件'), h('td', {}, f.res.test.pass.join('／'))),
-        h('tr', {}, h('th', { scope: 'row' }, '結果'), h('td', { style: f.res.state === 'ng' ? 'color:#A3261E;font-weight:700' : '' }, f.res.aspect ? `${f.res.aspect.status_label}。${f.res.aspect.detail || ''}` : '—')),
+        h('tr', {}, h('th', { scope: 'row' }, '結果'), h('td', { style: f.res.state === 'ng' ? 'color:#A3261E;font-weight:700' : '' }, f.res.state === 'pending' ? 'まだ実行していない' : f.res.aspect ? `${f.res.aspect.status_label}。${f.res.aspect.detail || ''}` : '—')),
         h('tr', {}, h('th', { scope: 'row' }, '記録'), h('td', {}, f.res.record)))),
-      h('div', { class: 'actions' }, h('a', { class: 'btn navy', href: workbenchUrl(f.res.checkId) }, f.res.state === 'pending' ? '試験を設定して実行する' : '試験の詳細を開く')));
+      h('div', { class: 'actions' }, h('a', { class: 'btn navy', href: workbenchUrl(f.res.checkId) }, NEXT[f.res.state] || '試験の詳細を開く')));
   };
   fill($('main'), h('div', { class: 'cols' },
     h('section', { class: 'main' },
       h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between' }, h('h2', { style: 'flex:1' }, 'ガイドラインの要求と、このコミットの試験結果'),
         ng ? h('span', { class: 'ng', 'data-ng-count': String(ng) }, `試験で不足を確認 ${ng}件`) : null),
-      pending.length ? h('p', {}, `まだ実行していない試験が${pending.length}件あります。各項目の「詳細」から試験の設定を開いて実行してください。`) : null,
+      pending.length ? h('p', {}, `まだ実行していない試験が${pending.length}件あります。「試験を設定して実行する」から、了承した手順と合格の条件を見ながら設定して実行してください。`) : null,
       bySection(items.filter((/** @type {any} */ f) => f.res.state !== 'ok')).map(s => h('div', { 'data-result-section': s.key }, h('h3', {}, `${s.name}：満たしていない可能性があるのは、次の${s.rows.length}件です（優先度順）`),
-        h('table', {}, h('thead', {}, h('tr', {}, h('th', { scope: 'col', style: 'width:56px' }, '優先度'), h('th', { scope: 'col' }, '項目'), h('th', { scope: 'col', style: 'width:220px' }, '次にやること'), h('th', { scope: 'col', style: 'width:64px' }, h('span', { style: 'position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)' }, '詳細')))),
+        h('table', {}, h('thead', {}, h('tr', {}, h('th', { scope: 'col', style: 'width:56px' }, '優先度'), h('th', { scope: 'col' }, '項目'), h('th', { scope: 'col', style: 'width:150px' }, '状態'), h('th', { scope: 'col', style: 'width:220px' }, '次にやること'), h('th', { scope: 'col', style: 'width:64px' }, h('span', { style: 'position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)' }, '詳細')))),
           h('tbody', {}, s.rows.map((/** @type {any} */ f) => h('tr', { class: f.id === state.sel ? 'sel' : f.res.state === 'ng' ? 'rowng' : '', 'data-result': f.res.state },
             h('td', { style: 'text-align:center' }, prio(f.priority)),
-            h('td', {}, f.requirement, f.res.state === 'ng' ? h('div', {}, h('span', { class: 'ng' }, '試験で不足を確認')) : null),
-            h('td', {}, f.res.state === 'ng' ? '直す（修正用のプロンプトを作る）' : `${f.res.test.name} を実行する`),
+            h('td', {}, f.requirement),
+            h('td', { 'data-state-label': '' }, f.res.state === 'ng' ? h('span', { class: 'ng' }, '試験で不足を確認') : stateLabel(f.res)),
+            h('td', {}, f.res.state === 'ng' ? '直す（修正用のプロンプトを作る）' : h('a', { href: workbenchUrl(f.res.checkId) }, NEXT[f.res.state]), h('div', { class: 'note', style: 'font-size:12px' }, f.res.test.name)),
             h('td', { style: 'text-align:center' }, btn('詳細', () => { state.sel = f.id; render(); }, f.id === state.sel ? 'primary' : '')))))))),
       items.filter((/** @type {any} */ f) => f.res.state === 'ok').length ? h('p', { class: 'note' }, `試験で期待どおりだった項目：${items.filter((/** @type {any} */ f) => f.res.state === 'ok').map((/** @type {any} */ f) => f.requirement).join('、')}`) : null,
       h('div', { class: 'actions' }, ng ? btn('修正用のプロンプトを作る', () => go(5), 'primary') : null, btn('結果を読み直す', () => render()))),
@@ -296,8 +320,8 @@ async function step5() {
   const build = () => {
     const blocks = ng.filter((/** @type {any} */ f) => chosen.has(f.id)).flatMap((/** @type {any} */ f) => {
       const c = f.citations?.[0] || {};
-      return [`## ${f.requirement}`, '', `根拠: ${c.document || ''} ${c.page || ''}ページ`, `> ${(c.excerpt || '').replace(/\s+/g, ' ').trim()}`, '',
-        `試験の結果（${f.res.test.name}／${f.res.record}）`, `- 期待: ${f.res.test.pass.join('／')}`, `- 実際: ${f.res.aspect?.detail || f.res.aspect?.status_label || ''}`, '',
+      return [`## ${f.requirement}`, '', `根拠: ${c.document || ''} ${c.page || ''}ページ`, `> ${plain(c.excerpt)}`, '',
+        `試験の結果（${f.res.test.name}／${f.res.record}）`, ...checkedBy(f.res.aspect), `- 結果: ${f.res.aspect?.detail || f.res.aspect?.status_label || ''}`, `- 試験の案の合格の条件: ${f.res.test.pass.join('／')}`, '',
         `関係しそうなコード: ${(f.system_refs?.length ? f.system_refs : r.files).join('、')}`, ''];
     });
     pre.textContent = ['# 修正の依頼（mugiurushi の試験結果から）', '', `対象: ${state.source.repository} のコミット ${short(state.source.commit)}`, 'このリポジトリを、次の項目を満たすように修正してください。', '',
@@ -324,7 +348,7 @@ async function step6() {
   const ref = h('input', { type: 'text', id: 'ref', placeholder: 'ブランチ名・タグ・コミット', style: 'width:280px;padding:6px;border:1px solid #8A9199' });
   const current = state.record?.results || {};
   const prev = others[others.length - 1];
-  const label = { ok: '期待どおり', ng: '不足を確認', pending: '未実行' };
+  const label = { ok: '期待どおり', ng: '不足を確認', pending: '未実行', unconfirmed: '未確認' };
   const rows = prev ? [...new Set([...Object.values(prev.record.results), ...Object.values(current)].map((/** @type {any} */ x) => x.requirement))].map(req => {
     const b = Object.values(prev.record.results).find((/** @type {any} */ x) => x.requirement === req);
     const a = Object.values(current).find((/** @type {any} */ x) => x.requirement === req);

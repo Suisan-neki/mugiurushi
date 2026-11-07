@@ -64,12 +64,12 @@ try {
     ] }) });
   });
   // 事例の記録の観測の状態を差し替える（f-1 は不足を確認、f-2 は期待どおり）。
-  let override = false;
+  let override = false, unlinked = false;
   await page.route('**/api/v1/case', async route => {
     const response = await route.fetch(); const json = await response.json();
     if (override) for (const cv of json.checks) for (const a of cv.coverage?.aspects || []) {
-      if (a.id === 'f-1') Object.assign(a, { status: 'contradicted', status_label: '期待と異なる', detail: 'IDとパスワードだけで一覧が表示された' });
-      if (a.id === 'f-2') Object.assign(a, { status: 'observed', status_label: '観測した', detail: '記録に残った' });
+      if (a.id === 'f-1') Object.assign(a, { status: 'contradicted', status_label: '期待と異なる', detail: 'IDとパスワードだけで一覧が表示された', trial_checks: [{ id: 'c2', label: '2つ目の認証を求める画面が出る（ブラウザの表示）' }] });
+      if (a.id === 'f-2') Object.assign(a, unlinked ? { status: 'unlinked', status_label: 'どの判定条件が答えるか未対応づけ', detail: 'この部分に答える判定条件を選んでいない' } : { status: 'observed', status_label: '観測した', detail: '記録に残った' });
       cv.evidence = [{ id: 'ev-1', run_id: 'run-1', applicable: true, invalidated_by: [], observed: {} }]; cv.selected_evidence = 'ev-1';
     }
     return route.fulfill({ response, json });
@@ -121,9 +121,34 @@ try {
   assert.deepEqual(checks.map(c => c.aspects.map(a => [a.id, a.observation, a.trial_checks.length])), [[['f-1', 'browser_text', 0]], [['f-2', 'stored_file', 0]]]);
   assert.match(checks[0].origin, /試験の案（fake・応答ID fake-plan）を合成の開発者が了承/);
 
-  // 4 結果：観測の状態から、不足を確認した項目と期待どおりの項目を分ける。
-  override = true;
+  // 4 結果：試験を実行する前は、成功・失敗ではなく「未実行」とだけ示す。
+  assert.deepEqual(await page.locator('[data-result]').evaluateAll(r => r.map(x => x.getAttribute('data-result'))), ['pending', 'pending']);
+  assert.match(await page.locator('[data-result="pending"] [data-state-label]').first().innerText(), /未実行（判定条件への対応づけ前）/);
+  assert.equal(await page.locator('[data-ng-count]').count(), 0, '実行していない試験を不足として数えない');
+  assert.match(await page.locator('[data-result] a').first().getAttribute('href'), /\/workbench\?.*check=flow-.*from=flow#trial/);
+  // 結果の画面のリンクから設定画面を開くと、了承した案（手順・合格の条件）と、流れへ戻るリンクが出る。
+  await page.locator('[data-result] a').first().click();
+  const panel = page.locator('[data-flow-plan="t-login"]'); await panel.waitFor();
+  assert.match(await panel.innerText(), /ログインと一覧の表示[\s\S]*アプリケーションログイン時の二要素認証[\s\S]*職員1でログインする[\s\S]*2つ目の認証を求められる/);
+  assert.equal(await page.locator('#to-flow').innerText(), '照合の流れに戻る');
+  await panel.getByRole('button', { name: '合格の条件から判定条件の下書きを作る' }).click();
+  await page.getByRole('button', { name: '次へ：試す状況を選ぶ', exact: true }).click();
+  await page.getByRole('button', { name: '次へ：判定の条件を確認する', exact: true }).click();
+  const rowsAfter = page.locator('#trial-body .check-row');
+  assert.equal(await rowsAfter.count(), 1);
+  assert.equal(await rowsAfter.first().getByLabel(/^確認する範囲/).inputValue(), '2つ目の認証を求められる');
+  assert.equal(await rowsAfter.first().getByLabel(/^観測の方法/).inputValue(), 'browser_text');
+  await page.locator('[data-back-to-flow]').click();
+  await page.locator('[data-result]').first().waitFor();
+  // 実行したが判定条件に対応づけていない部分は「未確認」とし、理由を添える。
+  override = true; unlinked = true;
   await page.getByRole('button', { name: '結果を読み直す' }).click();
+  await page.locator('[data-result="unconfirmed"]').waitFor();
+  assert.match(await page.locator('[data-result="unconfirmed"]').innerText(), /アクセス記録の保存[\s\S]*未確認：どの判定条件が答えるか未対応づけ[\s\S]*判定条件に対応づける/);
+  // 観測の状態から、不足を確認した項目と期待どおりの項目を分ける。
+  unlinked = false;
+  await page.getByRole('button', { name: '結果を読み直す' }).click();
+  await page.locator('[data-result="unconfirmed"]').waitFor({ state: 'detached' });
   await page.locator('[data-ng-count="1"]').waitFor();
   assert.match(await page.locator('[data-result="ng"]').innerText(), /二要素認証[\s\S]*試験で不足を確認/);
   assert.match(await page.locator('main').innerText(), /試験で期待どおりだった項目：アクセス記録の保存/);
@@ -132,7 +157,7 @@ try {
   // 5 修正用のプロンプト：根拠・期待・実際・記録・コード・コミットを入れる。
   await page.getByRole('button', { name: '修正用のプロンプトを作る' }).click();
   const prompt = await page.locator('[data-prompt]').innerText();
-  for (const part of ['対象: example/clinic のコミット ccccccc', '多要素認証を可能な限り早期に採用すべきである', '- 期待: 2つ目の認証を求められる', '- 実際: IDとパスワードだけで一覧が表示された', '試行 run-1', 'app/auth.py', '修正しただけでは満たしたとは扱いません'])
+  for (const part of ['対象: example/clinic のコミット ccccccc', '多要素認証を可能な限り早期に採用すべきである', '- 確かめた判定条件: c2 2つ目の認証を求める画面が出る（ブラウザの表示）', '- 結果: IDとパスワードだけで一覧が表示された', '- 試験の案の合格の条件: 2つ目の認証を求められる', '試行 run-1', 'app/auth.py', '修正しただけでは満たしたとは扱いません'])
     assert(prompt.includes(part), part);
   assert.doesNotMatch(prompt, /アクセス記録の保存/, '期待どおりだった項目は入れない');
 
