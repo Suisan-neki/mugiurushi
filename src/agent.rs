@@ -425,6 +425,11 @@ pub fn scan(config: Option<&Config>, request: ScanRequest) -> io::Result<Value> 
         return Ok(preview);
     }
     let answer = config.post("/v1/scan", &payload)?;
+    scan_result(&answer)
+}
+
+/// 照合の応答を確かめて、麦漆の観測の種類の一覧で試験できるかを付け直す。
+fn scan_result(answer: &Value) -> io::Result<Value> {
     let items = answer["findings"]
         .as_array()
         .ok_or_else(|| invalid("AIエージェントの照合の形が不正です"))?;
@@ -480,18 +485,319 @@ pub fn scan(config: Option<&Config>, request: ScanRequest) -> io::Result<Value> 
                 "how": item["verification"]["how"],
             },
             "unknowns": strings(&item["unknowns"]),
+            "patient_data": item["patient_data"].as_bool().unwrap_or(false),
+            "priority": item["priority"]
+                .as_str()
+                .filter(|p| matches!(*p, "high" | "medium" | "low"))
+                .unwrap_or("low"),
+            "system_refs": strings(&item["system_refs"]),
         }));
     }
+    let questions: Vec<Value> = answer["questions"]
+        .as_array()
+        .map(|q| {
+            q.iter()
+                .filter_map(|q| {
+                    Some(json!({"id": q["id"].as_str()?, "text": q["text"].as_str()?,
+                        "why": q["why"].as_str().unwrap_or(""), "options": strings(&q["options"])}))
+                })
+                .take(5)
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(json!({
         "stage": "sent",
         "status": "candidate",
         "limits": answer["limits"],
         "findings": findings,
+        "questions": questions,
+        "priority_rule": answer["priority_rule"],
         "not_covered": strings(&answer["not_covered"]),
         "sources": answer["sources"].as_array().cloned().unwrap_or_default(),
         "model_call": answer["model_call"],
         "note": "照合の候補です。適合・準拠・安全性の判断ではなく、確認項目にも判定にも使いません。該当するかと確かめ方は人が確かめます。",
     }))
+}
+
+/// ヒアリングの回答。照合と試験の案に使う。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HearingAnswer {
+    pub question: String,
+    pub answer: String,
+}
+
+const MAX_FILES: usize = 40;
+const MAX_FILE_CHARS: usize = 20_000;
+const MAX_TOTAL_CHARS: usize = 400_000;
+const NO_SUMMARY: &str = "説明は書かれていない。コードの抜粋から読み取れる範囲で照合する。";
+
+/// 利用者が選んだファイルを、固定コミットの読取記録から読んで抜粋にする。読むのは麦漆に保存した記録だけ。
+fn excerpts(
+    store: &crate::understanding::Store,
+    repository: &str,
+    commit: &str,
+    files: &[String],
+) -> io::Result<Vec<Value>> {
+    if files.is_empty() || files.len() > MAX_FILES {
+        return Err(invalid(format!(
+            "照合に使うファイルを1〜{MAX_FILES}件選んでください"
+        )));
+    }
+    let mut total = 0;
+    let mut out = vec![];
+    for path in files {
+        let file = store.handle(crate::understanding::UnderstandRequest::File {
+            repository: repository.to_owned(),
+            commit: commit.to_owned(),
+            path: path.clone(),
+        })?;
+        let text = file["file"]["text"].as_str().unwrap_or_default();
+        let clipped: String = text.chars().take(MAX_FILE_CHARS).collect();
+        let note = if clipped.chars().count() < text.chars().count() {
+            format!("\n（{MAX_FILE_CHARS}文字で切った。残りは送っていない）")
+        } else {
+            String::new()
+        };
+        total += clipped.chars().count();
+        if total > MAX_TOTAL_CHARS {
+            return Err(invalid(
+                "選んだファイルが多すぎます。照合に使うファイルを減らしてください",
+            ));
+        }
+        out.push(json!({"ref": path, "text": clipped + &note}));
+    }
+    Ok(out)
+}
+
+fn system_of(
+    store: &crate::understanding::Store,
+    repository: &str,
+    commit: &str,
+    files: &[String],
+    summary: &str,
+) -> io::Result<Value> {
+    let summary = summary.trim();
+    if summary.chars().count() > MAX_SUMMARY {
+        return Err(invalid("システムの説明は8000文字以内にしてください"));
+    }
+    Ok(json!({
+        "summary": if summary.is_empty() { NO_SUMMARY } else { summary },
+        "excerpts": excerpts(store, repository, commit, files)?,
+    }))
+}
+
+/// 新しい流れの照合。選んだファイルの抜粋と、任意の説明・ヒアリングの回答を送る。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowScanRequest {
+    pub repository: String,
+    pub commit: String,
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub answers: Vec<HearingAnswer>,
+    #[serde(default)]
+    pub confirm: Option<Confirm>,
+}
+
+pub fn flow_scan(
+    config: Option<&Config>,
+    store: &crate::understanding::Store,
+    request: FlowScanRequest,
+) -> io::Result<Value> {
+    let config = config.ok_or_else(|| invalid("AIエージェントは設定されていません"))?;
+    let system = system_of(
+        store,
+        &request.repository,
+        &request.commit,
+        &request.files,
+        &request.summary,
+    )?;
+    let payload = json!({"system": system, "answers": request.answers});
+    if let Some(preview) = preview_or_check("/v1/scan", &payload, request.confirm.as_ref())? {
+        return Ok(preview);
+    }
+    scan_result(&config.post("/v1/scan", &payload)?)
+}
+
+/// 利用者からの質問。取り込んだ文書だけを根拠に答える。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AskRequest {
+    pub question: String,
+    #[serde(default)]
+    pub confirm: Option<Confirm>,
+}
+
+pub fn ask(config: Option<&Config>, request: AskRequest) -> io::Result<Value> {
+    let config = config.ok_or_else(|| invalid("AIエージェントは設定されていません"))?;
+    let question = request.question.trim();
+    if question.is_empty() || question.chars().count() > MAX_REQUEST {
+        return Err(invalid("質問は1〜2000文字で書いてください"));
+    }
+    let payload = json!({"question": question});
+    if let Some(preview) = preview_or_check("/v1/ask", &payload, request.confirm.as_ref())? {
+        return Ok(preview);
+    }
+    let answer = config.post("/v1/ask", &payload)?;
+    let citations = answer["citations"].as_array().cloned().unwrap_or_default();
+    if !citations.iter().all(cited) {
+        return Err(invalid(
+            "文書・ページ・SHA-256のそろわない出典を含む回答は受け取りません",
+        ));
+    }
+    Ok(json!({
+        "stage": "sent",
+        "answer": answer["answer"].as_str().unwrap_or_default(),
+        "citations": citations,
+        "grounded": !citations.is_empty(),
+        "model_call": answer["model_call"],
+    }))
+}
+
+fn cited(c: &Value) -> bool {
+    c["document"].as_str().is_some_and(|d| !d.is_empty())
+        && c["page"].as_str().is_some()
+        && c["sha256"]
+            .as_str()
+            .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// 試験の案に渡す照合の候補。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanFinding {
+    pub id: String,
+    pub requirement: String,
+    #[serde(default)]
+    pub how: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanRequest {
+    pub repository: String,
+    pub commit: String,
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub answers: Vec<HearingAnswer>,
+    pub findings: Vec<PlanFinding>,
+    #[serde(default)]
+    pub confirm: Option<Confirm>,
+}
+
+/// 試験の案。人が了承するまで実行されない。観測の種類は麦漆で判定に使える種類だけを受け取る。
+pub fn plan(
+    config: Option<&Config>,
+    store: &crate::understanding::Store,
+    request: PlanRequest,
+) -> io::Result<Value> {
+    let config = config.ok_or_else(|| invalid("AIエージェントは設定されていません"))?;
+    if request.findings.is_empty() || request.findings.len() > 24 {
+        return Err(invalid("試験の案を作る候補を1〜24件選んでください"));
+    }
+    let system = system_of(
+        store,
+        &request.repository,
+        &request.commit,
+        &request.files,
+        &request.summary,
+    )?;
+    let payload =
+        json!({"system": system, "findings": request.findings, "answers": request.answers});
+    if let Some(preview) = preview_or_check("/v1/plan", &payload, request.confirm.as_ref())? {
+        return Ok(preview);
+    }
+    let answer = config.post("/v1/plan", &payload)?;
+    let known: std::collections::BTreeSet<&str> =
+        request.findings.iter().map(|f| f.id.as_str()).collect();
+    let mut used = std::collections::BTreeSet::new();
+    let mut tests = vec![];
+    for t in answer["tests"]
+        .as_array()
+        .ok_or_else(|| invalid("AIエージェントの試験の案の形が不正です"))?
+    {
+        let ids = strings(&t["finding_ids"]);
+        if ids.is_empty()
+            || ids
+                .iter()
+                .any(|i| !known.contains(i.as_str()) || !used.insert(i.clone()))
+        {
+            return Err(invalid(
+                "候補のない試験、渡していない候補、または二つの試験に入った候補を含む案は受け取りません",
+            ));
+        }
+        let observation: ObservationKind = serde_json::from_value(t["observation"].clone())
+            .map_err(|_| invalid("麦漆にない観測の種類を含む試験の案は受け取りません"))?;
+        if observation.support() != crate::coverage::Support::Judged {
+            return Err(invalid(
+                "判定に使えない観測の種類を含む試験の案は受け取りません",
+            ));
+        }
+        let (steps, pass) = (strings(&t["steps"]), strings(&t["pass"]));
+        if steps.is_empty() || pass.is_empty() {
+            return Err(invalid("手順か合格の条件のない試験の案は受け取りません"));
+        }
+        tests.push(json!({
+            "id": t["id"], "name": t["name"], "kind": t["kind"], "finding_ids": ids,
+            "steps": steps, "pass": pass, "observation": observation,
+            "observation_label": observation.label(),
+        }));
+    }
+    Ok(json!({
+        "stage": "sent",
+        "status": "draft",
+        "tests": tests,
+        "not_planned": answer["not_planned"].as_array().cloned().unwrap_or_default(),
+        "model_call": answer["model_call"],
+    }))
+}
+
+const FLOW_FILE: &str = "flow.json";
+const MAX_FLOW_BYTES: usize = 2 * 1024 * 1024;
+
+/// 新しい流れの途中の記録（照合の結果・ヒアリング・試験の案・了承した試験・結果の控え）。
+/// 判定と観測の状態は事例の記録が正で、ここには画面の流れを続けるための控えだけを置く。
+pub fn flow_read(directory: &std::path::Path) -> io::Result<Value> {
+    match std::fs::read_to_string(directory.join(FLOW_FILE)) {
+        Ok(text) => serde_json::from_str(&text).map_err(|_| invalid("流れの記録を読み取れません")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(json!({"records": {}})),
+        Err(e) => Err(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowSave {
+    pub repository: String,
+    pub commit: String,
+    pub record: Value,
+}
+
+pub fn flow_save(directory: &std::path::Path, request: FlowSave) -> io::Result<Value> {
+    if !request.record.is_object()
+        || request.commit.len() != 40
+        || !request.commit.bytes().all(|b| b.is_ascii_hexdigit())
+        || request.repository.is_empty()
+    {
+        return Err(invalid("流れの記録の形が不正です"));
+    }
+    let mut all = flow_read(directory)?;
+    let key = format!("{}@{}", request.repository, request.commit);
+    all["records"][key] = json!({"repository": request.repository, "commit": request.commit, "record": request.record});
+    let bytes = serde_json::to_vec(&all).map_err(io::Error::other)?;
+    if bytes.len() > MAX_FLOW_BYTES {
+        return Err(invalid("流れの記録が2MiBを超えます"));
+    }
+    let path = directory.join(FLOW_FILE);
+    let temporary = directory.join(format!(".{FLOW_FILE}.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, &bytes)?;
+    std::fs::rename(&temporary, &path)?;
+    Ok(all)
 }
 
 fn strings(value: &Value) -> Vec<String> {

@@ -417,6 +417,10 @@ async function loadCase() {
     if (state.agent === undefined) {
       try { state.agent = await api('GET', '/api/v1/agent'); } catch { state.agent = null; }
     }
+    // ガイドライン照合の流れ（/flow）で了承した試験の案。試験の設定の画面に案を示すためだけに読む。
+    if (state.agent?.status === 'configured') {
+      try { state.flowRecords = (await api('GET', '/api/v1/flow')).records || {}; } catch { state.flowRecords = {}; }
+    }
   } catch (e) { showError(e); }
   renderCurrent();
   if (['open', 'repository'].includes(state.step)) $('current').hidden = true;
@@ -717,10 +721,45 @@ function renderTrial() {
   state.trialForm = form;
   fill(body, header, notes,
     h('p', {}, h('strong', {}, '検証する動作: '), check.text),
+    flowPlanView(check),
     state.step === 'trial' ? browserPresetPicker(check) : null,
     plan && !plan.error ? disclosure('コードから読み取った試験の手がかり', planInfo(plan)) : null,
     form.runtime === 'browser' ? browserTrialView(check, form, exec)
       : browserPresets().length ? disclosure('Python・Node.js・HTTPを手動で設定する', trialFormView(check, form, plan, exec)) : trialFormView(check, form, plan, exec));
+}
+/// 照合の流れで了承した試験の案を探す。了承の時に作った確認項目のIDで対応づけている。
+function flowPlanFor(checkId) {
+  for (const entry of Object.values(state.flowRecords || {})) {
+    const r = entry.record || {};
+    const testId = Object.keys(r.approved || {}).find(t => r.approved[t] === checkId);
+    const test = testId && r.plan?.tests?.find(t => t.id === testId);
+    if (test) return { entry, test, findings: (r.scan?.findings || []).filter(f => test.finding_ids.includes(f.id)) };
+  }
+  return null;
+}
+/// 了承した案（手順と合格の条件）を、設定する人が見ながら入力できるように示す。
+/// 起動のしかた・引数・保存先・読み直しは自動で作らない。判定条件は合格の条件から下書きだけを作る。
+function flowPlanView(check) {
+  const found = flowPlanFor(check.id);
+  if (!found) return null;
+  const { entry, test, findings } = found;
+  const method = METHODS.some(m => m[0] === test.observation) ? test.observation : null;
+  const back = new URL('/flow', location.origin);
+  back.search = new URLSearchParams({ url: `https://github.com/${entry.repository}`, ref: entry.commit }).toString();
+  const draft = button('合格の条件から判定条件の下書きを作る', () => {
+    state.trialForm = { ...state.trialForm, checks: test.pass.map(p => ({ scope: p.slice(0, 120), method: method || 'stdout', expect: 'contains', text: '' })) };
+    renderTrial();
+    setStatus('判定条件の下書きを作りました。期待（含む・含まない・等しいなど）と比べる文字列を入力してください。');
+  }, 'outlined', 'sm');
+  return h('section', { class: 'box', 'data-flow-plan': test.id, 'aria-label': '照合の流れで了承した試験の案' },
+    h('h3', {}, `照合の流れで了承した試験の案：${test.name}`),
+    h('p', {}, h('strong', {}, '確かめる項目: '), findings.map(f => `${f.requirement}（${f.citations?.[0]?.document || ''} ${f.citations?.[0]?.page || ''}ページ）`).join('、')),
+    h('div', { class: 'inline-fields' },
+      h('div', {}, h('strong', {}, '手順'), h('ol', { class: 'items' }, test.steps.map(x => h('li', {}, x)))),
+      h('div', {}, h('strong', {}, '合格の条件'), h('ul', { class: 'items' }, test.pass.map(x => h('li', {}, x))), h('p', { class: 'note' }, `観測: ${test.observation_label || test.observation}`))),
+    h('p', { class: 'note' }, '手順と合格の条件はAIエージェントの案です。下の設定（起動するファイル・引数・保存先・読み直し・判定条件）は人が入力し、実行前の確認画面で、確かめる項目をどの判定条件で確かめるかを選びます。対応づけていない項目は、試験を実行しても未確認のまま残ります。'),
+    method ? null : h('p', { class: 'ref-unverified' }, `案の観測（${test.observation_label || test.observation}）は、この設定画面の判定条件では選べません。近い観測を選ぶか、未確認のまま残してください。`),
+    h('div', { class: 'button-row' }, draft, h('a', { href: back.pathname + back.search, 'data-back-to-flow': '' }, '照合の流れに戻って結果を見る')));
 }
 function browserPresets() {
   return (state.browserRecipes || []).filter(p => p.recipe.source.repository === state.source?.repository);
@@ -870,15 +909,7 @@ function trialFormView(check, form, plan, exec) {
   for (const [box, kind] of [[entry, launch], [readbackEntry, readbackLaunch], [serverEntry, serverLaunch]])
     box.control.addEventListener('change', () => { const c = entries.find(e => e.entrypoint === box.control.value.trim()); if (c) kind.control.value = c.launch || 'file'; });
   updateRuntime();
-  const container = h('form', { novalidate: true, oninput: updatePreview, onchange: updatePreview, onsubmit: e => { e.preventDefault(); state.trialForm = read(); showTrialConfirmation(check, state.trialForm, exec); } },
-    h('datalist', { id: 'entry-candidates' }, entries.map(e => h('option', { value: e.entrypoint, label: LAUNCH_LABEL[e.launch || 'file'] }))),
-    h('datalist', { id: 'scope-candidates' }, SCOPES.map(s => h('option', { value: s }))),
-    h('h3', { class: 'dads-u-std-20B-150' }, '試験の内容'),
-    h('div', { class: 'button-row' }, button('通常時の設定例を使う', () => { state.trialForm = trialDefaults('normal'); renderTrial(); }), button('保存失敗時の設定例を使う', () => { state.trialForm = trialDefaults('failure'); renderTrial(); }),
-      h('span', { class: 'note' }, 'コードのオプション定義から作った設定例です。実行前に内容を確認し、必要な箇所を修正してください。')),
-    h('div', { class: 'inline-fields' }, field({ label: '起動対象', control: entry, required: true, support: 'ファイルは固定コミットの中の相対パス。モジュールは pynetdicom のような名前。コマンドは pyproject.toml の [project.scripts] に書かれた名前。' }), field({ label: '起動のしかた', control: launch }), field({ label: '実行環境', control: runtime })), runtimeNote,
-    field({ label: '引数', control: args, support: '1行に1つ。試験用の値を入れる位置に {{test_value}} と書くと、試行ごとに新しい架空の値（eel-test-…）に置き換わります。先に起動するプロセスのポートは {{port}}、固定コミットの複製の最上位は {{source}} と書きます（例: {{source}}/tests/data/sample.dcm）。' }),
-    field({ label: '保存先', control: storage, support: '試行用の作業ディレクトリからの相対パス。例: tasks。指定すると、試行の後に麦漆が保存先を直接読み出します。' }),
+  const advanced = [
     h('fieldset', {}, h('legend', {}, 'Pythonの読み込み先と依存先（任意）'),
       h('p', { class: 'note' }, '依存先は、公開GitHubのリポジトリを固定コミットで指定します。試験を始めると、麦漆が固定コミットだけを取得し（git fetch）、読み込み先のディレクトリを読み取り専用で複製します。インストール用のスクリプトやビルドは実行しません。Pythonだけで書かれた依存先に限ります。モジュール・コマンドで起動するときや依存先を指定したときは、ホストに入っているパッケージを読まない設定（-S -P）で起動します。'),
       h('div', { class: 'inline-fields' }, field({ label: '対象の読み込み先', control: pythonRoot, support: '対象リポジトリの中のディレクトリ。空なら最上位。例: src' }),
@@ -891,7 +922,18 @@ function trialFormView(check, form, plan, exec) {
     h('fieldset', {}, h('legend', {}, '先に起動するプロセス（任意）'),
       h('p', { class: 'note' }, '受信サーバーのように待ち受けるプロセスを先に起動し、指定したポートが接続を受け付けてから、上の「起動対象」を動かします。終わったら麦漆が止めます。止めたことを先に起動するプロセスの失敗とは扱いません。準備できなかったときは「判定できない」にします。'),
       h('div', { class: 'inline-fields' }, field({ label: '先に起動するプロセス', control: serverEntry }), field({ label: '起動のしかた', control: serverLaunch }), field({ label: '準備の待機上限（ミリ秒）', control: serverReady })),
-      field({ label: '先に起動するプロセスの引数', control: serverArgs, support: '1行に1つ。待ち受けるポートの位置に {{port}} と書くと、麦漆が 127.0.0.1 の空いているポートを割り当てます。待ち受けるアドレスは 127.0.0.1 にしてください（local方式ではOSで制限しません）。' })),
+      field({ label: '先に起動するプロセスの引数', control: serverArgs, support: '1行に1つ。待ち受けるポートの位置に {{port}} と書くと、麦漆が 127.0.0.1 の空いているポートを割り当てます。待ち受けるアドレスは 127.0.0.1 にしてください（local方式ではOSで制限しません）。' }))
+  ];
+  const container = h('form', { novalidate: true, oninput: updatePreview, onchange: updatePreview, onsubmit: e => { e.preventDefault(); state.trialForm = read(); showTrialConfirmation(check, state.trialForm, exec); } },
+    h('datalist', { id: 'entry-candidates' }, entries.map(e => h('option', { value: e.entrypoint, label: LAUNCH_LABEL[e.launch || 'file'] }))),
+    h('datalist', { id: 'scope-candidates' }, SCOPES.map(s => h('option', { value: s }))),
+    h('h3', { class: 'dads-u-std-20B-150' }, '試験の内容'),
+    h('div', { class: 'button-row' }, button('通常時の設定例を使う', () => { state.trialForm = trialDefaults('normal'); renderTrial(); }), button('保存失敗時の設定例を使う', () => { state.trialForm = trialDefaults('failure'); renderTrial(); }),
+      h('span', { class: 'note' }, 'コードのオプション定義から作った設定例です。実行前に内容を確認し、必要な箇所を修正してください。')),
+    h('div', { class: 'inline-fields' }, field({ label: '起動対象', control: entry, required: true, support: 'ファイルは固定コミットの中の相対パス。モジュールは pynetdicom のような名前。コマンドは pyproject.toml の [project.scripts] に書かれた名前。' }), field({ label: '起動のしかた', control: launch }), field({ label: '実行環境', control: runtime })), runtimeNote,
+    field({ label: '引数', control: args, support: '1行に1つ。試験用の値を入れる位置に {{test_value}} と書くと、試行ごとに新しい架空の値（eel-test-…）に置き換わります。先に起動するプロセスのポートは {{port}}、固定コミットの複製の最上位は {{source}} と書きます（例: {{source}}/tests/data/sample.dcm）。' }),
+    field({ label: '保存先', control: storage, support: '試行用の作業ディレクトリからの相対パス。例: tasks。指定すると、試行の後に麦漆が保存先を直接読み出します。' }),
+    (fromFlow => fromFlow ? disclosure('詳しい設定（Pythonの依存先・試験専用のコンテナ・先に起動するプロセス）', ...advanced) : advanced)(!!flowPlanFor(check.id)),
     h('fieldset', {}, h('legend', {}, '後から読み出す（任意）'), h('p', { class: 'note' }, '書き込んだプロセス（と先に起動するプロセス）が終わった後、別のプロセスで同じ作業ディレクトリを読み出します。'),
       h('div', { class: 'inline-fields' }, field({ label: '読み出し用の起動対象', control: readbackEntry }), field({ label: '起動のしかた', control: readbackLaunch }), field({ label: '読み出しの引数', control: readbackArgs, support: '1行に1つ。' }))),
     faults,
@@ -1641,5 +1683,12 @@ if (params.get('from') === 'system' && params.get('url')) {
   if (params.get('focus')) back.searchParams.set('focus', params.get('focus'));
   if (params.get('diagram')) back.searchParams.set('diagram', params.get('diagram'));
   $('back-to-system').href = back.pathname + back.search;
+}
+if (params.get('url')) {
+  // 新しい流れ（ガイドラインの照合から試験・修正・再試験まで）へ、同じリポジトリとコミットで移る。
+  const flow = new URL('/flow', location.origin);
+  flow.searchParams.set('url', params.get('url')); flow.searchParams.set('ref', params.get('ref') || 'HEAD');
+  $('to-flow').href = flow.pathname + flow.search; $('to-flow').hidden = false;
+  if (params.get('from') === 'flow') $('to-flow').textContent = '照合の流れに戻る';
 }
 restoreLocation();
