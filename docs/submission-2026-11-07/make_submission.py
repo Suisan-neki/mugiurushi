@@ -41,9 +41,9 @@ CSS = """
 body{margin:0;font-family:'Noto Sans JP',sans-serif;color:#1A1A1A;font-size:8.4pt;line-height:1.45}
 .page{width:210mm;height:297mm;padding:7mm 10mm 6mm;display:flex;flex-direction:column;gap:1.8mm}
 .head{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2.4pt solid #0017C1;padding-bottom:1.6mm}
-.head h1{margin:0;font-size:17pt;color:#00118F;line-height:1.2}
+.head h1{margin:0;font-size:15pt;color:#00118F;line-height:1.2}
 .head .sub{font-size:8.6pt;color:#333}
-.head .who{text-align:right;font-size:8.4pt;color:#333}
+.head .who{text-align:right;font-size:7.6pt;color:#444;line-height:1.35}
 .lead{background:#E8F1FE;border-left:3pt solid #0017C1;padding:1.6mm 3mm;font-size:9.2pt}
 .lead b{color:#00118F}
 .flow{display:grid;grid-template-columns:repeat(5,1fr);gap:2.4mm}
@@ -120,8 +120,8 @@ example = f"""
  <div class="shot"><img src="{result_png.name}"><div class="cap">結果の画面（同じ実行）。確かめた候補は「試験で不足を確認」、試験していない候補は「未実行」と表示する。</div></div>
 </div>"""
 
-page = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>mugiurushi 一次審査 提出資料</title><style>{CSS}</style></head><body><div class="page">
-<div class="head"><div><h1>mugiurushi（麦漆）</h1><div class="sub">医療システムの開発者が、ガイドラインの要件を、実際に動かす試験で確かめるための検証ツール</div></div><div class="who">東京AIハッカソン 2026 一次審査<br>山下真凜</div></div>
+page = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>一次審査 提出資料</title><style>{CSS}</style></head><body><div class="page">
+<div class="head"><div><h1>ガイドラインの要件を、実際に動かす試験で確かめる</h1><div class="sub">医療システムに新しく参入する開発者が、選んだ要件の不足を見つけ、直す依頼までつなげる</div></div><div class="who">東京AIハッカソン 2026 一次審査<br>プロダクト名：mugiurushi（麦漆）<br>名前：山下真凜</div></div>
 <div class="lead">{lead_html}</div>
 <div class="flow">{flow_html}</div>
 {example}

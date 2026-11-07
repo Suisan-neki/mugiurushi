@@ -112,7 +112,7 @@ try {
     if (!video) return;
     await page.goto('about:blank');
     const esc = t => t.replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch]);
-    await page.setContent(`<!doctype html><meta charset="utf-8"><body style="margin:0;background:#00118F;color:#fff;font-family:'Noto Sans JP',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh"><div style="max-width:1040px;padding:40px"><div style="font-size:15px;opacity:.85">mugiurushi（麦漆）デモ ／ 自動操作（スクリプト）・無編集の録画 ／ AIと試験の実行は実際のもの</div><h1 style="font-size:34px;margin:14px 0 22px">${esc(heading)}</h1>${lines.map(l => `<p style="font-size:21px;line-height:1.6;margin:8px 0">${esc(l)}</p>`).join('')}</div></body>`);
+    await page.setContent(`<!doctype html><meta charset="utf-8"><body style="margin:0;background:#00118F;color:#fff;font-family:'Noto Sans JP',sans-serif;display:flex;align-items:center;justify-content:center;height:100vh"><div style="max-width:1040px;padding:40px"><div style="font-size:15px;opacity:.85">自動操作（スクリプト）・無編集の録画 ／ AIと試験の実行は実際のもの</div><h1 style="font-size:34px;margin:14px 0 22px">${esc(heading)}</h1>${lines.map(l => `<p style="font-size:21px;line-height:1.6;margin:8px 0">${esc(l)}</p>`).join('')}</div></body>`);
     await page.waitForTimeout(ms);
   };
   const errors = []; page.on('pageerror', e => errors.push(e.message));

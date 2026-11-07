@@ -1,12 +1,12 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>mugiurushi 一次審査 提出資料</title><style>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>一次審査 提出資料</title><style>
 @page{size:A4;margin:0}
 *{box-sizing:border-box}
 body{margin:0;font-family:'Noto Sans JP',sans-serif;color:#1A1A1A;font-size:8.4pt;line-height:1.45}
 .page{width:210mm;height:297mm;padding:7mm 10mm 6mm;display:flex;flex-direction:column;gap:1.8mm}
 .head{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2.4pt solid #0017C1;padding-bottom:1.6mm}
-.head h1{margin:0;font-size:17pt;color:#00118F;line-height:1.2}
+.head h1{margin:0;font-size:15pt;color:#00118F;line-height:1.2}
 .head .sub{font-size:8.6pt;color:#333}
-.head .who{text-align:right;font-size:8.4pt;color:#333}
+.head .who{text-align:right;font-size:7.6pt;color:#444;line-height:1.35}
 .lead{background:#E8F1FE;border-left:3pt solid #0017C1;padding:1.6mm 3mm;font-size:9.2pt}
 .lead b{color:#00118F}
 .flow{display:grid;grid-template-columns:repeat(5,1fr);gap:2.4mm}
@@ -35,7 +35,7 @@ body{margin:0;font-family:'Noto Sans JP',sans-serif;color:#1A1A1A;font-size:8.4p
 .col{display:flex;flex-direction:column;gap:1.8mm}
 .foot{font-size:7.2pt;color:#555;margin-top:auto}
 </style></head><body><div class="page">
-<div class="head"><div><h1>mugiurushi（麦漆）</h1><div class="sub">医療システムの開発者が、ガイドラインの要件を、実際に動かす試験で確かめるための検証ツール</div></div><div class="who">東京AIハッカソン 2026 一次審査<br>山下真凜</div></div>
+<div class="head"><div><h1>ガイドラインの要件を、実際に動かす試験で確かめる</h1><div class="sub">医療システムに新しく参入する開発者が、選んだ要件の不足を見つけ、直す依頼までつなげる</div></div><div class="who">東京AIハッカソン 2026 一次審査<br>プロダクト名：mugiurushi（麦漆）<br>名前：山下真凜</div></div>
 <div class="lead"><b>誰が：</b>医療機関向けのシステムに新しく参入する開発者。<br><b>何に困るか：</b>医療機関は採用時に、ガイドラインにどこまで対応しているかの説明を事業者に求める（サービス仕様適合開示書など）。新規参入者は、自分のコードのどこがどの要件に関わるかを示しにくい。<br><b>これで確かめられること：</b>公開ガイドラインから出典つきで要件の候補を出し、開発者が選んだ要件を、対象を実際に動かして、選んだ観測の範囲で確かめる。適合・準拠の判定はしない。</div>
 <div class="flow"><div class="step"><span class="n">1</span><div class="t">コードと説明</div><div class="who">開発者</div><div class="d">対象のコードとシステムの説明を入力する</div></div><div class="step"><span class="n">2</span><div class="t">出典つきの候補</div><div class="who">AI</div><div class="d">取り込んだ公開文書18件から、関わりうる要件を出典つきで挙げる</div></div><div class="step"><span class="n">3</span><div class="t">試験範囲を選ぶ</div><div class="who">開発者</div><div class="d">試験の案を読んで了承し、候補ごとに判定の条件を選ぶ</div></div><div class="step"><span class="n">4</span><div class="t">実行して確かめる</div><div class="who">実行・観測基盤（Rust）</div><div class="d">対象を実際に起動し、出力・保存先・読み出しを観測して判定する</div></div><div class="step"><span class="n">5</span><div class="t">修正の依頼</div><div class="who">開発者が手元のAIへ</div><div class="d">出典・判定の条件・結果・関係するコードを1つの依頼文にまとめる</div></div></div>
 

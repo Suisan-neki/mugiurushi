@@ -34,8 +34,9 @@ def heading(text, no=None):
     if no: run(p, f"{no} ", True, BLUE, 10)
     run(p, text, True, BLUE, 10)
 
-p = doc.add_paragraph(); run(p, "mugiurushi（麦漆）", True, BLUE, 17)
-p = doc.add_paragraph(); run(p, "医療システムの開発者が、ガイドラインの要件を、実際に動かす試験で確かめるための検証ツール　｜　東京AIハッカソン 2026 一次審査　山下真凜", size=8.4)
+p = doc.add_paragraph(); run(p, "東京AIハッカソン 2026 一次審査　｜　プロダクト名：mugiurushi（麦漆）　｜　名前：山下真凜", size=8)
+p = doc.add_paragraph(); run(p, "ガイドラインの要件を、実際に動かす試験で確かめる", True, BLUE, 15)
+p = doc.add_paragraph(); run(p, "医療システムに新しく参入する開発者が、選んだ要件の不足を見つけ、直す依頼までつなげる", size=8.4)
 
 t = doc.add_table(rows=1, cols=1); cell = t.rows[0].cells[0]; shade(cell, "E8F1FE"); cell.text = ""
 for i, (k, v) in enumerate(S["lead"]):

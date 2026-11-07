@@ -11,7 +11,7 @@
 
 ```sh
 node cards.cjs .
-./build.sh "$PWD/source-narrated-6016ad5.mp4" "$PWD/mugiurushi_ピッチ動画_6016ad5_v2.mp4"
+./build.sh "$PWD/source-narrated-6016ad5.mp4" "$PWD/ピッチ動画_6016ad5_v3.mp4"
 ```
 
 数字と代表例は、上の記録と同じ1回の実行のものです。「不足を確認」は選んだ観測の範囲での結果で、各要件には確かめていない部分が残ります。修正と、修正後の再試験は行っていません。
