@@ -310,8 +310,11 @@ fn handle_request(
                     ),
                 );
             }
-            ("GET", "/ui/flow.js") => {
-                return script_response(stream, &assets::text("ui/flow.js")?);
+            ("GET", "/ui/flow.js" | "/ui/flow-record.js") => {
+                return script_response(
+                    stream,
+                    &assets::text(request.path.trim_start_matches('/'))?,
+                );
             }
             ("GET", "/ui/flow.css") => {
                 return respond(

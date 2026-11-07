@@ -25,8 +25,18 @@ function archive(/** @type {any} */ record, /** @type {string} */ reason) {
   for (const k of keys) delete record[k];
 }
 
-/** 新しい照合の応答を記録に入れる。前の照合に結びついたものはすべて履歴へ移す。 */
-export function applyScan(/** @type {any} */ record, /** @type {any} */ scan, /** @type {Answer[]} */ sentAnswers) {
+/** 送った時点の照合の世代。応答が返るまでに別の照合が終わっていたら、その応答は使わない。 */
+export function scanGeneration(/** @type {any} */ record) { return record?.scan?.generation ?? null; }
+/** 送った時点の照合と案の世代。 */
+export function planGeneration(/** @type {any} */ record) { return { scan: scanGeneration(record), plan: record?.plan?.generation ?? null }; }
+export class StaleResponse extends Error {
+  constructor() { super('送った後に照合または試験の案が変わったため、この応答は使いません。もう一度送ってください。'); }
+}
+
+/** 新しい照合の応答を記録に入れる。前の照合に結びついたものはすべて履歴へ移す。
+ * sentAnswers は照合へ送った回答（この照合に反映済みの条件）。expected は送った時点の照合の世代。 */
+export function applyScan(/** @type {any} */ record, /** @type {any} */ scan, /** @type {Answer[]} */ sentAnswers, /** @type {number | null} */ expected) {
+  if (scanGeneration(record) !== expected) throw new StaleResponse();
   const generation = (record.scan?.generation || record.history?.filter((/** @type {any} */ h) => h.scan).length || 0) + 1;
   if (record.scan) archive(record, '照合し直した');
   record.scan = stamp(scan, generation, sentAnswers);
@@ -44,16 +54,26 @@ export function answerTo(/** @type {any} */ record, /** @type {any} */ question)
   return a && typeof a === 'object' && a.question === question.text && question.options?.includes(a.answer) ? a.answer : null;
 }
 
-/** AIへ送る回答。今の照合の質問に結びついた回答だけ。 */
-export function answersOf(/** @type {any} */ record) {
+/** 今の照合の質問への、新しい回答。 */
+export function newAnswers(/** @type {any} */ record) {
   return (record?.scan?.questions || []).flatMap((/** @type {any} */ q) => {
     const a = answerTo(record, q);
     return a ? [{ question: q.text, answer: a }] : [];
   });
 }
+/** AIへ送る回答。今の照合に反映済みの回答（照合へ送ったもの）と、今の質問への新しい回答。
+ * 同じ質問文に両方あれば、新しい回答を使う。AIが回答済みの質問を返さなくても、反映済みの条件は落とさない。 */
+export function answersOf(/** @type {any} */ record) {
+  const fresh = newAnswers(record);
+  const asked = new Set(fresh.map((/** @type {Answer} */ a) => a.question));
+  const carried = (record?.scan?.sent_answers || []).filter((/** @type {Answer} */ a) => a && !asked.has(a.question));
+  return [...carried, ...fresh];
+}
 
 /** 新しい試験の案を記録に入れる。前の案があれば、その案の選択・了承・結果ごと履歴へ移す（照合と回答は残す）。 */
-export function applyPlan(/** @type {any} */ record, /** @type {any} */ plan) {
+export function applyPlan(/** @type {any} */ record, /** @type {any} */ plan, /** @type {{ scan: number | null, plan: number | null }} */ expected) {
+  const now = planGeneration(record);
+  if (now.scan !== expected.scan || now.plan !== expected.plan) throw new StaleResponse();
   if (record.plan) {
     const keep = { scan: record.scan, answers: record.answers };
     archive(record, '試験の案を作り直した');
@@ -96,6 +116,22 @@ export function approvedCheck(/** @type {any} */ record, /** @type {any} */ test
 /** 今の案で了承済みの試験。 */
 export function approvedTests(/** @type {any} */ record) {
   return planIsCurrent(record) ? record.plan.tests.filter((/** @type {any} */ t) => approvedCheck(record, t)) : [];
+}
+
+/** 了承の値から確認項目のIDを取り出す（以前の形式は確認項目IDの文字列）。 */
+export function checkIdOf(/** @type {any} */ approval) { return typeof approval === 'string' ? approval : approval?.check_id ?? null; }
+
+/** 確認項目を登録した試験の案を、今の記録と履歴から探す。了承した中身と違う案には結びつけない。
+ * current は今の照合・今の案で了承したものか。legacy は以前の形式で、どの案を了承したか確かめられないもの。 */
+export function planForCheck(/** @type {any} */ record, /** @type {string} */ checkId) {
+  const entries = [record, ...(record?.history || []).slice().reverse()];
+  for (const e of entries) for (const t of e?.plan?.tests || []) {
+    const a = e.approved?.[t.id];
+    if (checkIdOf(a) !== checkId) continue;
+    if (typeof a === 'object' && a.fingerprint !== fingerprint(t, e.scan)) continue;
+    return { test: t, scan: e.scan, current: e === record && approvedCheck(record, t) === checkId, legacy: typeof a === 'string' };
+  }
+  return null;
 }
 
 /** 記録から開く段階。今の案に了承済みの試験があるときだけ結果へ進む。 */

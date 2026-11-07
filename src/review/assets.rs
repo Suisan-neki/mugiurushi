@@ -12,6 +12,7 @@ pub(super) fn text(path: &str) -> io::Result<String> {
         "ui/web-trial.html" => include_str!("../../ui/web-trial.html"),
         "ui/flow.html" => include_str!("../../ui/flow.html"),
         "ui/flow.js" => include_str!("../../ui/flow.js"),
+        "ui/flow-record.js" => include_str!("../../ui/flow-record.js"),
         "ui/flow.css" => include_str!("../../ui/flow.css"),
         "ui/app.js" => include_str!("../../ui/app.js"),
         "ui/workbench.js" => include_str!("../../ui/workbench.js"),

@@ -1,5 +1,6 @@
 import { apiRequest } from "./api.js";
 import { h, button, field, input, textarea, select, fill, disclosure } from "./workbench-dom.js";
+import { planForCheck } from "./flow-record.js";
 // 理解と試験の画面。解析・照合・判定はサーバーのAPIが行い、この画面は結果を表示して操作を送る。
 // 画面の文字はtextContentで入れ、取得したコードや記録をHTMLとして解釈しない。
 const $ = id => document.getElementById(id);
@@ -728,12 +729,11 @@ function renderTrial() {
       : browserPresets().length ? disclosure('Python・Node.js・HTTPを手動で設定する', trialFormView(check, form, plan, exec)) : trialFormView(check, form, plan, exec));
 }
 /// 照合の流れで了承した試験の案を探す。了承の時に作った確認項目のIDで対応づけている。
+/// 今の記録と、照合や案を作り直す前の履歴の両方から探す。
 function flowPlanFor(checkId) {
   for (const entry of Object.values(state.flowRecords || {})) {
-    const r = entry.record || {};
-    const testId = Object.keys(r.approved || {}).find(t => r.approved[t] === checkId);
-    const test = testId && r.plan?.tests?.find(t => t.id === testId);
-    if (test) return { entry, test, findings: (r.scan?.findings || []).filter(f => test.finding_ids.includes(f.id)) };
+    const found = planForCheck(entry.record || {}, checkId);
+    if (found) return { entry, test: found.test, current: found.current, findings: (found.scan?.findings || []).filter(f => found.test.finding_ids.includes(f.id)) };
   }
   return null;
 }
@@ -753,6 +753,7 @@ function flowPlanView(check) {
   }, 'outlined', 'sm');
   return h('section', { class: 'box', 'data-flow-plan': test.id, 'aria-label': '照合の流れで了承した試験の案' },
     h('h3', {}, `照合の流れで了承した試験の案：${test.name}`),
+    found.current ? null : h('p', { class: 'ref-unverified', 'data-flow-plan-old': '' }, 'この試験は、照合または試験の案を作り直す前に了承したものです。今の照合の結果には使いません。'),
     h('p', {}, h('strong', {}, '確かめる項目: '), findings.map(f => `${f.requirement}（${f.citations?.[0]?.document || ''} ${f.citations?.[0]?.page || ''}ページ）`).join('、')),
     h('div', { class: 'inline-fields' },
       h('div', {}, h('strong', {}, '手順'), h('ol', { class: 'items' }, test.steps.map(x => h('li', {}, x)))),

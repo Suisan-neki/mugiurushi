@@ -3,7 +3,7 @@
 // 判定と観測の状態は事例の記録（/api/v1/case）が正。流れの記録（/api/v1/flow）は画面を続けるための控え。
 // AIへ送る内容は、送る前にサーバーが組み立てた内容をそのまま表示し、人が確かめたときだけ送る。
 import { apiRequest as api } from './api.js';
-import { applyScan, applyPlan, setAnswer, answerTo, answersOf, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate } from './flow-record.js';
+import { applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate } from './flow-record.js';
 
 /** @param {string} tag @param {Record<string, any>} [attrs] @param {...any} children */
 function h(tag, attrs = {}, ...children) {
@@ -117,9 +117,9 @@ async function step1() {
         if (!person()) return showError('記録者の名前を入力してください。');
         const files = [...chosen];
         state.record = { ...(state.record || {}), files, summary: /** @type {HTMLTextAreaElement} */ (desc).value.trim() };
-        const answers = answersOf(state.record);
+        const answers = answersOf(state.record), at = scanGeneration(state.record);
         return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files, summary: state.record.summary, answers }, async (/** @type {any} */ r) => {
-          applyScan(state.record, r, answers); await saveRecord(); go(2);
+          applyScan(state.record, r, answers, at); await saveRecord(); go(2);
         });
       }, 'primary')), out)));
 }
@@ -163,11 +163,12 @@ async function step2() {
       (r.asks || []).slice().reverse().map((/** @type {any} */ a) => h('div', { class: 'box', 'data-asked': '' }, h('div', { class: 'pad' }, h('strong', {}, `質問：${a.question}`), h('div', {}, a.answer),
         a.citations?.map((/** @type {any} */ c) => h('div', { class: 'note', style: 'font-size:12px' }, `出典：${c.document} ${c.page}ページ（SHA-256 ${c.sha256.slice(0, 12)}…）`))))),
       h('div', { class: 'actions' },
-        btn('回答して照合し直す', () => { const answers = answersOf(r); return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers }, async (/** @type {any} */ s) => { applyScan(r, s, answers); await saveRecord(); render(); }); }),
+        btn('回答して照合し直す', () => { const answers = answersOf(r), at = scanGeneration(r); return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers }, async (/** @type {any} */ s) => { applyScan(r, s, answers, at); await saveRecord(); render(); }); }),
         btn('試験の案を作る', () => {
           const findings = testable().map((/** @type {any} */ f) => ({ id: f.id, requirement: f.requirement, how: f.verification.how || '' }));
           if (!findings.length) return showError('試験で確かめられる項目がありません。');
-          return confirmAndSend(out, '/api/v1/agent/plan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers: answersOf(r), findings }, async (/** @type {any} */ p) => { applyPlan(r, p); await saveRecord(); go(3); });
+          const at = planGeneration(r);
+          return confirmAndSend(out, '/api/v1/agent/plan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers: answersOf(r), findings }, async (/** @type {any} */ p) => { applyPlan(r, p, at); await saveRecord(); go(3); });
         }, 'primary')),
       r.plan ? h('p', { class: 'note', 'data-rescan-note': '' }, '照合し直すと、今の試験の案・了承・結果は履歴に移し、新しい照合では使いません。了承した確認項目と試験の記録は残ります。') : null,
       r.history?.length ? h('p', { class: 'note', style: 'font-size:12px' }, `前の照合・試験の案 ${r.history.length}件を履歴に残しています。`) : null, out)));

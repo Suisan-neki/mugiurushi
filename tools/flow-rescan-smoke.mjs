@@ -96,7 +96,9 @@ try {
   await page.reload(); await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
   assert.equal(await page.locator('#steps button[aria-current=step]').innerText(), '▸ 2 照合とヒアリング', '読み込み直しても前の了承で結果へ飛ばない');
   await page.getByRole('button', { name: '試験の案を作る' }).click(); await send();
-  assert.deepEqual(sent.plan[1].answers, [], '回答していない新しい質問に前の回答を送らない');
+  assert.deepEqual(sent.scan[1].answers, [{ question: '院外から使いますか', answer: 'はい' }], '照合し直すときに回答を送る');
+  assert.deepEqual(sent.plan[1].answers, [{ question: '院外から使いますか', answer: 'はい' }],
+    '照合へ反映済みの回答は、元の質問文のまま試験の案へ送る。回答していない新しい質問（ログはどこに保存しますか）の回答にはしない');
 
   // 同じ試験IDで中身が違う案：未了承として出し、前の確認項目の観測を新しい案の結果にしない。
   const box = page.locator('[data-test="t-same"]'); await box.waitFor();
@@ -120,6 +122,17 @@ try {
   assert.equal(record.history[0].scan.findings[0].requirement, '担当外の職員の一覧に患者のタスクを出さない');
   assert.equal(record.history[0].approved['t-same'].check_id, firstCheck);
   assert.equal(record.history[0].answers.q1.answer, 'はい');
+  // 設定画面：作り直す前に了承した確認項目にも、了承した時の案（手順・合格の条件）を出し、今の照合には使わないと示す。
+  const wb = new URL(url + '/workbench'); wb.search = new URLSearchParams({ url: 'https://github.com/' + repository, ref: commit, check: firstCheck, from: 'flow' }).toString(); wb.hash = 'trial';
+  await page.goto(wb.href);
+  const old = page.locator('[data-flow-plan="t-same"]'); await old.waitFor();
+  assert.match(await old.innerText(), /職員Bの一覧に出ない/);
+  assert.match(await old.locator('[data-flow-plan-old]').innerText(), /作り直す前に了承したもの/);
+  wb.search = new URLSearchParams({ url: 'https://github.com/' + repository, ref: commit, check: flows.find(c => c.id !== firstCheck).id, from: 'flow' }).toString();
+  await page.goto(wb.href);
+  const now = page.locator('[data-flow-plan="t-same"]'); await now.waitFor();
+  assert.match(await now.innerText(), /記録に user=A action=add が残る/);
+  assert.equal(await now.locator('[data-flow-plan-old]').count(), 0);
   assert.deepEqual(errors, []);
   console.log('flow rescan smoke: ok');
 } finally {

@@ -21,7 +21,9 @@
     "test:trial-plan": "node --test tools/openemr-trial-plan-tests.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint \"ui/*.js\"",
-    "test:api": "node --test tools/api-tests.mjs"
+    "test:api": "node --test tools/api-tests.mjs",
+    "test:flow-record": "node --test tools/flow-record-tests.mjs",
+    "test:flow-rescan": "node tools/flow-rescan-smoke.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
