@@ -533,6 +533,21 @@ const MAX_TOTAL_CHARS: usize = 400_000;
 const NO_SUMMARY: &str = "説明は書かれていない。コードの抜粋から読み取れる範囲で照合する。";
 
 /// 利用者が選んだファイルを、固定コミットの読取記録から読んで抜粋にする。読むのは麦漆に保存した記録だけ。
+/// 抜粋を、切ったことを示す注記を含めて MAX_FILE_CHARS 文字以内にする（AIエージェントの抜粋の上限と同じ）。
+/// 注記を足した後で上限を超えると、AIエージェントが要求ごと受け付けない。
+fn clip_excerpt(text: &str) -> (String, String) {
+    if text.chars().count() <= MAX_FILE_CHARS {
+        return (text.to_owned(), String::new());
+    }
+    let mut note = String::new();
+    for _ in 0..2 {
+        let kept = MAX_FILE_CHARS - note.chars().count();
+        note = format!("\n（{kept}文字で切った。残りは送っていない）");
+    }
+    let kept = MAX_FILE_CHARS - note.chars().count();
+    (text.chars().take(kept).collect(), note)
+}
+
 fn excerpts(
     store: &crate::understanding::Store,
     repository: &str,
@@ -553,12 +568,7 @@ fn excerpts(
             path: path.clone(),
         })?;
         let text = file["file"]["text"].as_str().unwrap_or_default();
-        let clipped: String = text.chars().take(MAX_FILE_CHARS).collect();
-        let note = if clipped.chars().count() < text.chars().count() {
-            format!("\n（{MAX_FILE_CHARS}文字で切った。残りは送っていない）")
-        } else {
-            String::new()
-        };
+        let (clipped, note) = clip_excerpt(text);
         total += clipped.chars().count();
         if total > MAX_TOTAL_CHARS {
             return Err(invalid(
@@ -884,6 +894,20 @@ mod tests {
 
     fn config(url: &str) -> io::Result<Config> {
         Config::new(url, PathBuf::from("unused"))
+    }
+
+    /// 長いファイルの抜粋は、切ったことの注記を含めて上限以内にする。短いファイルはそのまま送る。
+    #[test]
+    fn clipped_excerpt_with_its_note_stays_within_the_agent_limit() {
+        let (short, note) = clip_excerpt("abc");
+        assert_eq!((short.as_str(), note.as_str()), ("abc", ""));
+        let exact = "あ".repeat(MAX_FILE_CHARS);
+        assert_eq!(clip_excerpt(&exact).0.chars().count(), MAX_FILE_CHARS);
+        for len in [MAX_FILE_CHARS + 1, 32_972, 200_000] {
+            let (kept, note) = clip_excerpt(&"x".repeat(len));
+            assert_eq!(kept.chars().count() + note.chars().count(), MAX_FILE_CHARS);
+            assert!(note.contains(&format!("{}文字で切った", kept.chars().count())));
+        }
     }
 
     /// 共有トークンを平文で外へ送らない。接続先はURLとして解析したスキームとホストで判定する。
