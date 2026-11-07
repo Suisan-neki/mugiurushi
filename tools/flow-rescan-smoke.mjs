@@ -78,9 +78,11 @@ try {
   await page.getByRole('button', { name: '試験の案を作る' }).click(); await send();
   assert.deepEqual(sent.plan[0].answers, [{ question: '院外から使いますか', answer: 'はい' }]);
   await page.locator('[data-test="t-same"]').waitFor();
-  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+  // 連打：2回続けて押しても、確認項目は1つだけ作る。
+  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click({ clickCount: 2, delay: 0 });
   await page.locator('[data-result]').first().waitFor();
   let view = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await page.locator('meta[name=review-token]').getAttribute('content') } })).json();
+  assert.equal(view.workspace.checks.filter(c => c.id.startsWith('flow-')).length, 1, '連打で確認項目を二重に作らない');
   firstCheck = view.workspace.checks.find(c => c.id.startsWith('flow-')).id;
   await page.getByRole('button', { name: '結果を読み直す' }).click();
   await page.locator('main p.note', { hasText: '試験で期待どおりだった項目：担当外の職員の一覧に患者のタスクを出さない' }).waitFor(); // 前提：1回目の確認項目は期待どおり
@@ -106,11 +108,26 @@ try {
   assert.equal(await box.locator('input[type=checkbox]').isDisabled(), false, '新しい案はまだ了承していない');
   assert.doesNotMatch(await box.innerText(), /登録済み/);
   assert.equal(await stepEnabled(4), false);
+  // 部分失敗：確認項目は作れたが、確かめる部分の登録が一度だけ失敗した。やり直すと、作り直さずに続きから登録する。
+  let failOnce = true;
+  await page.route('**/api/v1/change', async route => {
+    if (failOnce && route.request().postDataJSON()?.action?.op === 'set_aspects') { failOnce = false; return route.fulfill({ status: 500, json: { error: '合成の失敗' } }); }
+    return route.continue();
+  });
+  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+  await page.locator('#alert .alert').waitFor();
+  const token2 = await page.locator('meta[name=review-token]').getAttribute('content');
+  let mid = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': token2 } })).json();
+  const half = mid.workspace.checks.filter(c => c.id.startsWith('flow-') && c.id !== firstCheck);
+  assert.deepEqual(half.map(c => c.aspects.length), [0], '前提：確認項目だけ作られて部分は未登録');
+  assert.equal(await stepEnabled(4), false, '登録しきれていない試験を了承済みにしない');
   await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
   await page.locator('[data-result]').first().waitFor();
   view = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await page.locator('meta[name=review-token]').getAttribute('content') } })).json();
   const flows = view.workspace.checks.filter(c => c.id.startsWith('flow-'));
-  assert.equal(flows.length, 2, '新しい案は新しい確認項目として登録する');
+  assert.equal(flows.length, 2, '新しい案は新しい確認項目として登録し、部分失敗のやり直しで作り直さない');
+  assert.equal(flows.find(c => c.id !== firstCheck).id, half[0].id, 'やり直しは同じ確認項目の続きから登録する');
+  assert.equal(flows.find(c => c.id !== firstCheck).aspects.length, 1);
   assert.match(flows.find(c => c.id !== firstCheck).text, /記録に user=A action=add が残る/);
   assert.deepEqual(await page.locator('[data-result]').evaluateAll(r => r.map(x => x.getAttribute('data-result'))), ['pending'], '前の案の観測を新しい案の結果にしない');
   assert.doesNotMatch(await page.locator('main').innerText(), /期待どおりだった項目/);
