@@ -264,9 +264,13 @@ function resultOf(/** @type {any} */ f) {
   const ev = applicable.find((/** @type {any} */ e) => e.id === cv.selected_evidence) || applicable[0];
   // 状態は事例の記録の値だけで決める。実行していない試験を成功・失敗として表示しない。
   // 実行したが判定条件に対応づけていない部分などは「未確認」とし、理由（mugiurushi の状態の説明）を添える。
-  const st = !ev ? 'pending' : a?.status === 'observed' ? 'ok' : a?.status === 'contradicted' ? 'ng' : 'unconfirmed';
+  // 設定画面で同梱の試験（固定した版のレシピ）を選ぶと、確認項目の参照先がその版へ変わる。照合したコミットと違う版の結果は、
+  // このコミットの不足・期待どおりとして数えない。
+  const bound = state.view.workspace?.checks?.find((/** @type {any} */ c) => c.id === checkId)?.source?.commit;
+  const otherVersion = !!bound && bound !== state.source.commit;
+  const st = otherVersion ? 'other_version' : !ev ? 'pending' : a?.status === 'observed' ? 'ok' : a?.status === 'contradicted' ? 'ng' : 'unconfirmed';
   const linked = (a?.trial_checks || []).length > 0;
-  return { state: st, checkId, test, aspect: a, linked, record: ev ? `試行 ${ev.run_id}` : '—' };
+  return { state: st, checkId, test, aspect: a, linked, boundCommit: bound, record: ev ? `試行 ${ev.run_id}` : '—' };
 }
 /** 抜粋の表示用に、Markdownの強調記号と余分な空白を外す。 */
 function plain(/** @type {string} */ text) { return (text || '').replace(/\*\*/g, '').replace(/(^|\s)\*(?=\s|$)/g, '$1・').replace(/\s+・?\s*$/, '').replace(/\s+/g, ' ').trim(); }
@@ -274,8 +278,9 @@ function plain(/** @type {string} */ text) { return (text || '').replace(/\*\*/g
 function checkedBy(/** @type {any} */ aspect) {
   return (aspect?.trial_checks || []).map((/** @type {any} */ l) => `- 確かめた判定条件: ${l.id} ${l.label || ''}`.trim());
 }
-const NEXT = { pending: '試験を設定して実行する', unconfirmed: '判定条件に対応づける', ng: '試験の詳細を開く', ok: '試験の詳細を開く' };
+const NEXT = { pending: '試験を設定して実行する', unconfirmed: '判定条件に対応づける', ng: '試験の詳細を開く', ok: '試験の詳細を開く', other_version: '試験の詳細を開く' };
 function stateLabel(/** @type {any} */ res) {
+  if (res.state === 'other_version') return `別の版の試験：確認項目の参照先が ${short(res.boundCommit)} に変わっている（照合したのは ${short(state.source.commit)}）。このコミットの結果としては数えない`;
   if (res.state === 'pending') return res.linked ? '未実行' : '未実行（判定条件への対応づけ前）';
   if (res.state === 'unconfirmed') return `未確認：${res.aspect?.status_label || '状態を読み取れない'}`;
   return res.state === 'ok' ? '期待どおり' : '';
@@ -302,7 +307,7 @@ async function step4() {
         h('tr', {}, h('th', { scope: 'row' }, '試験'), h('td', {}, f.res.test.name)),
         h('tr', {}, h('th', { scope: 'row' }, '手順'), h('td', {}, h('ol', { style: 'margin:0;padding-left:18px' }, f.res.test.steps.map((/** @type {string} */ s) => h('li', {}, s))))),
         h('tr', {}, h('th', { scope: 'row' }, '合格の条件'), h('td', {}, f.res.test.pass.join('／'))),
-        h('tr', {}, h('th', { scope: 'row' }, '結果'), h('td', { style: f.res.state === 'ng' ? 'color:#A3261E;font-weight:700' : '' }, f.res.state === 'pending' ? 'まだ実行していない' : f.res.aspect ? `${f.res.aspect.status_label}。${f.res.aspect.detail || ''}` : '—')),
+        h('tr', {}, h('th', { scope: 'row' }, '結果'), h('td', { style: f.res.state === 'ng' ? 'color:#A3261E;font-weight:700' : '' }, f.res.state === 'other_version' ? stateLabel(f.res) : f.res.state === 'pending' ? 'まだ実行していない' : f.res.aspect ? `${f.res.aspect.status_label}。${f.res.aspect.detail || ''}` : '—')),
         h('tr', {}, h('th', { scope: 'row' }, '記録'), h('td', {}, f.res.record)))),
       h('div', { class: 'actions' }, h('a', { class: 'btn navy', href: workbenchUrl(f.res.checkId) }, NEXT[f.res.state] || '試験の詳細を開く')));
   };
