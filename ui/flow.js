@@ -3,7 +3,7 @@
 // 判定と観測の状態は事例の記録（/api/v1/case）が正。流れの記録（/api/v1/flow）は画面を続けるための控え。
 // AIへ送る内容は、送る前にサーバーが組み立てた内容をそのまま表示し、人が確かめたときだけ送る。
 import { apiRequest as api } from './api.js';
-import { applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate } from './flow-record.js';
+import { applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
 
 /** @param {string} tag @param {Record<string, any>} [attrs] @param {...any} children */
 function h(tag, attrs = {}, ...children) {
@@ -196,7 +196,8 @@ async function step3() {
           h('div', { class: 'side', style: 'background:#fff' }, h('strong', {}, '合格の条件'), h('ul', { style: 'margin:4px 0 0;padding-left:18px' }, t.pass.map((/** @type {string} */ p) => h('li', {}, p))),
             h('div', { class: 'note', style: 'font-size:12px;margin-top:6px' }, `観測：${t.observation_label}`))));
     }),
-    r.plan.not_planned?.length ? h('p', { class: 'note' }, `試験の案にしなかった項目：${r.plan.not_planned.map((/** @type {any} */ n) => `${findings[n.finding_id]?.requirement || n.finding_id}（${n.reason}）`).join('、')}`) : null,
+    r.plan.not_planned?.length ? h('p', { class: 'note', 'data-not-planned': '' }, `AIが試験の案にしなかった項目：${r.plan.not_planned.map((/** @type {any} */ n) => `${findings[n.finding_id]?.requirement || n.finding_id}（AIの理由：${n.reason || '理由の記載なし'}）`).join('、')}`) : null,
+    r.plan.unclassified?.length ? h('p', { class: 'note', 'data-unclassified': '' }, `AIの試験の案に含まれなかった項目（未分類。試験にするか、試験にしない理由は決まっていません）：${r.plan.unclassified.map((/** @type {string} */ id) => findings[id]?.requirement || id).join('、')}`) : null,
     h('div', { class: 'actions' }, btn('了承して確認項目に登録する', () => guarded(async () => {
       if (registering) return; // 連打で同じ試験を二重に登録しない
       if (!person()) throw Error('記録者の名前を「1 照合の準備」で入力してください。');
@@ -319,9 +320,23 @@ async function step4() {
             h('td', {}, f.res.state === 'ng' ? '直す（修正用のプロンプトを作る）' : h('a', { href: workbenchUrl(f.res.checkId) }, NEXT[f.res.state]), h('div', { class: 'note', style: 'font-size:12px' }, f.res.test.name)),
             h('td', { style: 'text-align:center' }, btn('詳細', () => { state.sel = f.id; render(); }, f.id === state.sel ? 'primary' : '')))))))),
       items.filter((/** @type {any} */ f) => f.res.state === 'ok').length ? h('p', { class: 'note' }, `試験で期待どおりだった項目：${items.filter((/** @type {any} */ f) => f.res.state === 'ok').map((/** @type {any} */ f) => f.requirement).join('、')}`) : null,
+      untestedView(),
       h('div', { class: 'actions' }, ng ? btn('修正用のプロンプトを作る', () => go(5), 'primary') : null, btn('結果を読み直す', () => render()))),
     detail));
   showDetail(sel);
+}
+
+/** 試験にしていない候補。未実行（了承して登録した試験をまだ実行していない）や未確認とは分け、合否は付けない。 */
+function untestedView() {
+  const rows = untestedFindings(state.record, testable());
+  if (!rows.length) return null;
+  return h('div', { 'data-untested-section': '' }, h('h3', {}, `試験にしていない候補（${rows.length}件・合否は付けていません）`),
+    h('p', { class: 'note' }, 'この候補は試験で確かめていません。満たしているかどうかは分かりません。'),
+    h('table', {}, h('thead', {}, h('tr', {}, h('th', { scope: 'col', style: 'width:56px' }, '優先度'), h('th', { scope: 'col' }, '項目'), h('th', { scope: 'col', style: 'width:300px' }, '試験にしていない理由'))),
+      h('tbody', {}, rows.map(u => h('tr', { 'data-untested': u.kind },
+        h('td', { style: 'text-align:center' }, prio(u.finding.priority)),
+        h('td', {}, u.finding.requirement),
+        h('td', {}, /** @type {any} */ (UNTESTED)[u.kind], u.reason ? h('div', { class: 'note', style: 'font-size:12px' }, `AIの理由：${u.reason}`) : null))))));
 }
 
 // ---------- 5 修正用のプロンプト ----------
