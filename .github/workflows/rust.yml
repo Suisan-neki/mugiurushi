@@ -109,6 +109,7 @@ jobs:
       - name: Enable the OS sandbox for pinned Chromium
         run: bash .github/scripts/chromium-sandbox.sh
       - run: npm run test:browser
+      - run: npm run test:screen
       - run: npm run test:journey
       - run: npm run test:dialogue
       - run: npm run test:browser-handoff

@@ -1205,6 +1205,8 @@ function browserEvidence(trace) {
   const responses = phase?.browser?.responses || [];
   const watches = browser.responses || [];
   const incompleteText = (phase?.browser?.steps || []).filter(s => !s.completed && typeof s.text === 'string');
+  const exchanges = Array.isArray(phase?.browser?.exchanges) ? phase.browser.exchanges : [];
+  const screens = Array.isArray(phase?.browser?.screens) ? phase.browser.screens : [];
   const readStatus = read => !read ? '記録なし' : !read.performed ? '読み取りを実行できなかった' : read.exit_code == null ? '読み取りの終了状態は記録されていない' : read.exit_code !== 0 ? '読み取りに失敗した' : '読み取りが正常終了した';
   const readDetail = read => h('div', {}, h('p', {}, readStatus(read)),
     read?.detail ? h('p', {}, read.detail) : null,
@@ -1222,6 +1224,14 @@ function browserEvidence(trace) {
       `${p.service} / ${p.database} / ${p.table}（照合: ${p.match_column}、列: ${(p.columns || []).join('、')}）`,
       p.before_actions || before.some(r => r.id === p.id) ? readDetail(before.find(r => r.id === p.id)) : '指定なし', readDetail(reads.find(r => r.id === p.id))]))
       : h('p', {}, 'DBの読み取りは指定されていません。'),
+    h('p', { 'data-screen-record': '' }, h('strong', {}, '画面の構造の記録: '),
+      phase?.browser?.screens_note || (screens.length ? `${screens.length}件を記録した。` : '記録はありません。画面が空だったことを示すものではありません。')),
+    exchanges.length
+      ? disclosure(`操作中のHTTPのやり取り（${exchanges.length}件${phase.browser.exchange_limit ? '。上限に達した後は記録していない' : ''}）`,
+        h('div', { 'data-http-exchanges': '' },
+          h('p', { class: 'note' }, '試験設定での宣言の有無によらず、操作の段階で対象へ送った要求と応答です。本文とクエリ文字列は記録していません。'),
+          observationTable('要求と応答', ['手順', '要求', '応答', '種類'], exchanges.map(e => [e.step, `${e.method} ${e.path}`, `HTTP ${e.status}`, e.resource || '記録なし']))))
+      : h('p', { class: 'note', 'data-http-exchanges': '' }, '操作中のHTTPのやり取りの全件の記録はありません。通信がなかったことを示すものではありません。'),
     h('p', { class: 'note' }, 'DBを指定して読み取った結果です。指定先が意図した保存先であることや、この操作から個々の書き込みまでの経路を証明するものではありません。通信の集計は下の「コンテナの通信と隔離」で確認できます。'));
 }
 function containerObservations(phase) {

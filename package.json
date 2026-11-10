@@ -9,6 +9,7 @@
     "test:app": "node tools/app-smoke.mjs",
     "test:dicom": "node tools/dicom-smoke.mjs",
     "test:browser": "node tools/browser-smoke.mjs",
+    "test:screen": "node tools/screen-smoke.mjs",
     "test:browser-handoff": "node tools/browser-handoff-smoke.mjs",
     "test:result-observations": "node tools/result-observations-smoke.mjs",
     "test:flow": "node tools/flow-smoke.mjs",

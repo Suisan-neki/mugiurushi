@@ -5,7 +5,7 @@ import {pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
 const request=JSON.parse(await fs.readFile(process.argv[2],'utf8'));
 const dir=path.dirname(process.argv[2]), spec=request.spec;
-const report={schema_version:1,run_id:request.run_id,version:'',prepared:false,completed:false,steps:[],responses:[],blocked_requests:0,response_limit:false,detail:'',launch_args:['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader']};
+const report={schema_version:1,run_id:request.run_id,version:'',prepared:false,completed:false,steps:[],responses:[],blocked_requests:0,response_limit:false,exchanges:[],exchange_limit:false,detail:'',launch_args:['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader']};
 if(process.env.EEL_BROWSER_EXTRA_ARGS){const args=JSON.parse(process.env.EEL_BROWSER_EXTRA_ARGS);if(!Array.isArray(args)||args.length>16||args.some(s=>typeof s!=='string'||s.includes('\0')||['--no-sandbox','--disable-setuid-sandbox','--disable-web-security'].includes(s.split('=')[0])))throw Error('ブラウザーの追加引数が不正');report.launch_args.push(...args);}
 let browser, page, secrets={}, masks=[], requests=new Map(), active=null, pending=new Set(), deadline=Date.now()+request.timeout_ms;
 // 停止要求は操作待ちの間にもブラウザを閉じ、Playwrightが起動した子を回収する。
@@ -14,6 +14,71 @@ process.once('SIGTERM',()=>{void closeBrowser();});
 const stopPoll=setInterval(()=>{void fs.stat(path.join(dir,'stop')).then(closeBrowser,()=>{});},50);stopPoll.unref();
 const redact=text=>{let s=String(text);for(const value of Object.values(secrets).filter(v=>typeof v==='string'&&v.length)){s=s.split(value).join('[秘匿]');}return s.slice(0,8192);};
 const replace=s=>s.replaceAll('{{test_value}}',request.test_value);
+// 画面の構造とHTTPのやり取りの記録。入力欄の値・Cookieの値・本文は取らない。
+const HEADER_NAMES=['content-security-policy','strict-transport-security','x-frame-options','x-content-type-options','referrer-policy','cache-control','content-type'];
+const LIMITS={screens:96,frames:32,fields:300,controls:200,links:200,headings:50,text:256,exchanges:500,exchangeBytes:512*1024,header:512,bytes:4*1024*1024};
+const screens=[];let exchangeBytes=0,screenBytes=0,screensTruncated=false,lastDocument=null,lastScreen=null;
+const redactAll=value=>typeof value==='string'?redact(value):Array.isArray(value)?value.map(redactAll):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,redactAll(v)])):value;
+async function headersOf(response){
+ // headers() はSet-Cookieを含まないため、全ヘッダーとSet-Cookieの各値を別に取る。
+ const all=await response.allHeaders().catch(()=>response.headers()),headers={};
+ for(const name of HEADER_NAMES)if(typeof all[name]==='string')headers[name]=redact(all[name]).slice(0,LIMITS.header);
+ const cookies=(await response.headerValues('set-cookie').catch(()=>[])).slice(0,32).map(line=>{
+  const parts=line.split(';').map(x=>x.trim()),flag=n=>parts.slice(1).some(x=>x.toLowerCase()===n),value=n=>parts.slice(1).find(x=>x.toLowerCase().startsWith(n+'='))?.slice(n.length+1)??null;
+  return {name:parts[0].split('=')[0].slice(0,LIMITS.text),secure:flag('secure'),http_only:flag('httponly'),same_site:value('samesite')?.slice(0,16)??null,path:value('path')?.slice(0,LIMITS.text)??null};
+ });
+ return {headers,cookies};
+}
+// ページの中で実行する。DOMの属性だけを読み、valueは読まない。
+function collectFrame(limits){
+ const cut=s=>String(s??'').replace(/\s+/g,' ').trim().slice(0,limits.text),attr=(e,n)=>e.hasAttribute(n)?cut(e.getAttribute(n)):null;
+ const labelOf=e=>{
+  if(e.id){const l=[...document.querySelectorAll('label')].find(x=>x.htmlFor===e.id);if(l)return cut(l.innerText);}
+  const parent=e.closest('label');if(parent)return cut(parent.innerText);
+  if(e.hasAttribute('aria-label'))return cut(e.getAttribute('aria-label'));
+  const by=(e.getAttribute('aria-labelledby')||'').split(/\s+/).map(id=>document.getElementById(id)).filter(Boolean);
+  return by.length?cut(by.map(x=>x.innerText).join(' ')):null;
+ };
+ const pathOf=value=>{try{const u=new URL(value,location.href);return u.origin===location.origin?cut(u.pathname):null;}catch{return null;}};
+ const take=(selector,max)=>{const all=[...document.querySelectorAll(selector)];return [all.slice(0,max),all.length>max];};
+ const [fieldNodes,moreFields]=take('input,select,textarea',limits.fields),[controlNodes,moreControls]=take('button,input[type=submit],input[type=button],input[type=reset]',limits.controls);
+ const [linkNodes,moreLinks]=take('a[href]',limits.links*4),[headingNodes,moreHeadings]=take('h1,h2,h3',limits.headings);
+ const fields=fieldNodes.map(e=>({tag:e.tagName.toLowerCase(),input_type:e.tagName==='INPUT'?cut(e.type):null,name:attr(e,'name'),id:attr(e,'id'),label:labelOf(e),required:!!e.required,readonly:!!e.readOnly,disabled:!!e.disabled,autocomplete:attr(e,'autocomplete'),maxlength:e.hasAttribute('maxlength')&&/^\d{1,9}$/.test(e.getAttribute('maxlength'))?Number(e.getAttribute('maxlength')):null,form_action:e.form&&e.form.hasAttribute('action')?pathOf(e.form.getAttribute('action')):null,form_method:e.form?cut(e.form.method):null}));
+ const controls=controlNodes.map(e=>({tag:e.tagName.toLowerCase(),input_type:e.tagName==='INPUT'?cut(e.type):attr(e,'type'),text:cut(e.tagName==='INPUT'?e.getAttribute('value')||e.getAttribute('aria-label'):e.innerText||e.getAttribute('aria-label'))}));
+ const links=[...new Set(linkNodes.map(e=>pathOf(e.getAttribute('href'))).filter(Boolean))];
+ return {path:cut(location.pathname),title:cut(document.title),headings:headingNodes.map(e=>cut(e.innerText)).filter(Boolean),fields,controls,links:links.slice(0,limits.links),truncated:moreFields||moreControls||moreLinks||moreHeadings||links.length>limits.links};
+}
+async function frameChain(frame){
+ const chain=[];
+ for(let f=frame;f.parentFrame();f=f.parentFrame()){
+  const element=await f.frameElement();
+  chain.unshift(await element.evaluate(e=>{const name=e.getAttribute('name'),id=e.getAttribute('id');let src='';try{src=new URL(e.getAttribute('src')||'',location.href).pathname;}catch{}return (name?`name=${name}`:id?`id=${id}`:`src=${src}`).slice(0,256);}));
+ }
+ return chain;
+}
+// 手順が完了した時点の画面の構造を残す。取れなかった場合も、手順の結果は変えない。
+async function captureScreen(step,record,phase){
+ if(screens.length>=LIMITS.screens||screenBytes>=LIMITS.bytes){screensTruncated=true;return;}
+ const frames=[];let truncated=false;
+ try{
+  const within=ms=>new Promise((_,reject)=>setTimeout(()=>reject(Error('画面の構造の取得が時間内に終わらなかった')),ms));
+  await Promise.race([(async()=>{
+   for(const frame of page.frames()){
+    let origin='';try{origin=new URL(frame.url()).origin;}catch{}
+    if(!request.origins.includes(origin))continue;
+    if(frames.length>=LIMITS.frames){truncated=true;break;}
+    const content=await frame.evaluate(collectFrame,LIMITS);
+    frames.push({chain:await frameChain(frame),path:content.path,title:content.title,headings:content.headings,fields:content.fields,controls:content.controls,links:content.links,truncated:content.truncated});
+   }
+  })(),within(Math.max(1,Math.min(3000,deadline-Date.now())))]);
+ }catch(error){record.detail+='。画面の構造は未取得: '+redact(error.message);return;}
+ const content=redactAll({path:frames[0]?.path??'',title:frames[0]?.title??'',frames:frames.map(({title,...rest})=>rest),document:lastDocument,truncated:truncated||frames.some(f=>f.truncated)});
+ for(const f of content.frames)delete f.truncated;
+ const text=JSON.stringify(content);
+ if(lastScreen&&lastScreen.text===text){screens.push({step:step.id,phase,same_as:lastScreen.key,content:null});return;}
+ if(screenBytes+text.length>LIMITS.bytes){screensTruncated=true;return;}
+ screenBytes+=text.length;lastScreen={text,key:`${phase}:${step.id}`};screens.push({step:step.id,phase,same_as:null,content});
+}
 const save=async(name,data)=>{const temp=path.join(dir,name+'.tmp');await fs.writeFile(temp,JSON.stringify(data),{mode:0o600,flag:'wx'});await fs.rename(temp,path.join(dir,name));};
 function target(t){let scope=page;for(const frame of t.frames||[])scope=scope.frameLocator(frame);const l=t.locator;return l.by==='label'?scope.getByLabel(l.text,{exact:true}):l.by==='role'?scope.getByRole(l.role,{name:l.name,exact:true}):scope.locator(l.selector);}
 function remaining(){const n=deadline-Date.now();if(n<=0)throw Error('ブラウザ試験が待機上限に達した');return Math.min(n,15000);}
@@ -53,7 +118,7 @@ function singleFrame(kind,bytes){
  return body.subarray(0,index);
 }
 async function steps(list,phase){
- for(const step of list){active=step.id;const r={id:step.id,phase,completed:false,text:null,screenshot:null,detail:''};report.steps.push(r);
+ for(const step of list){active=step.id;const r={id:step.id,phase,completed:false,text:null,screenshot:null,detail:'',attribute:null};report.steps.push(r);
   try{const options={timeout:remaining()};
    if(step.action==='goto'){const url=new URL(replace(step.path),request.origin);if(url.origin!==request.origin)throw Error('操作先のオリジンが不一致');await page.goto(url.href,{...options,waitUntil:'domcontentloaded'});}
    else if(step.action==='fill'){const value=step.value.source==='secret'?secrets[step.value.key]:replace(step.value.value);if(typeof value!=='string')throw Error('試験用の認証情報が未設定');const locator=target(step.target);if(step.value.source==='secret')masks.push(locator);await locator.fill(value,options);}
@@ -68,6 +133,7 @@ async function steps(list,phase){
    else if(step.action==='dismiss'){if(phase!=='preparation')throw Error('案内を閉じる操作は準備中だけ利用できる');await dismiss(step,r);}
    else if(step.action==='select'){await target(step.target).selectOption(replace(step.value),options);}
    else if(step.action==='read_text'){const base=target(step.target);const locator=step.contains?base.filter({hasText:replace(step.contains)}):base;await locator.waitFor({...options,state:'visible'});const text=await locator.innerText(options);if(text.length>8192)throw Error('表示の文字列が上限を超えた');r.text=redact(text);}
+   else if(step.action==='read_attribute'){const locator=target(step.target);await locator.waitFor({...options,state:'attached'});const value=await locator.getAttribute(step.name,options);if(value!==null&&value.length>8192)throw Error('属性の値が上限を超えた');r.attribute={present:value!==null,value:value===null?null:redact(value)};}
    else if(step.action==='read_canvas'){
     const {PNG}=await import(pathToFileURL(process.env.EEL_PNGJS_MODULE).href);
     const locator=target(step.target);await locator.waitFor({...options,state:'visible'});
@@ -90,6 +156,7 @@ async function steps(list,phase){
    else throw Error('未対応の操作');
    r.completed=true;r.detail=(r.detail?r.detail+'。':'')+'操作を完了した。保存の成功を示す記録とは別';
    if(step.action!=='read_canvas')await screenshot(step,r,Math.max(1,Math.min(15000,deadline-Date.now())));
+   await captureScreen(step,r,phase);
   }catch(error){
    r.detail=(r.detail?r.detail+'。':'')+redact(error.message);report.detail=`${phase}の手順 ${step.id} を完了できなかった`;
    // 期待する文字を待ち切れなかったとき、対象が一意に見えていれば、その時点の表示を参考記録として残す。
@@ -120,17 +187,26 @@ try{
  page.on('request',r=>requests.set(r,active));
  page.on('requestfinished',r=>requests.delete(r));page.on('requestfailed',r=>requests.delete(r));
  page.on('response',r=>{
-  const p=(async()=>{const request_step=requests.get(r.request());if(!spec.actions.some(s=>s.id===request_step))return;const u=new URL(r.url());if(!request.origins.includes(u.origin))return;for(const w of spec.responses){if(w.path!==u.pathname||w.method!==r.request().method())continue;if(report.responses.length>=200){report.response_limit=true;continue;}const record={watch:w.id,method:r.request().method(),path:u.pathname,status:r.status(),body_match:null,request_step,payload_sha256:null};report.responses.push(record);if(w.contains!=null||w.payload){try{const body=await r.body();if(body.length<=1024*1024){if(w.contains!=null)record.body_match=body.toString('utf8').includes(replace(w.contains));if(w.payload){const payload=w.payload==='dicom_frame'?singleFrame(r.headers()['content-type']||'',body):body;record.payload_sha256=createHash('sha256').update(payload).digest('hex');}}}catch{}}}
+  const p=(async()=>{const request_step=requests.get(r.request());const u=new URL(r.url());if(!request.origins.includes(u.origin))return;
+   const observed=await headersOf(r);
+   try{if(r.request().isNavigationRequest()&&r.frame()===page.mainFrame())lastDocument={status:r.status(),...observed};}catch{}
+   if(!spec.actions.some(s=>s.id===request_step))return;
+   // 件数と合計の大きさの両方に上限を置く。操作器の記録全体が基盤の読み取り上限を超えないようにする。
+   const exchange={step:request_step,method:r.request().method(),path:u.pathname.slice(0,2048),status:r.status(),resource:r.request().resourceType().slice(0,32),...observed},size=JSON.stringify(exchange).length;
+   if(report.exchanges.length>=LIMITS.exchanges||exchangeBytes+size>LIMITS.exchangeBytes)report.exchange_limit=true;
+   else{exchangeBytes+=size;report.exchanges.push(exchange);}
+for(const w of spec.responses){if(w.path!==u.pathname||w.method!==r.request().method())continue;if(report.responses.length>=200){report.response_limit=true;continue;}const record={watch:w.id,method:r.request().method(),path:u.pathname,status:r.status(),body_match:null,request_step,payload_sha256:null,headers:observed.headers};report.responses.push(record);if(w.contains!=null||w.payload){try{const body=await r.body();if(body.length<=1024*1024){if(w.contains!=null)record.body_match=body.toString('utf8').includes(replace(w.contains));if(w.payload){const payload=w.payload==='dicom_frame'?singleFrame(r.headers()['content-type']||'',body):body;record.payload_sha256=createHash('sha256').update(payload).digest('hex');}}}catch{}}}
   })().catch(()=>{});pending.add(p);p.finally(()=>pending.delete(p));
  });
  await page.goto(new URL(spec.start_path,request.origin).href,{timeout:remaining(),waitUntil:'domcontentloaded'});
  report.prepared=await steps(spec.preparation,'preparation');await save('ready.json',report);
  if(report.prepared){while(true){if(await fs.stat(path.join(dir,'stop')).then(()=>true,()=>false))throw Error('停止を要求された');if(await fs.stat(path.join(dir,'continue.json')).then(()=>true,()=>false)){const control=JSON.parse(await fs.readFile(path.join(dir,'continue.json'),'utf8'));if(control.run_id!==report.run_id||control.proceed!==true)throw Error('継続する試行が一致しない');break;}remaining();await new Promise(r=>setTimeout(r,30));}
   // 準備中の通信と、故障後の操作で観測した通信を混ぜない。
-  await Promise.all([...pending]);report.responses=[];requests.clear();report.completed=await steps(spec.actions,'action');
+  await Promise.all([...pending]);report.responses=[];report.exchanges=[];report.exchange_limit=false;exchangeBytes=0;requests.clear();report.completed=await steps(spec.actions,'action');
  }
  await Promise.race([Promise.all([...pending]),new Promise(r=>setTimeout(r,Math.min(2000,Math.max(1,deadline-Date.now()))))]);
 }catch(error){report.detail=redact(error.message);}finally{clearInterval(stopPoll);await closeBrowser();if(!report.detail)report.detail=report.completed?'宣言した操作を完了した。画面・HTTP・DBの記録を別々に確認する':'操作を完了していない';
  if(!await fs.stat(path.join(dir,'ready.json')).then(()=>true,()=>false))await save('ready.json',report);
+ await save('screens-raw.json',{schema_version:1,run_id:report.run_id,screens,truncated:screensTruncated}).catch(()=>{});
  await save('result.json',report);
 }

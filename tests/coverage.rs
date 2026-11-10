@@ -1519,20 +1519,28 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
         summary: String::new(),
         answers: vec![],
         confirm,
+        screen_evidence: None,
     };
     assert!(
-        flow_scan(Some(&config), &store, request(vec![], None)).is_err(),
+        flow_scan(Some(&config), &store, request(vec![], None), None).is_err(),
         "ファイルを選ばない照合は送らない"
     );
     assert!(
         flow_scan(
             Some(&config),
             &store,
-            request(vec!["app/auth.py"; 41], None)
+            request(vec!["app/auth.py"; 41], None),
+            None
         )
         .is_err()
     );
-    let preview = flow_scan(Some(&config), &store, request(vec!["app/auth.py"], None)).unwrap();
+    let preview = flow_scan(
+        Some(&config),
+        &store,
+        request(vec!["app/auth.py"], None),
+        None,
+    )
+    .unwrap();
     assert_eq!(
         preview["payload"]["system"]["excerpts"][0]["ref"],
         "app/auth.py"
@@ -1563,6 +1571,7 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
                 synthetic_only: true,
             }),
         ),
+        None,
     )
     .unwrap();
     assert_eq!(scanned["findings"][0]["priority"], "high");
@@ -1588,8 +1597,9 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
             })
             .collect(),
         confirm,
+        screen_evidence: None,
     };
-    let preview = plan(Some(&config), &store, plan_request(vec!["f-1"], None)).unwrap();
+    let preview = plan(Some(&config), &store, plan_request(vec!["f-1"], None), None).unwrap();
     let sha_plan = preview["payload_sha256"].as_str().unwrap().to_owned();
     let planned = plan(
         Some(&config),
@@ -1601,6 +1611,7 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
                 synthetic_only: true,
             }),
         ),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1609,7 +1620,7 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
     );
     assert_eq!(planned["tests"][0]["observation"], "browser_text");
     // 渡していない候補を含む案は受け取らない（案は f-1 を含むが、渡した候補は f-2 だけ）。
-    let preview = plan(Some(&config), &store, plan_request(vec!["f-2"], None)).unwrap();
+    let preview = plan(Some(&config), &store, plan_request(vec!["f-2"], None), None).unwrap();
     let sha_bad = preview["payload_sha256"].as_str().unwrap().to_owned();
     assert!(
         plan(
@@ -1621,7 +1632,8 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
                     payload_sha256: sha_bad,
                     synthetic_only: true
                 })
-            )
+            ),
+            None
         )
         .is_err()
     );
@@ -1679,4 +1691,160 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
         "app/auth.py"
     );
     assert_eq!(flow_read(&f.directory).unwrap(), saved);
+}
+
+/// 画面の記録は、選んだときだけ照合の入力に入る。渡していない画面を指す候補は受け取らない。
+#[test]
+fn screens_join_the_scan_input_only_when_chosen_and_unsent_screen_references_are_rejected() {
+    use mugiurushi::agent::{Confirm, FlowScanRequest, ScreenInput, flow_scan};
+    use mugiurushi::screen::{ScreenFile, validate};
+    let f = Fixture::new("画面の記録を添える照合");
+    let commit = "a".repeat(40);
+    let snapshots = f.directory.join("snapshots");
+    fs::create_dir_all(snapshots.join("example/clinic")).unwrap();
+    fs::write(
+        snapshots.join(format!("example/clinic/{commit}.json")),
+        serde_json::json!({"schema": 1, "fullName": "example/clinic", "reference": commit, "commit": commit,
+            "inventory": [{"path": "app/auth.py", "mode": "100644"}],
+            "files": {"app/auth.py": "def login(user, password):\n    return True\n"}, "omitted": []})
+        .to_string(),
+    )
+    .unwrap();
+    let store = mugiurushi::understanding::Store::new(snapshots).unwrap();
+    // 架空の画面の記録。ハッシュは基盤が計算する。
+    let content = serde_json::json!({"path": "/login", "title": "架空のログイン", "truncated": false,
+        "document": {"status": 200, "headers": {"cache-control": "no-store"}, "cookies": []},
+        "frames": [{"chain": [], "path": "/login", "headings": ["ログイン"], "controls": [], "links": [],
+            "fields": [{"tag": "input", "input_type": "password", "name": "pin", "id": null, "label": "暗証",
+                "required": true, "readonly": false, "disabled": false, "autocomplete": null, "maxlength": null,
+                "form_action": "/session", "form_method": "post"}]}]});
+    let raw: ScreenFile = serde_json::from_value(
+        serde_json::json!({"schema_version": 1, "run_id": "run-screens",
+        "screens": [
+            {"step": "open", "phase": "action", "same_as": null, "content": content},
+            {"step": "wait", "phase": "action", "same_as": "action:open", "content": null}
+        ]}),
+    )
+    .unwrap();
+    let steps = [("action", "open"), ("action", "wait")]
+        .map(|(p, s)| (p.to_owned(), s.to_owned()))
+        .into();
+    let file = validate(raw, "run-screens", &steps).unwrap();
+    let hash = file.screens[0].sha256.clone();
+    let input = ScreenInput {
+        run_id: "run-screens".into(),
+        image_digests: [("web".to_owned(), format!("sha256:{}", "c".repeat(64)))].into(),
+        file,
+    };
+    let sha = "b".repeat(64);
+    let citation = serde_json::json!({"passage_id": "p:1", "source_id": "provider-security", "document": "架空の指針", "page": "37", "sha256": sha, "origin": "x", "excerpt": "多要素認証"});
+    let finding = |refs: serde_json::Value| {
+        serde_json::json!({"findings": [{"requirement": "二要素認証", "relevance": "likely", "citations": [citation.clone()], "system_refs": refs,
+            "verification": {"method": "browser_attribute", "how": "入力欄の種類を見る"}, "unknowns": [], "patient_data": true, "priority": "high"}],
+            "questions": [], "sources": [], "not_covered": [], "model_call": {"response_id": "fake-scan"}})
+    };
+    let request = |confirm| FlowScanRequest {
+        repository: "example/clinic".into(),
+        commit: commit.clone(),
+        files: vec!["app/auth.py".into()],
+        summary: String::new(),
+        answers: vec![],
+        confirm,
+        screen_evidence: None,
+    };
+    let confirm = |preview: &serde_json::Value| {
+        Some(Confirm {
+            payload_sha256: preview["payload_sha256"].as_str().unwrap().to_owned(),
+            synthetic_only: true,
+        })
+    };
+
+    let good = FakeAgent::start(
+        &f.directory,
+        vec![(
+            "/v1/scan",
+            200,
+            finding(serde_json::json!([
+                "app/auth.py",
+                format!("screen:{hash}#/pin")
+            ])),
+        )],
+    );
+    let config = good.config();
+    // 画面の記録を添えない場合、送る内容に画面とコミットの項目はない。
+    let without = flow_scan(Some(&config), &store, request(None), None).unwrap();
+    assert!(without["payload"]["system"].get("screens").is_none());
+    assert!(without["payload"]["system"].get("code_commit").is_none());
+    // 添える場合は、内容が同じ画面を1件にまとめ、コミットとイメージを別の項目で送る。
+    let with = flow_scan(Some(&config), &store, request(None), Some(&input)).unwrap();
+    let system = &with["payload"]["system"];
+    assert_eq!(system["code_commit"], commit);
+    assert_eq!(system["screens"]["run_id"], "run-screens");
+    assert_eq!(
+        system["screens"]["image_digests"]["web"],
+        format!("sha256:{}", "c".repeat(64))
+    );
+    assert_eq!(system["screens"]["records"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        system["screens"]["records"][0]["ref"],
+        format!("screen:{hash}")
+    );
+    assert_eq!(
+        system["screens"]["records"][0]["frames"][0]["fields"][0]["input_type"],
+        "password"
+    );
+    assert_ne!(with["payload_sha256"], without["payload_sha256"]);
+    assert!(
+        good.received.lock().unwrap().is_empty(),
+        "確認の段階では送らない"
+    );
+    // 確認した内容と、画面を添えずに組み立てた内容は一致しないので送らない。
+    assert!(flow_scan(Some(&config), &store, request(confirm(&with)), None).is_err());
+    let scanned = flow_scan(Some(&config), &store, request(confirm(&with)), Some(&input)).unwrap();
+    assert_eq!(
+        scanned["findings"][0]["basis"],
+        serde_json::json!(["code", "screen"])
+    );
+    assert_eq!(
+        scanned["findings"][0]["verification"]["executable_check"],
+        true
+    );
+    // 画面を添えていない照合で、画面を指す候補が返った場合は受け取らない。
+    assert!(flow_scan(Some(&config), &store, request(confirm(&without)), None).is_err());
+
+    let unsent = FakeAgent::start(
+        &f.directory,
+        vec![(
+            "/v1/scan",
+            200,
+            finding(serde_json::json!([format!("screen:{}", "d".repeat(64))])),
+        )],
+    );
+    let config = unsent.config();
+    let preview = flow_scan(Some(&config), &store, request(None), Some(&input)).unwrap();
+    assert!(
+        flow_scan(
+            Some(&config),
+            &store,
+            request(confirm(&preview)),
+            Some(&input)
+        )
+        .is_err(),
+        "渡していない画面を指す候補は受け取らない"
+    );
+    // コードだけを指す候補の根拠は、コードだけになる。
+    let code_only = FakeAgent::start(
+        &f.directory,
+        vec![("/v1/scan", 200, finding(serde_json::json!(["app/auth.py"])))],
+    );
+    let config = code_only.config();
+    let preview = flow_scan(Some(&config), &store, request(None), Some(&input)).unwrap();
+    let scanned = flow_scan(
+        Some(&config),
+        &store,
+        request(confirm(&preview)),
+        Some(&input),
+    )
+    .unwrap();
+    assert_eq!(scanned["findings"][0]["basis"], serde_json::json!(["code"]));
 }

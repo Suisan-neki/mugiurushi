@@ -869,6 +869,37 @@ fn browser_observes_nginx_and_preserves_screenshots() {
     );
     assert!(trace.containers.as_ref().unwrap().leftovers.is_empty());
     validate_trace(&trace, &result.manifest).unwrap();
+    // 手順ごとの画面の構造は、基盤が検査してから別のファイルへ保存し、記録からは参照だけを持つ。
+    assert_eq!(
+        report.screens.len(),
+        report.steps.len(),
+        "{}",
+        report.screens_note
+    );
+    assert!(
+        report.screens_note.contains("記録した"),
+        "{}",
+        report.screens_note
+    );
+    let browser_directory = result.directory.join("browser");
+    let screens = mugiurushi::screen::load(&browser_directory)
+        .unwrap()
+        .expect("画面の記録");
+    assert_eq!(screens.run_id, report.run_id);
+    assert_eq!(screens.screens[0].sha256, report.screens[0].sha256);
+    assert_eq!(screens.screens[0].sha256.len(), 64);
+    let first = screens.screens[0]
+        .content
+        .as_ref()
+        .expect("最初の画面の内容");
+    assert_eq!(first.path, "/");
+    assert_eq!(first.document.as_ref().map(|d| d.status), Some(200));
+    // 操作器が書いた検査前のファイルは残さない。
+    assert!(
+        !browser_directory
+            .join(mugiurushi::screen::RAW_FILE)
+            .exists()
+    );
 }
 
 #[test]

@@ -74,6 +74,8 @@ pub enum CheckMethod {
     ServerHttp,
     DatabaseRows,
     DatabaseRelation,
+    BrowserAttribute,
+    BrowserHeader,
 }
 impl CheckMethod {
     /// 誰の観測かを示す。対象の報告と基盤の読み出しを同じ扱いにしない。
@@ -87,6 +89,8 @@ impl CheckMethod {
             Self::ServerOutput => "待つプロセス（受信側など）の出力",
             Self::ContainerLog => "コンテナのログ（対象の応答とは別）",
             Self::BrowserCanvas => "canvasの画面写真から読み出した画素",
+            Self::BrowserAttribute => "試験用ブラウザで読み出した要素の属性",
+            Self::BrowserHeader => "試験操作中にブラウザが受け取ったHTTP応答のヘッダー",
             Self::ServerHttp => "基盤が試験用サーバーへ直接要求して読み出した応答",
             Self::BrowserText => "試験用ブラウザで読み出した表示の文字列",
             Self::BrowserResponse => "試験操作中にブラウザが受け取ったHTTP応答",
@@ -388,6 +392,8 @@ pub fn validate(
         match (check.method, check.expect) {
             (CheckMethod::DatabaseRelation, Expectation::Equal | Expectation::NotEqual)
                 if check.text.is_none() && check.target.is_none() && check.relation.is_some() => {}
+            (CheckMethod::BrowserAttribute, Expectation::Equal | Expectation::NotEqual)
+                if text_ok && check.relation.is_none() => {}
             (CheckMethod::ExitCode, Expectation::Zero | Expectation::Nonzero)
                 if check.text.is_none() => {}
             (CheckMethod::ExitCode, _) => {
@@ -424,6 +430,8 @@ pub fn validate(
                 | CheckMethod::ServerHttp
                 | CheckMethod::BrowserText
                 | CheckMethod::BrowserResponse
+                | CheckMethod::BrowserAttribute
+                | CheckMethod::BrowserHeader
                 | CheckMethod::DatabaseRows
                 | CheckMethod::DatabaseRelation
         ) && !has_containers
@@ -807,7 +815,7 @@ pub fn evaluate(spec: &TrialSpec, test_value: &str, out: &Outputs) -> Vec<CheckR
                     }
                     None => (Observed::NotObserved, "コンテナの記録がない".into()),
                 },
-                CheckMethod::BrowserCanvas | CheckMethod::ServerHttp | CheckMethod::BrowserText | CheckMethod::BrowserResponse | CheckMethod::DatabaseRows | CheckMethod::DatabaseRelation =>
+                CheckMethod::BrowserCanvas | CheckMethod::ServerHttp | CheckMethod::BrowserText | CheckMethod::BrowserResponse | CheckMethod::BrowserAttribute | CheckMethod::BrowserHeader | CheckMethod::DatabaseRows | CheckMethod::DatabaseRelation =>
                     crate::browser::evaluate(check, out.containers, &text),
                 CheckMethod::DatabaseQuery => {
                     match out.containers.and_then(|c| c.database_query.as_deref()) {
@@ -1032,6 +1040,17 @@ pub fn describe(check: &TrialCheck, spec: &TrialSpec) -> String {
         CheckMethod::ServerHttp => format!("サーバーの直接読取の応答に{text}{has}"),
         CheckMethod::BrowserText => format!("画面の文字列に{text}{has}"),
         CheckMethod::BrowserResponse => format!("ブラウザが受け取ったHTTP応答に{text}{has}"),
+        CheckMethod::BrowserAttribute => format!(
+            "画面の要素の属性の値{}",
+            match check.expect {
+                Expectation::Equal => format!("が{text}と等しい"),
+                Expectation::NotEqual => format!("が{text}と等しくない"),
+                _ => format!("に{text}{has}"),
+            }
+        ),
+        CheckMethod::BrowserHeader => {
+            format!("ブラウザが受け取ったHTTP応答のヘッダーに{text}{has}")
+        }
         CheckMethod::DatabaseRows => format!("DBから直接読み出した行に{text}{has}"),
         CheckMethod::DatabaseRelation => format!(
             "DBから読み出した2つの行の指定した列が{}",

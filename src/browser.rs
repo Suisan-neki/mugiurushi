@@ -68,6 +68,11 @@ pub enum Action {
         min_levels: u16,
         min_pixels: u32,
     },
+    /// 要素の属性を読む。要素が見つからなければ手順は未完了になる。
+    ReadAttribute {
+        target: Target,
+        name: String,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,6 +156,15 @@ pub struct StepRecord {
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas: Option<CanvasRead>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribute: Option<AttributeRead>,
+}
+/// 属性の読み取り。要素はあるが属性がない場合は `present: false`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttributeRead {
+    pub present: bool,
+    pub value: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseRecord {
@@ -162,6 +176,9 @@ pub struct ResponseRecord {
     pub request_step: Option<String>,
     #[serde(default)]
     pub payload_sha256: Option<String>,
+    /// 記録の対象にしている名前の応答ヘッダー。変更前の記録にはない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserReport {
@@ -178,6 +195,17 @@ pub struct BrowserReport {
     #[serde(default)]
     pub response_limit: bool,
     pub detail: String,
+    /// 操作中の、対象のオリジンへのHTTPのやり取りの全件。本文とクエリ文字列は持たない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exchanges: Vec<crate::screen::ExchangeRecord>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exchange_limit: bool,
+    /// 手順ごとの画面の構造の記録（`browser/screens.json`）への参照。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screens: Vec<crate::screen::ScreenRef>,
+    /// 画面の構造を記録できたか。変更前の記録では空で、画面が空だったことは意味しない。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub screens_note: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseRead {
@@ -218,6 +246,22 @@ fn target(t: &Target) -> bool {
             }
             Locator::Css { selector } => bounded(selector),
         }
+}
+/// 読み取る属性の名前。HTMLの属性名に使う文字だけを受け付ける。
+pub fn attribute_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b':')
+}
+/// 応答ヘッダーの判定条件の文（`<名前>: <値の一部>`）を、記録の対象の名前と値に分ける。
+pub fn header_condition(text: &str) -> Option<(&'static str, &str)> {
+    let (name, value) = text.split_once(':')?;
+    let name = name.trim().to_ascii_lowercase();
+    crate::screen::HEADER_NAMES
+        .iter()
+        .find(|known| **known == name)
+        .map(|known| (*known, value.trim()))
 }
 pub fn sql_identifier(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
@@ -275,6 +319,7 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
                 contains,
             } => target(t) && contains.as_ref().is_none_or(|s| bounded(s)),
             Action::Select { target: t, value } => target(t) && bounded(value),
+            Action::ReadAttribute { target: t, name } => target(t) && attribute_name(name),
             Action::ReadCanvas {
                 target: t,
                 min_levels,
@@ -391,6 +436,10 @@ fn unavailable(run_id: &str, detail: &str) -> BrowserReport {
         blocked_requests: 0,
         response_limit: false,
         detail: detail.into(),
+        exchanges: vec![],
+        exchange_limit: false,
+        screens: vec![],
+        screens_note: String::new(),
     }
 }
 pub struct Session {
@@ -524,6 +573,18 @@ impl Session {
                 if report.schema_version != 1 || report.run_id != self.report.run_id {
                     return Err(invalid("ブラウザ記録の試行が一致しません"));
                 }
+                let actions = report
+                    .steps
+                    .iter()
+                    .filter(|s| s.phase == "action")
+                    .map(|s| s.id.as_str())
+                    .collect();
+                crate::screen::validate_exchanges(&report.exchanges, &actions)?;
+                for response in &report.responses {
+                    if let Some(headers) = &response.headers {
+                        crate::screen::validate_headers(headers)?;
+                    }
+                }
                 return Ok(Some(report));
             }
             if self.child.try_wait()?.is_some() {
@@ -555,6 +616,14 @@ impl Session {
             if let Some(report) = self.wait("result.json")? {
                 self.report = report;
             }
+            let steps = self
+                .report
+                .steps
+                .iter()
+                .map(|s| (s.phase.clone(), s.id.clone()))
+                .collect();
+            (self.report.screens, self.report.screens_note) =
+                crate::screen::adopt(&self.directory, &self.report.run_id, &steps);
         }
         Ok(self.report.clone())
     }
@@ -718,6 +787,95 @@ pub fn evaluate(
                 .as_ref()
                 .map(|t| result(t.contains(text)))
                 .unwrap_or_else(missing)
+        }
+        CheckMethod::BrowserAttribute => {
+            let Some(read) = phase.browser.as_ref().and_then(|b| {
+                b.steps
+                    .iter()
+                    .find(|s| s.id == target && s.phase == "action" && s.completed)
+                    .and_then(|s| s.attribute.as_ref())
+            }) else {
+                return missing();
+            };
+            let positive = matches!(check.expect, Expectation::Contains | Expectation::Equal);
+            let matched = read
+                .value
+                .as_deref()
+                .is_some_and(|value| match check.expect {
+                    Expectation::Equal | Expectation::NotEqual => value == text,
+                    _ => value.contains(text),
+                });
+            (
+                if matched == positive {
+                    Observed::Pass
+                } else {
+                    Observed::Fail
+                },
+                match (&read.value, matched) {
+                    (None, _) => format!("手順 {target} の要素に、指定した属性がない"),
+                    (Some(_), true) => {
+                        format!("手順 {target} で読んだ属性の値は条件の文字列に合う")
+                    }
+                    (Some(_), false) => {
+                        format!("手順 {target} で読んだ属性の値は条件の文字列に合わない")
+                    }
+                },
+            )
+        }
+        CheckMethod::BrowserHeader => {
+            let (Some(browser), Some((name, part))) = (&phase.browser, header_condition(text))
+            else {
+                return missing();
+            };
+            if browser.response_limit {
+                return (
+                    Observed::NotObserved,
+                    "HTTP応答の記録上限に達し、全ての応答を照合できない".into(),
+                );
+            }
+            let responses = browser
+                .responses
+                .iter()
+                .filter(|r| {
+                    r.watch == target
+                        && r.request_step.as_ref().is_some_and(|id| {
+                            browser
+                                .steps
+                                .iter()
+                                .any(|s| &s.id == id && s.phase == "action")
+                        })
+                })
+                .collect::<Vec<_>>();
+            // ヘッダーを記録していない応答（変更前の記録）は、ヘッダーがないとは扱わない。
+            if responses.is_empty() || responses.iter().any(|r| r.headers.is_none()) {
+                return missing();
+            }
+            let values = responses
+                .iter()
+                .map(|r| {
+                    r.headers
+                        .as_ref()
+                        .and_then(|h| h.get(name))
+                        .is_some_and(|value| value.contains(part))
+                })
+                .collect::<Vec<_>>();
+            if values.iter().any(|v| *v != values[0]) {
+                return (
+                    Observed::NotObserved,
+                    "同じ観測先の応答で、ヘッダーの条件が相反する".into(),
+                );
+            }
+            (
+                if values[0] == (check.expect == Expectation::Contains) {
+                    Observed::Pass
+                } else {
+                    Observed::Fail
+                },
+                format!(
+                    "観測 {target} の応答に、条件に合うヘッダー {name} が{}",
+                    if values[0] { "ある" } else { "ない" }
+                ),
+            )
         }
         CheckMethod::BrowserResponse => {
             let Some(browser) = &phase.browser else {

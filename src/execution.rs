@@ -341,6 +341,19 @@ pub fn validate_recipe(recipe: &Recipe) -> io::Result<()> {
                             && matches!(s.action, crate::browser::Action::ReadText { .. })
                     })
                 }),
+                CheckMethod::BrowserAttribute => recipe.browser.as_ref().is_some_and(|b| {
+                    b.actions.iter().any(|s| {
+                        Some(s.id.as_str()) == check.target.as_deref()
+                            && matches!(s.action, crate::browser::Action::ReadAttribute { .. })
+                    })
+                }),
+                // 記録の対象にしていない名前のヘッダーは観測できないので、条件として受け付けない。
+                CheckMethod::BrowserHeader => recipe.browser.as_ref().is_some_and(|b| {
+                    crate::browser::header_condition(check.text.as_deref().unwrap_or("")).is_some()
+                        && b.responses
+                            .iter()
+                            .any(|w| Some(w.id.as_str()) == check.target.as_deref())
+                }),
                 CheckMethod::BrowserResponse => recipe.browser.as_ref().is_some_and(|b| {
                     let text = check.text.as_deref().unwrap_or("");
                     let valid_expression = text.strip_prefix("sha256=").is_some_and(|s| {

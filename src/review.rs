@@ -279,8 +279,15 @@ fn handle_request(
                 return result_response(stream, result);
             }
             ("POST", "/api/v1/agent/flow-scan") => {
-                let result = parse_body::<crate::agent::FlowScanRequest>(&request.body)
-                    .and_then(|r| crate::agent::flow_scan(app.agent.as_ref(), &app.store, r));
+                let result =
+                    parse_body::<crate::agent::FlowScanRequest>(&request.body).and_then(|r| {
+                        let screens = r
+                            .screen_evidence
+                            .as_deref()
+                            .map(|id| crate::agent::screens_for(directory, id))
+                            .transpose()?;
+                        crate::agent::flow_scan(app.agent.as_ref(), &app.store, r, screens.as_ref())
+                    });
                 return result_response(stream, result);
             }
             ("POST", "/api/v1/agent/ask") => {
@@ -289,8 +296,14 @@ fn handle_request(
                 return result_response(stream, result);
             }
             ("POST", "/api/v1/agent/plan") => {
-                let result = parse_body::<crate::agent::PlanRequest>(&request.body)
-                    .and_then(|r| crate::agent::plan(app.agent.as_ref(), &app.store, r));
+                let result = parse_body::<crate::agent::PlanRequest>(&request.body).and_then(|r| {
+                    let screens = r
+                        .screen_evidence
+                        .as_deref()
+                        .map(|id| crate::agent::screens_for(directory, id))
+                        .transpose()?;
+                    crate::agent::plan(app.agent.as_ref(), &app.store, r, screens.as_ref())
+                });
                 return result_response(stream, result);
             }
             ("GET", "/api/v1/flow") => {

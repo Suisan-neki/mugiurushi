@@ -26,6 +26,7 @@ pub mod review;
 pub mod review_execution;
 pub mod review_report;
 pub mod run_record;
+pub mod screen;
 pub mod server;
 pub mod system_diagram;
 pub mod trial;
