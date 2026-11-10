@@ -17,6 +17,7 @@ const HELP: &str = "mugiurushi
   case backup CASE_DIR --output NEW_JSON
   case restore NEW_CASE_DIR BACKUP_JSON
   case compare CASE_DIR --before EVIDENCE_ID --after EVIDENCE_ID --condition CHECK_ID
+  case draft CASE_DIR --evidence EVIDENCE_ID
   repo prepare NEW_DIR RECIPE_JSON
   environment inspect|run|show|compare ...
 

@@ -1,0 +1,104 @@
+// 架空の画面で、操作の記録が手順になり、その手順を既存の実行器で再実行できることを確かめる。
+// 「人の操作」は、ブラウザへ実際の入力イベントを送って作る。実在のアプリでの結果の代わりにはしない。
+import assert from 'node:assert/strict';
+import {createServer} from 'node:http';
+import {spawn} from 'node:child_process';
+import {mkdtemp, readFile, writeFile, mkdir, stat, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {resolve, join} from 'node:path';
+import {chromium} from 'playwright';
+import {record} from './browser-recorder.mjs';
+
+const root = resolve(import.meta.dirname, '..');
+const temp = await mkdtemp(join(tmpdir(), 'eel-recorder-'));
+const saved = [];
+const html = body => `<!doctype html><html lang="ja"><body>${body}</body></html>`;
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://127.0.0.1');
+  if (url.pathname === '/save') { let body = ''; for await (const chunk of req) body += chunk; saved.push(JSON.parse(body)); res.end('ok'); return; }
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  if (url.pathname === '/side') { res.end(html('<label>メモ<input name="memo"></label>')); return; }
+  if (url.pathname !== '/') { res.writeHead(404); res.end(); return; }
+  res.end(html(`<label>利用者<input id="user"></label><label>パスワード<input type="password" id="pass"></label><button id="login">ログイン</button>
+    <div id="form" hidden><label>記録<textarea name="note"></textarea></label><select name="ward" aria-label="病棟"><option>東</option><option>西</option></select>
+      <button id="detail-1">詳細</button><button id="detail-2">詳細</button><iframe name="side" src="/side"></iframe><button id="save">保存</button><p id="result"></p></div>
+    <script>
+      let opened = 0;
+      document.querySelector('#login').onclick = () => { document.querySelector('#form').hidden = false; };
+      document.querySelector('#detail-2').onclick = () => { opened++; };
+      document.querySelector('#save').onclick = async () => {
+        const memo = document.querySelector('iframe').contentDocument.querySelector('input').value;
+        await (await fetch('/save', {method: 'POST', body: JSON.stringify({user: document.querySelector('#user').value, pass: document.querySelector('#pass').value, note: document.querySelector('textarea').value, ward: document.querySelector('select').value, memo, opened})})).text();
+        document.querySelector('#result').textContent = '保存した';
+      };
+    </script>`));
+});
+await new Promise(r => server.listen(0, '127.0.0.1', r));
+const origin = `http://127.0.0.1:${server.address().port}`;
+const secrets = {user: 'clerk-secret-id-5521', pass: 'pw-secret-xyz-9907'};
+const checks = [];
+let browser;
+try {
+  browser = await chromium.launch({channel: 'chromium', headless: true, chromiumSandbox: true, timeout: 15000, executablePath: process.env.EEL_BROWSER_EXECUTABLE || undefined});
+  const version = browser.version();
+  const context = await browser.newContext();
+  // 秘密値ファイルにあるのは利用者名だけ。パスワードは欄の種類から秘密値として扱われる。
+  const recorder = await record(context, {origins: [origin], secrets: {user: secrets.user}, testValue: 'EEL-TEST-REC', runId: 'recording-synthetic'});
+  const page = await context.newPage();
+  await page.goto(origin + '/');
+  // ここからが「人の操作」。
+  await page.locator('#user').click(); await page.keyboard.type(secrets.user);
+  await page.locator('#pass').click(); await page.keyboard.type(secrets.pass);
+  await page.getByRole('button', {name: 'ログイン'}).click();
+  await page.locator('textarea').click(); await page.keyboard.type('所見 EEL-TEST-REC');
+  await page.locator('select').selectOption('西');
+  await page.frameLocator('iframe').locator('input').click(); await page.keyboard.type('メモ EEL-TEST-REC');
+  await page.locator('#detail-2').click();
+  await page.locator('#save').click();
+  await page.locator('#result').filter({hasText: '保存した'}).waitFor();
+  const recorded = await recorder.stop();
+  await browser.close(); browser = null;
+
+  assert.deepEqual(recorded.problems, []);
+  const text = JSON.stringify(recorded);
+  assert.ok(!text.includes(secrets.pass) && !text.includes(secrets.user), '秘密値が記録に残っている');
+  assert.ok(!text.includes('EEL-TEST-REC'), '記録のときの試験値が残っている');
+  const brief = recorded.actions.map(s => [s.action, s.target.frames.join(' '), s.target.locator.by, s.target.locator.text || s.target.locator.name || s.target.locator.selector, s.value?.source ? `${s.value.source}:${s.value.key ?? s.value.value}` : s.value ?? '']);
+  assert.deepEqual(brief, [
+    ['fill', '', 'label', '利用者', 'secret:user'],
+    ['fill', '', 'label', 'パスワード', 'secret:pass'],
+    ['click', '', 'role', 'ログイン', ''],
+    ['fill', '', 'label', '記録', 'literal:所見 {{test_value}}'],
+    ['select', '', 'label', '病棟', '西'],
+    ['fill', 'iframe[name="side"]', 'label', 'メモ', 'literal:メモ {{test_value}}'],
+    // 同じ名前のボタンが2つあるので、役割では一意にならず、IDのCSSになる。
+    ['click', '', 'css', '#detail-2', ''],
+    ['click', '', 'role', '保存', ''],
+  ]);
+  assert.ok(recorded.actions.every(s => /^[a-z0-9_-]{1,64}$/.test(s.id)) && new Set(recorded.actions.map(s => s.id)).size === recorded.actions.length);
+  assert.deepEqual(Object.keys(recorded.provenance.steps), recorded.actions.map(s => s.id));
+  assert.ok(Object.values(recorded.provenance.steps).every(b => b.source === 'operation_recording' && b.run_id === 'recording-synthetic' && b.rules === 1));
+  checks.push('操作をラベル・役割・CSSの順で一意に指し、秘密値と試験値を記録に残さない');
+
+  // 記録した手順を、既存の実行器でそのまま再実行する。別の試験値で、同じ操作の結果になる。
+  const dir = join(temp, 'replay'); await mkdir(dir);
+  const secretsPath = join(temp, 'secrets.json'); await writeFile(secretsPath, JSON.stringify(secrets), {mode: 0o600});
+  const run_id = 'synthetic-replay', test_value = 'EEL-TEST-REPLAY-7', timeout_ms = 20000 * Number(process.env.EEL_BROWSER_SMOKE_TIMEOUT_SCALE || 1);
+  const spec = {service: 'web', tls: false, start_path: '/', expected_version: version, preparation: [], actions: [...recorded.actions, {id: 'done', action: 'read_text', target: {locator: {by: 'css', selector: '#result'}}, contains: '保存した'}], responses: [], database: []};
+  await writeFile(join(dir, 'request.json'), JSON.stringify({schema_version: 1, spec, run_id, test_value, origin, origins: [origin], timeout_ms}));
+  saved.length = 0;
+  const child = spawn(process.execPath, [join(root, 'tools/browser-runner.mjs'), join(dir, 'request.json')], {env: {...process.env, EEL_PLAYWRIGHT_MODULE: join(root, 'node_modules/playwright/index.mjs'), EEL_BROWSER_SECRETS_FILE: secretsPath}, stdio: 'pipe'});
+  let stderr = ''; child.stderr.on('data', d => stderr += d); child.stdout.resume();
+  const waitFile = async name => { const until = Date.now() + timeout_ms + 10000; while (Date.now() < until) { if (await stat(join(dir, name)).then(() => true, () => false)) return JSON.parse(await readFile(join(dir, name), 'utf8')); await new Promise(r => setTimeout(r, 20)); } throw Error(name + ' が出ない\n' + stderr); };
+  const ready = await waitFile('ready.json'); assert.equal(ready.prepared, true, ready.detail);
+  await writeFile(join(dir, 'continue.json'), JSON.stringify({run_id, proceed: true}));
+  const result = await waitFile('result.json'); child.kill();
+  assert.equal(result.completed, true, result.detail + '\n' + JSON.stringify(result.steps.filter(s => !s.completed)));
+  assert.deepEqual(saved, [{user: secrets.user, pass: secrets.pass, note: '所見 ' + test_value, ward: '西', memo: 'メモ ' + test_value, opened: 1}]);
+  checks.push('記録した手順を既存の実行器で再実行でき、別の試験値で同じ操作の結果になる');
+  console.log(JSON.stringify({version, steps: recorded.actions.length, checks}));
+} finally {
+  if (browser) await browser.close().catch(() => {});
+  server.close();
+  await rm(temp, {recursive: true, force: true});
+}

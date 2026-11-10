@@ -135,6 +135,109 @@ impl DatabaseEngine {
         Some(client)
     }
 
+    /// 複数のSQLを1回のクライアントの起動で順に実行する。各SQLは1行を出力する想定。
+    pub fn run_many(
+        self,
+        env: &BTreeMap<String, String>,
+        database: &str,
+        statements: &[String],
+    ) -> Option<Client> {
+        let mut client = self.base(env)?;
+        match self {
+            Self::Mariadb => {
+                client.argv.extend(strings(&[
+                    "--batch",
+                    "--skip-column-names",
+                    "--database",
+                    database,
+                    "--execute",
+                ]));
+                client.argv.push(statements.join(";"));
+            }
+            Self::Postgres => {
+                client.argv.push(format!("--dbname={database}"));
+                for statement in statements {
+                    client.argv.push("--command".into());
+                    client.argv.push(statement.clone());
+                }
+            }
+            Self::Other => return None,
+        }
+        Some(client)
+    }
+
+    /// 探索のときに接続するデータベース。MariaDBは表をスキーマ付きで指すので、どこからでも読める。
+    pub fn scan_database(self, env: &BTreeMap<String, String>) -> String {
+        match self {
+            Self::Postgres => env
+                .get("POSTGRES_DB")
+                .cloned()
+                .unwrap_or_else(|| Self::postgres_user(env)),
+            Self::Mariadb | Self::Other => "information_schema".into(),
+        }
+    }
+
+    /// 利用者の表の、文字列型の列を「スキーマ・表・列」のタブ区切りで並べるSQL。
+    pub fn text_columns_sql(self) -> &'static str {
+        match self {
+            Self::Postgres => {
+                "SELECT table_schema, table_name, column_name FROM information_schema.columns \
+                 WHERE table_schema NOT IN ('pg_catalog','information_schema') \
+                 AND data_type IN ('character varying','character','text') \
+                 ORDER BY table_schema, table_name, ordinal_position"
+            }
+            Self::Mariadb | Self::Other => {
+                "SELECT table_schema, table_name, column_name FROM information_schema.columns \
+                 WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys') \
+                 AND data_type IN ('char','varchar','tinytext','text','mediumtext','longtext') \
+                 ORDER BY table_schema, table_name, ordinal_position"
+            }
+        }
+    }
+
+    /// 1つの表を1回走査し、列ごと・値ごとに「その値を含む行の数」と「その値と等しい行の数」を数えるSQL。
+    /// 出力は1行で、先頭に目印、続いて列の順・値の順に、含む数・等しい数が並ぶ。値は16進で渡す。
+    pub fn count_sql(
+        self,
+        tag: usize,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        values: &[String],
+    ) -> String {
+        let counts = columns
+            .iter()
+            .flat_map(|column| {
+                values.iter().map(move |value| {
+                    let literal = self.literal(value.as_bytes());
+                    // MariaDBでは、列の文字コードが値と違うと比較が失敗する。列を変換してから比べる。
+                    let column = match self {
+                        Self::Postgres => self.quote(column),
+                        Self::Mariadb | Self::Other => {
+                            format!("CONVERT({} USING utf8mb4)", self.quote(column))
+                        }
+                    };
+                    match self {
+                        Self::Postgres => format!(
+                            "COUNT(*) FILTER (WHERE POSITION({literal} IN {column}) > 0),\
+                             COUNT(*) FILTER (WHERE {column} = {literal})"
+                        ),
+                        Self::Mariadb | Self::Other => format!(
+                            "COALESCE(SUM(INSTR({column}, {literal}) > 0), 0),\
+                             COALESCE(SUM({column} = {literal}), 0)"
+                        ),
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "SELECT {tag},{counts} FROM {}.{}",
+            self.quote(schema),
+            self.quote(table)
+        )
+    }
+
     /// 検査済みの識別子を囲む。呼び出し側が `browser::sql_identifier` で文字を限定する。
     pub fn quote(self, identifier: &str) -> String {
         match self {
@@ -256,6 +359,50 @@ mod tests {
         assert_eq!(
             DatabaseEngine::Postgres.rows_sql("t", "m", &["a".into()], "x'; DROP TABLE t;--"),
             "SELECT \"a\" FROM \"t\" WHERE \"m\"::text = convert_from(decode('78273b2044524f50205441424c4520743b2d2d','hex'),'UTF8') LIMIT 100"
+        );
+    }
+
+    #[test]
+    fn scan_statements_count_each_column_and_value_in_one_pass() {
+        let columns = ["a".to_owned(), "b".to_owned()];
+        let values = ["x".to_owned(), "y'".to_owned()];
+        assert_eq!(
+            DatabaseEngine::Mariadb.count_sql(3, "app", "t", &columns[..1], &values),
+            "SELECT 3,COALESCE(SUM(INSTR(CONVERT(`a` USING utf8mb4), CONVERT(0x78 USING utf8mb4)) > 0), 0),\
+             COALESCE(SUM(CONVERT(`a` USING utf8mb4) = CONVERT(0x78 USING utf8mb4)), 0),\
+             COALESCE(SUM(INSTR(CONVERT(`a` USING utf8mb4), CONVERT(0x7927 USING utf8mb4)) > 0), 0),\
+             COALESCE(SUM(CONVERT(`a` USING utf8mb4) = CONVERT(0x7927 USING utf8mb4)), 0) FROM `app`.`t`"
+        );
+        let pg = DatabaseEngine::Postgres.count_sql(0, "public", "t", &columns[..1], &values[..1]);
+        assert_eq!(
+            pg,
+            "SELECT 0,COUNT(*) FILTER (WHERE POSITION(convert_from(decode('78','hex'),'UTF8') IN \"a\") > 0),\
+             COUNT(*) FILTER (WHERE \"a\" = convert_from(decode('78','hex'),'UTF8')) FROM \"public\".\"t\""
+        );
+        let statements = ["SELECT 1".to_owned(), "SELECT 2".to_owned()];
+        let many = DatabaseEngine::Mariadb
+            .run_many(&env(&[]), "information_schema", &statements)
+            .unwrap();
+        assert_eq!(many.argv.last().unwrap(), "SELECT 1;SELECT 2");
+        let many = DatabaseEngine::Postgres
+            .run_many(&env(&[]), "records", &statements)
+            .unwrap();
+        assert_eq!(
+            &many.argv[many.argv.len() - 4..],
+            ["--command", "SELECT 1", "--command", "SELECT 2"]
+        );
+        assert!(
+            DatabaseEngine::Other
+                .run_many(&env(&[]), "d", &statements)
+                .is_none()
+        );
+        assert_eq!(
+            DatabaseEngine::Mariadb.scan_database(&env(&[])),
+            "information_schema"
+        );
+        assert_eq!(
+            DatabaseEngine::Postgres.scan_database(&env(&[("POSTGRES_DB", "records")])),
+            "records"
         );
     }
 

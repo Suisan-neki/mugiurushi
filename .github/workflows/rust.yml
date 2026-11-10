@@ -110,6 +110,9 @@ jobs:
         run: bash .github/scripts/chromium-sandbox.sh
       - run: npm run test:browser
       - run: npm run test:screen
+      - run: npm run test:recorder
+      - name: Count hand-written recipe items
+        run: node tools/recipe-count.mjs examples/openemr-browser/soap-recipe.json examples/openemr-browser/recipe.json
       - run: npm run test:journey
       - run: npm run test:dialogue
       - run: npm run test:browser-handoff

@@ -144,6 +144,15 @@ pub struct ExchangeRecord {
     pub resource: String,
     pub headers: BTreeMap<String, String>,
     pub cookies: Vec<CookieAttributes>,
+    /// 追跡する値のうち、要求（本文とクエリ文字列）に含まれていたもの。値そのものは持たない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_slots: Vec<String>,
+    /// 追跡する値のうち、応答の本文に含まれていたもの。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_slots: Vec<String>,
+    /// 値を追跡する試行で、応答の本文を読めなかった。`response_slots` の空は、値がないことを意味しない。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub response_unread: bool,
 }
 
 fn short(value: &str, max: usize) -> io::Result<()> {
@@ -250,6 +259,18 @@ pub fn validate_exchanges(
         short(&exchange.resource, 32)?;
         validate_headers(&exchange.headers)?;
         validate_cookies(&exchange.cookies)?;
+        if exchange.request_slots.len() + exchange.response_slots.len() > 128 {
+            return Err(invalid(
+                "HTTPのやり取りの、値の出現の記録が上限を超えています",
+            ));
+        }
+        for slot in exchange
+            .request_slots
+            .iter()
+            .chain(&exchange.response_slots)
+        {
+            short(slot, 64)?;
+        }
     }
     Ok(())
 }
@@ -561,6 +582,9 @@ mod tests {
             resource: "document".into(),
             headers: [(header.to_owned(), "x".to_owned())].into(),
             cookies: vec![],
+            request_slots: vec![],
+            response_slots: vec![],
+            response_unread: false,
         };
         let actions: BTreeSet<&str> = ["save"].into();
         assert!(validate_exchanges(&[exchange("save", "content-type")], &actions).is_ok());

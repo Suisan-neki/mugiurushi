@@ -29,6 +29,7 @@ pub mod run_record;
 pub mod screen;
 pub mod server;
 pub mod system_diagram;
+pub mod tracking;
 pub mod trial;
 pub mod understanding;
 pub mod user_trial;

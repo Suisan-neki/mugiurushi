@@ -310,6 +310,16 @@ pub fn validate_recipe(recipe: &Recipe) -> io::Result<()> {
             recipe.containers.is_some(),
             relative,
         )?;
+        if let Some(provenance) = recipe.browser.as_ref().and_then(|b| b.provenance.as_ref())
+            && let Some(id) = provenance
+                .checks
+                .keys()
+                .find(|id| !trial.checks.iter().any(|c| &c.id == *id))
+        {
+            return Err(invalid(format!(
+                "出所の記録が、レシピにない判定条件 {id} を指しています"
+            )));
+        }
         for check in &trial.checks {
             use crate::trial::CheckMethod;
             let valid = match check.method {
@@ -1088,6 +1098,18 @@ pub fn execute_with_dependencies(
             .collect(),
         _ => vec![],
     };
+    // 値の追跡。操作の前のDBの状態を調べておき、前からあった行を後で除く。
+    let tracked = recipe
+        .browser
+        .as_ref()
+        .map(|spec| crate::tracking::values_of(spec, &test_value))
+        .unwrap_or_default();
+    let scan_before = match (session.as_ref(), browser.as_ref()) {
+        (Some(session), Some(browser)) if !tracked.is_empty() && browser.prepared() => {
+            Some(session.scan_database(&tracked))
+        }
+        _ => None,
+    };
     let mut fault = match &recipe.trial {
         Some(spec) => Some(crate::trial::apply_fault(spec, &work)?),
         None => None,
@@ -1332,6 +1354,18 @@ pub fn execute_with_dependencies(
         _ => vec![],
     };
     let database_query = session.as_ref().and_then(|s| s.query_database());
+    // 操作した試行だけ、操作の後のDBを調べる。操作していない試行の探索は意味を持たない。
+    let scan_after = match session.as_ref() {
+        Some(session)
+            if !tracked.is_empty()
+                && browser_report
+                    .as_ref()
+                    .is_some_and(|r| r.prepared && r.steps.iter().any(|s| s.phase == "action")) =>
+        {
+            Some(session.scan_database(&tracked))
+        }
+        _ => None,
+    };
     let acted = browser_report
         .as_ref()
         .is_some_and(|r| r.prepared && r.steps.iter().any(|s| s.phase == "action"));
@@ -1351,6 +1385,17 @@ pub fn execute_with_dependencies(
         phase.database_reads = database_reads;
         phase.database_reads_before = database_reads_before;
         phase.http_reads = http_reads;
+        if !tracked.is_empty() {
+            phase.value_trace = Some(crate::tracking::trace(
+                &tracked,
+                scan_before.as_ref(),
+                scan_after.as_ref(),
+                phase.browser.as_ref(),
+                &phase.services,
+            ));
+            phase.database_scan_before = scan_before;
+            phase.database_scan = scan_after;
+        }
     }
     let leftovers = match session.as_mut() {
         Some(session) => match session.cleanup() {

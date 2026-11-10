@@ -196,6 +196,14 @@ pub struct ContainerPhase {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_reads: Vec<crate::http_probe::HttpRead>,
     pub detail: String,
+    /// 追跡する値を、操作の前後にDBの文字列型の列から探した結果。記録のみで、判定には使わない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_scan_before: Option<crate::tracking::DatabaseScan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_scan: Option<crate::tracking::DatabaseScan>,
+    /// 追跡した値ごとの、DB・HTTP・画面・ログでの出現。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_trace: Option<crate::tracking::ValueTrace>,
 }
 
 /// 基盤から対象への接続を表す接続元の名前。ブラウザ操作器・HTTP操作・準備確認など。
@@ -1195,7 +1203,41 @@ impl Session {
         })
     }
 
-    /// MariaDBの読取専用照会。対象の試験値に一致する行だけを読む。
+    /// 追跡する値を、DBの文字列型の列すべてから探す。読取専用の照会だけを行う。
+    pub fn scan_database(
+        &self,
+        values: &[crate::tracking::TrackedValue],
+    ) -> crate::tracking::DatabaseScan {
+        use crate::tracking::{DatabaseScan, Executed};
+        let Some(service) = self
+            .services
+            .iter()
+            .find(|s| s.spec.role == ServiceRole::Database)
+        else {
+            return DatabaseScan::not_performed("データベースの役割のコンテナがない");
+        };
+        if !inspect_running(&service.container).unwrap_or(false) {
+            return DatabaseScan::not_performed("DBが停止しており、探索できない");
+        }
+        let mut scan = crate::tracking::scan(
+            service.spec.engine,
+            &service.spec.env,
+            values,
+            crate::tracking::SCAN_BUDGET,
+            |client| {
+                let output = docker(&exec_args(&service.container, client))?;
+                Ok(Executed {
+                    success: output.status.success(),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                })
+            },
+        );
+        scan.service = service.spec.name.clone();
+        scan
+    }
+
+    /// 試験値に一致する行だけを、読取専用の照会で読む。
     pub fn read_database(
         &self,
         probe: &crate::browser::DatabaseProbe,
@@ -1347,6 +1389,9 @@ impl Session {
             database_reads: vec![],
             database_reads_before: vec![],
             http_reads: vec![],
+            database_scan_before: None,
+            database_scan: None,
+            value_trace: None,
             detail: if leftovers.is_empty() {
                 "試行用のコンテナ・ネットワーク・ボリュームをこの試行だけで使っている".into()
             } else {

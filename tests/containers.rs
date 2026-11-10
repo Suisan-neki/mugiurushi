@@ -1308,3 +1308,191 @@ fn a_postgres_container_without_the_engine_setting_is_not_read_as_zero_rows() {
     );
     assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
 }
+
+fn tracked(slot: &str, value: &str) -> mugiurushi::tracking::TrackedValue {
+    mugiurushi::tracking::TrackedValue {
+        slot: slot.into(),
+        value: value.into(),
+        step: None,
+        template: "{{test_value}}".into(),
+    }
+}
+
+/// 探索の結果を、表・列・値の出所・含む行の数・等しい行の数の組にする。
+fn found(scan: &mugiurushi::tracking::DatabaseScan) -> Vec<(String, String, String, u64, u64)> {
+    let mut hits: Vec<_> = scan
+        .hits
+        .iter()
+        .map(|h| {
+            (
+                h.table.clone(),
+                h.column.clone(),
+                h.slot.clone(),
+                h.rows,
+                h.exact_rows,
+            )
+        })
+        .collect();
+    hits.sort();
+    hits
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn postgres_scan_finds_where_a_value_went_without_being_told_the_schema() {
+    use mugiurushi::database::DatabaseEngine;
+    if !docker_available() {
+        return;
+    }
+    let mut session = Session::start("pg-scan", &postgres(DatabaseEngine::Postgres)).unwrap();
+    assert!(session.all_ready());
+    let container = container_named("pg-scan", "db");
+    let values = [
+        tracked("test_value", "EEL-TEST-SCAN-1"),
+        tracked("note", "所見 EEL-TEST-SCAN-1-02"),
+    ];
+    psql(
+        &container,
+        "CREATE TABLE visit (id serial PRIMARY KEY, reason text, note varchar(200), amount integer);\
+         CREATE TABLE audit (entry text);\
+         CREATE TABLE empty_table (x text);\
+         CREATE TABLE \"Odd Name\" (x text)",
+    );
+    // 操作の前の状態では、どこにも値がない。
+    let before = session.scan_database(&values);
+    assert!(before.performed, "{}", before.detail);
+    assert!(before.hits.is_empty());
+    assert_eq!(before.engine, DatabaseEngine::Postgres);
+    assert_eq!(
+        (before.service.as_str(), before.database.as_str()),
+        ("db", "records")
+    );
+    assert!(before.tables_scanned >= 3 && before.columns_scanned >= 4);
+    // 識別子に空白のある表は調べず、調べなかったことを残す。
+    assert!(
+        before.skipped.iter().any(|s| s.contains("Odd Name")),
+        "{:?}",
+        before.skipped
+    );
+
+    psql(
+        &container,
+        "INSERT INTO visit (reason, note, amount) VALUES ('EEL-TEST-SCAN-1', '所見 EEL-TEST-SCAN-1-02', 7);\
+         INSERT INTO audit (entry) VALUES ('INSERT note=所見 EEL-TEST-SCAN-1-02 by clerk'), ('unrelated')",
+    );
+    let after = session.scan_database(&values);
+    assert!(after.performed && !after.truncated, "{}", after.detail);
+    assert_eq!(
+        found(&after),
+        [
+            // 記録の中に値を含むだけの列は、等しい行が0件になる。
+            ("audit".into(), "entry".into(), "note".into(), 1, 0),
+            ("audit".into(), "entry".into(), "test_value".into(), 1, 0),
+            ("visit".into(), "note".into(), "note".into(), 1, 1),
+            ("visit".into(), "note".into(), "test_value".into(), 1, 0),
+            ("visit".into(), "reason".into(), "test_value".into(), 1, 1),
+        ]
+    );
+    assert_eq!(
+        mugiurushi::tracking::new_hits(Some(&before), &after).len(),
+        5
+    );
+    // DBを止めた後は探索を実行できず、値がなかったとは記録しない。
+    assert!(session.stop_database().unwrap());
+    let stopped = session.scan_database(&values);
+    assert!(!stopped.performed && stopped.hits.is_empty());
+    assert!(stopped.detail.contains("停止"), "{}", stopped.detail);
+    assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn mariadb_scan_finds_where_a_value_went_without_being_told_the_schema() {
+    if !docker_available() {
+        return;
+    }
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("MYSQL_ROOT_PASSWORD".into(), "eel-root-trial".into());
+    let spec = ContainerSpec {
+        services: vec![Service {
+            name: "db".into(),
+            image: MARIADB.into(),
+            role: ServiceRole::Database,
+            expose: 3306,
+            env,
+            volumes: vec![],
+            web_build: None,
+            engine: Default::default(),
+            command: vec![],
+            ready: ReadyCheck::Exec {
+                args: [
+                    "/usr/local/bin/healthcheck.sh",
+                    "--su-mysql",
+                    "--connect",
+                    "--innodb_initialized",
+                ]
+                .map(String::from)
+                .to_vec(),
+            },
+            ready_timeout_ms: 120000,
+        }],
+        egress: Egress::Blocked,
+    };
+    let mut session = Session::start("maria-scan", &spec).unwrap();
+    assert!(session.all_ready());
+    let container = container_named("maria-scan", "db");
+    let sql = |statement: &str| {
+        let output = Command::new("docker")
+            .args([
+                "exec",
+                "--env",
+                "MYSQL_PWD=eel-root-trial",
+                &container,
+                "mariadb",
+                "--user=root",
+                "-e",
+                statement,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    sql("CREATE DATABASE clinic CHARACTER SET utf8mb4; \
+         CREATE TABLE clinic.visit (id INT AUTO_INCREMENT PRIMARY KEY, reason VARCHAR(200), note TEXT, amount INT); \
+         CREATE TABLE clinic.audit (entry LONGTEXT); \
+         CREATE TABLE clinic.legacy (memo VARCHAR(200)) CHARACTER SET latin1");
+    let values = [
+        tracked("test_value", "EEL-TEST-SCAN-1"),
+        tracked("note", "所見 EEL-TEST-SCAN-1-02"),
+    ];
+    let before = session.scan_database(&values);
+    assert!(before.performed, "{}", before.detail);
+    assert!(before.hits.is_empty(), "{:?}", before.hits);
+    sql(
+        "INSERT INTO clinic.visit (reason, note, amount) VALUES ('EEL-TEST-SCAN-1', '所見 EEL-TEST-SCAN-1-02', 7); \
+         INSERT INTO clinic.audit (entry) VALUES ('INSERT note=所見 EEL-TEST-SCAN-1-02 by clerk'); \
+         INSERT INTO clinic.legacy (memo) VALUES ('EEL-TEST-SCAN-1')",
+    );
+    let after = session.scan_database(&values);
+    assert!(after.performed && !after.truncated, "{}", after.detail);
+    assert_eq!(
+        found(&after),
+        [
+            ("audit".into(), "entry".into(), "note".into(), 1, 0),
+            ("audit".into(), "entry".into(), "test_value".into(), 1, 0),
+            // 文字コードが異なる表でも、英数字の値は見つかる。
+            ("legacy".into(), "memo".into(), "test_value".into(), 1, 1),
+            ("visit".into(), "note".into(), "note".into(), 1, 1),
+            ("visit".into(), "note".into(), "test_value".into(), 1, 0),
+            ("visit".into(), "reason".into(), "test_value".into(), 1, 1),
+        ],
+        "調べなかった表: {:?}",
+        after.skipped
+    );
+    assert!(after.hits.iter().all(|h| h.schema == "clinic"));
+    assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+}

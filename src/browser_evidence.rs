@@ -146,6 +146,7 @@ mod tests {
             steps: vec![StepRecord {
                 canvas: None,
                 attribute: None,
+                visible_slots: vec![],
                 id: "saved".into(),
                 phase: "action".into(),
                 completed: true,

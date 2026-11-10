@@ -134,6 +134,15 @@ pub struct BrowserSpec {
     pub http_reads: Vec<crate::http_probe::Probe>,
     #[serde(default)]
     pub rejection: Option<RejectionWatch>,
+    /// 入力した試験値が、DB・HTTP・画面・ログのどこに現れたかを記録する。記録のみで、判定には使わない。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub track_values: bool,
+    /// 入力の手順ごとに異なる試験値を割り当て、どの欄の値がどこに現れたかを区別できるようにする。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub value_per_step: bool,
+    /// 観測から作った項目（手順、応答の観測先、DBの読み出し先、判定条件）の出所。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<crate::tracking::Provenance>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanvasRead {
@@ -158,6 +167,9 @@ pub struct StepRecord {
     pub canvas: Option<CanvasRead>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribute: Option<AttributeRead>,
+    /// 追跡する値のうち、この手順が完了した時点で画面に表示されていたもの。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible_slots: Vec<String>,
 }
 /// 属性の読み取り。要素はあるが属性がない場合は `present: false`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +296,14 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
         return Err(invalid(
             "ブラウザの操作先、固定した版、手順の上限を確認してください",
         ));
+    }
+    if spec.value_per_step && !spec.track_values {
+        return Err(invalid(
+            "手順ごとの試験値は、値の追跡を有効にした試験でだけ使えます",
+        ));
+    }
+    if let Some(provenance) = &spec.provenance {
+        crate::tracking::validate_provenance(provenance, spec)?;
     }
     let mut ids = std::collections::BTreeSet::new();
     for s in spec.preparation.iter().chain(&spec.actions) {
@@ -484,7 +504,11 @@ impl Session {
                 ]
             })
             .collect::<Vec<_>>();
-        let config = serde_json::json!({"schema_version":1,"spec":spec,"run_id":run_id,"test_value":test_value,"origin":origin,"origins":origins,"timeout_ms":timeout_ms});
+        // 追跡する値と、手順ごとの試験値を操作器へ渡す。追跡しない試験では空で、従来と同じ動作になる。
+        let tracked = crate::tracking::values_of(spec, test_value);
+        let config = serde_json::json!({"schema_version":1,"spec":spec,"run_id":run_id,"test_value":test_value,"origin":origin,"origins":origins,"timeout_ms":timeout_ms,
+            "tracked": tracked.iter().map(|t| serde_json::json!({"slot": t.slot, "value": t.value})).collect::<Vec<_>>(),
+            "step_values": crate::tracking::step_values(spec, test_value)});
         write_json_new(&directory.join("request.json"), &config)?;
         fs::write(
             directory.join("runner.mjs"),
