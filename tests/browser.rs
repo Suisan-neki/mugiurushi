@@ -694,3 +694,35 @@ fn records_saved_before_screens_and_exchanges_still_load_and_keep_their_shape() 
     let browser = serde_json::to_string(&spec()).unwrap();
     assert!(!browser.contains("read_attribute"));
 }
+
+#[test]
+fn the_relay_cut_fault_and_the_cut_point_must_be_declared_together() {
+    let recipe = |fault: &str, relay: serde_json::Value| {
+        let mut containers = serde_json::to_value(containers()).unwrap();
+        containers["relay"] = relay;
+        let value = json!({
+            "schema_version":1,"check_id":"c",
+            "source":{"repository":"example/app","commit":"a".repeat(40),"path":"app.py","line":1,"end_line":1},
+            "runtime":"browser","entrypoint":"/","args":[],"input":{},
+            "criterion":{"assertion":"eel.trial","subject":"c"},"timeout_ms":5000,
+            "trial":{"schema_version":1,"fault":fault,"storage":null,"readback":null,"checks":[
+                {"id":"shown","scope":"表示","method":"browser_text","expect":"contains","target":"message","text":"完了"}]},
+            "containers":containers,
+            "browser":serde_json::to_value(spec()).unwrap()
+        });
+        serde_json::from_value::<mugiurushi::execution::Recipe>(value)
+            .map_err(std::io::Error::other)
+            .and_then(|r| mugiurushi::execution::validate_recipe(&r))
+    };
+    let record_only = json!({"service":"db","protocol":"mysql"});
+    let with_cut = json!({"service":"db","protocol":"mysql",
+        "cut":{"shape":"0123456789abcdef","occurrence":1,"phase":"before_forward"}});
+    // 記録だけの中継は、どの故障とも組み合わせられる。
+    recipe("normal", record_only.clone()).unwrap();
+    recipe("database_stopped", record_only.clone()).unwrap();
+    recipe("relay_cut", with_cut.clone()).unwrap();
+    // 切る時点のない切断の故障と、切断の故障ではない試験での切る時点は、どちらも拒否する。
+    assert!(recipe("relay_cut", record_only).is_err());
+    assert!(recipe("normal", with_cut.clone()).is_err());
+    assert!(recipe("database_stopped", with_cut).is_err());
+}

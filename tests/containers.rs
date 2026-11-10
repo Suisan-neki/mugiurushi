@@ -120,6 +120,7 @@ fn recipe(
         containers: Some(ContainerSpec {
             services,
             egress: Default::default(),
+            relay: None,
         }),
         browser: None,
         http: Some(HttpOp {
@@ -187,6 +188,7 @@ fn blocked_egress_keeps_the_target_from_reaching_outside() {
     let spec = ContainerSpec {
         services: vec![nginx("web", ServiceRole::App)],
         egress: Egress::Blocked,
+        relay: None,
     };
     let mut session = Session::start("egress-blocked", &spec).unwrap();
     assert!(session.all_ready());
@@ -251,6 +253,7 @@ fn traffic_between_targets_and_failures_are_recorded() {
             nginx("back", ServiceRole::Other),
         ],
         egress: Egress::Blocked,
+        relay: None,
     };
     let mut session = Session::start("traffic", &spec).unwrap();
     assert!(session.all_ready());
@@ -293,6 +296,7 @@ fn tag_without_digest_is_rejected() {
     let mut spec = ContainerSpec {
         services: vec![nginx("web", ServiceRole::App)],
         egress: Default::default(),
+        relay: None,
     };
     spec.services[0].image = "nginx:1.27.4-alpine".into();
     assert!(validate_spec(&spec).is_err());
@@ -1170,6 +1174,7 @@ fn postgres(engine: mugiurushi::database::DatabaseEngine) -> ContainerSpec {
             ready_timeout_ms: 60000,
         }],
         egress: Egress::Blocked,
+        relay: None,
     }
 }
 
@@ -1437,6 +1442,7 @@ fn mariadb_scan_finds_where_a_value_went_without_being_told_the_schema() {
             ready_timeout_ms: 120000,
         }],
         egress: Egress::Blocked,
+        relay: None,
     };
     let mut session = Session::start("maria-scan", &spec).unwrap();
     assert!(session.all_ready());
@@ -1495,4 +1501,272 @@ fn mariadb_scan_finds_where_a_value_went_without_being_told_the_schema() {
     );
     assert!(after.hits.iter().all(|h| h.schema == "clinic"));
     assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+}
+
+fn mariadb_with_relay(cut: Option<mugiurushi::relay::CutPoint>) -> ContainerSpec {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("MYSQL_ROOT_PASSWORD".into(), "eel-root-trial".into());
+    ContainerSpec {
+        services: vec![Service {
+            name: "db".into(),
+            image: MARIADB.into(),
+            role: ServiceRole::Database,
+            expose: 3306,
+            env,
+            volumes: vec![],
+            web_build: None,
+            engine: Default::default(),
+            command: vec![],
+            ready: ReadyCheck::Exec {
+                args: [
+                    "/usr/local/bin/healthcheck.sh",
+                    "--su-mysql",
+                    "--connect",
+                    "--innodb_initialized",
+                ]
+                .map(String::from)
+                .to_vec(),
+            },
+            ready_timeout_ms: 120000,
+        }],
+        egress: Egress::Blocked,
+        relay: Some(RelaySetting {
+            service: "db".into(),
+            protocol: mugiurushi::relay::Protocol::Mysql,
+            cut,
+        }),
+    }
+}
+
+/// DBのコンテナの中のクライアントでSQLを実行する。`through_relay` のときは、対象と同じ名前解決で中継を通る。
+fn maria(container: &str, through_relay: bool, statement: &str) -> std::process::Output {
+    let mut command = Command::new("docker");
+    command.args([
+        "exec",
+        "--env",
+        "MYSQL_PWD=eel-root-trial",
+        container,
+        "mariadb",
+        "--user=root",
+    ]);
+    if through_relay {
+        command.args(["--host=db", "--port=3306", "--protocol=tcp", "--skip-ssl"]);
+    }
+    command.args(["--batch", "--skip-column-names", "-e", statement]);
+    command.output().expect("docker exec")
+}
+
+fn use_built_binary_as_relay() {
+    // 試験の実行ファイルではなく、ビルドした基盤の実行ファイルを中継として動かす。
+    // SAFETY: この試験ファイルの中で、同じ値を設定するだけである。
+    unsafe { std::env::set_var("EEL_RELAY_BINARY", env!("CARGO_BIN_EXE_mugiurushi")) };
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn relay_records_what_the_target_sent_to_the_database() {
+    use mugiurushi::relay::StatementClass;
+    if !docker_available() {
+        return;
+    }
+    use_built_binary_as_relay();
+    let values = vec![mugiurushi::relay::Tracked {
+        slot: "note".into(),
+        value: "EEL-TEST-RELAY-1".into(),
+    }];
+    let mut session =
+        Session::start_tracking("relay-rec", &mariadb_with_relay(None), values).unwrap();
+    assert!(session.all_ready());
+    let container = container_named("relay-rec", "db");
+    // 基盤が段階を知らせる前の文は、数えない。対象の起動時の初期化にあたる。
+    let early = maria(&container, true, "CREATE DATABASE before_marking");
+    assert!(
+        early.status.success(),
+        "{}",
+        String::from_utf8_lossy(&early.stderr)
+    );
+    session.mark_relay_phase("action").unwrap();
+    let output = maria(
+        &container,
+        true,
+        "CREATE DATABASE clinic; \
+         CREATE TABLE clinic.visit (id INT AUTO_INCREMENT PRIMARY KEY, note TEXT); \
+         INSERT INTO clinic.visit (note) VALUES ('EEL-TEST-RELAY-1'); \
+         BEGIN; INSERT INTO clinic.visit (note) VALUES ('second'); COMMIT; \
+         SELECT COUNT(*) FROM clinic.visit",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2");
+    let phase = session.snapshot();
+    assert!(
+        phase.statements_note.contains("記録した"),
+        "{}",
+        phase.statements_note
+    );
+    // クライアントが自分で送る文もあるので、試験で送った文を種類と表で探す。
+    let sent: Vec<_> = phase
+        .statements
+        .iter()
+        .filter(|s| {
+            s.table.as_deref() == Some("visit")
+                || matches!(
+                    s.class,
+                    StatementClass::Begin | StatementClass::Commit | StatementClass::Ddl
+                )
+        })
+        .collect();
+    assert!(phase.statements.iter().all(|s| s.phase == "action"));
+    // 読み出しは記録に残さず、種類ごとの数にだけ入る。
+    assert!(
+        phase
+            .statements
+            .iter()
+            .all(|s| s.class != StatementClass::Select)
+    );
+    assert!(
+        phase.statement_totals["select"] >= 1,
+        "{:?}",
+        phase.statement_totals
+    );
+    assert_eq!(
+        phase.statement_totals["ddl"], 2,
+        "段階を知らせる前の文は数えない"
+    );
+    assert_eq!(phase.statement_totals["insert"], 2);
+    let view: Vec<_> = sent
+        .iter()
+        .map(|s| {
+            (
+                s.class,
+                s.reply.as_deref(),
+                s.in_transaction,
+                s.commit_point,
+                s.slots.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        view,
+        [
+            (StatementClass::Ddl, Some("ok"), Some(false), true, 0),
+            (StatementClass::Ddl, Some("ok"), Some(false), true, 0),
+            // 自動コミットの書き込みは、その応答で確定する。追跡する値を含む文には目印が付く。
+            (StatementClass::Insert, Some("ok"), Some(false), true, 1),
+            (StatementClass::Begin, Some("ok"), Some(true), false, 0),
+            // トランザクションの中の書き込みは、COMMITの応答まで確定しない。
+            (StatementClass::Insert, Some("ok"), Some(true), false, 0),
+            (StatementClass::Commit, Some("ok"), Some(false), true, 0),
+        ],
+        "{:?}",
+        phase.statements
+    );
+    // 同じ形の文は、値が違っても同じハッシュになり、回数で区別できる。
+    let inserts: Vec<_> = sent
+        .iter()
+        .filter(|s| s.class == StatementClass::Insert)
+        .collect();
+    assert_eq!(inserts[0].shape, inserts[1].shape);
+    assert_eq!((inserts[0].occurrence, inserts[1].occurrence), (1, 2));
+    assert_eq!(
+        inserts[0].shape,
+        mugiurushi::relay::shape("INSERT INTO clinic.visit (note) VALUES ('anything')")
+    );
+    // SQLの本文と値は、記録に残らない。
+    let text = serde_json::to_string(&phase.statements).unwrap();
+    assert!(!text.contains("EEL-TEST-RELAY-1") && !text.contains("second"));
+    // 既存の接続の集計も、同じ中継の記録から作れる。
+    assert!(
+        phase
+            .traffic
+            .iter()
+            .any(|t| t.to == "db" && t.connections >= 1),
+        "{:?}",
+        phase.traffic
+    );
+    assert!(
+        !phase.traffic_note.contains("読み取れない行"),
+        "{}",
+        phase.traffic_note
+    );
+    assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn relay_cuts_at_the_chosen_point_and_the_database_state_depends_on_the_point() {
+    use mugiurushi::relay::{CutPhase, CutPoint};
+    if !docker_available() {
+        return;
+    }
+    use_built_binary_as_relay();
+    let insert = "INSERT INTO clinic.visit (note) VALUES ('cut-here')";
+    let shape = mugiurushi::relay::shape(insert);
+    // 時点ごとに、対象から見た結果と、DBに残った行の数を確かめる。
+    for (label, phase, client_succeeds, rows) in [
+        // DBへ送る前に切る。対象は失敗を受け取り、DBには残らない。
+        ("before", CutPhase::BeforeForward, false, "0"),
+        // DBへ送った後、応答を返す前に切る。対象は失敗を受け取るが、DBには残っている。
+        ("no-reply", CutPhase::AfterForwardBeforeReply, false, "1"),
+        // 応答を返した直後に切る。対象は成功を受け取り、DBにも残っている。
+        ("after", CutPhase::AfterReply, true, "1"),
+    ] {
+        let trial = format!("relay-cut-{label}");
+        let spec = mariadb_with_relay(Some(CutPoint {
+            shape: shape.clone(),
+            occurrence: 1,
+            phase,
+        }));
+        let mut session = Session::start(&trial, &spec).unwrap();
+        assert!(session.all_ready());
+        let container = container_named(&trial, "db");
+        // 準備は中継を通さない。中継が数える文に入らない。
+        let setup = maria(
+            &container,
+            false,
+            "CREATE DATABASE clinic; CREATE TABLE clinic.visit (id INT AUTO_INCREMENT PRIMARY KEY, note TEXT)",
+        );
+        assert!(
+            setup.status.success(),
+            "{}",
+            String::from_utf8_lossy(&setup.stderr)
+        );
+        session.mark_relay_phase("action").unwrap();
+        let output = maria(&container, true, insert);
+        assert_eq!(
+            output.status.success(),
+            client_succeeds,
+            "{label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let count = maria(&container, false, "SELECT COUNT(*) FROM clinic.visit");
+        assert_eq!(
+            String::from_utf8_lossy(&count.stdout).trim(),
+            rows,
+            "{label}"
+        );
+        let recorded = session.snapshot();
+        let cut: Vec<_> = recorded
+            .statements
+            .iter()
+            .filter(|s| s.cut.is_some())
+            .collect();
+        assert_eq!(cut.len(), 1, "{label}: {:?}", recorded.statements);
+        assert_eq!(cut[0].cut, Some(phase));
+        assert_eq!(cut[0].table.as_deref(), Some("visit"));
+        // DBへ送る前に切った文には、DBの応答がない。送った後に切った文では、中継はDBの成功の応答を見ている。
+        assert_eq!(
+            cut[0].reply.as_deref(),
+            if phase == CutPhase::BeforeForward {
+                None
+            } else {
+                Some("ok")
+            },
+            "{label}"
+        );
+        assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+    }
 }

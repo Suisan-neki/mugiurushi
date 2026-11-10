@@ -28,11 +28,14 @@ pub enum TrialFault {
     DatabaseUnreachable,
     VolumeReadOnly,
     HttpRejected,
+    /// 対象とDBの間の中継が、指定した文の決まった時点で接続を切る。
+    RelayCut,
 }
 impl TrialFault {
     pub fn label(self) -> &'static str {
         match self {
             Self::HttpRejected => "宣言したHTTP要求を試験用サーバーで拒否する",
+            Self::RelayCut => "対象とDBの間の接続を、指定した文の途中で切る",
             Self::Normal => "故障なし（通常時）",
             Self::StorageReadOnly => "保存先を書き込み不可にする",
             Self::StorageIsDirectory => "保存先に同名のディレクトリを置く",
@@ -517,6 +520,11 @@ pub fn apply_fault(spec: &TrialSpec, work: &Path) -> io::Result<(String, bool)> 
             false,
         )),
         (TrialFault::Normal, _) => Ok(("故障は加えていない".into(), true)),
+        // 切ったかどうかは、試行の後に中継の記録で確かめる。記録がなければ、故障を適用できなかった試行になる。
+        (TrialFault::RelayCut, _) => Ok((
+            "対象とDBの間の中継に、指定した文の時点で接続を切るよう設定した".into(),
+            false,
+        )),
         (TrialFault::SkipStateRead, _) => Ok((
             "対象は通常どおり動かし、基盤による保存先の読み出しだけを行わない".into(),
             true,

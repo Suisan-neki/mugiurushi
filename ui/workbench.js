@@ -39,7 +39,7 @@ const METHODS = [
 ];
 const SCOPES = ['受付', '書き込み', '後からの読み出し', '終了コードで失敗が分かる', 'エラー表示で失敗が分かる', '受信側のエラー'];
 const UNANALYZED = '解析に対応していない種類（未対応の言語、画像、設定など）';
-const FAULT_LABEL = { normal: '故障なし（通常時）', storage_read_only: '保存先を書き込み不可にする', storage_is_directory: '保存先に同名のディレクトリを置く', skip_state_read: '麦漆による保存先の読み出しを止める（観測の欠落）', network_unavailable: '外部への通信を遮断する', storage_directory_read_only: '保存先のディレクトリを書き込み不可にする', server_not_started: '受信サーバーなどの事前起動を行わない', database_stopped: 'データベースのコンテナを止める', database_unreachable: '対象とデータベースの間の通信を切る', volume_read_only: '保存先のボリュームを読み取り専用にする' };
+const FAULT_LABEL = { normal: '故障なし（通常時）', storage_read_only: '保存先を書き込み不可にする', storage_is_directory: '保存先に同名のディレクトリを置く', skip_state_read: '麦漆による保存先の読み出しを止める（観測の欠落）', network_unavailable: '外部への通信を遮断する', storage_directory_read_only: '保存先のディレクトリを書き込み不可にする', server_not_started: '受信サーバーなどの事前起動を行わない', database_stopped: 'データベースのコンテナを止める', database_unreachable: '対象とデータベースの間の通信を切る', volume_read_only: '保存先のボリュームを読み取り専用にする', relay_cut: '対象とデータベースの間の接続を、指定した文の途中で切る' };
 const LAUNCHES = [['file', 'ファイルを起動する'], ['module', 'モジュールとして起動する（python -m）'], ['script', '宣言されたコマンドを起動する（[project.scripts]）']];
 const LAUNCH_LABEL = Object.fromEntries(LAUNCHES);
 const DECISION = { modify: '修正する', hold: '保留する', verify: '追加で確かめる', ask: '質問する', release: '採用する' };
@@ -1520,6 +1520,8 @@ function evidenceCard(check, v, e) {
       s.dependencies?.length ? h('p', {}, h('strong', {}, '依存先: '), s.dependencies.join('、'), '（固定コミットの読み込み先だけを複製。インストールはしていない）') : null,
       s.server ? h('p', {}, h('strong', {}, '先に起動するプロセス: '), s.server.started ? `${s.server.detail}。${s.server.exited_before_stop ? `麦漆が止める前に終了していた（終了コード ${s.server.exit_code ?? 'なし'}）` : s.server.stopped_by_platform ? '操作の後に麦漆が止めた' : ''}` : s.server.detail) : null,
       s.containers ? h('p', {}, h('strong', {}, '試験専用コンテナ: '), s.containers.services.map(x => `${x.name}（${x.ready ? `${x.ready_after_ms}msで準備` : '準備できず'}、127.0.0.1:${x.port}）`).join('、'), s.containers.leftovers?.length ? `。残った資源: ${s.containers.leftovers.join('、')}` : '。試行の後に消した') : null,
+      s.containers?.statements_note ? h('p', { 'data-statements': '' }, h('strong', {}, 'DBへ送った文の記録: '), s.containers.statements_note,
+        (s.containers.statements || []).some((/** @type {any} */ x) => x.cut) ? ' 指定した文で、中継が接続を切った。' : '') : null,
       s.containers?.browser ? h('p', {}, h('strong', {}, 'ブラウザの実行: '), s.containers.browser.completed ? '記録した操作が完了した。' : s.containers.browser.prepared ? '準備はできたが、操作は完了していない。' : '準備できていない。', ' ', s.containers.browser.detail) : null,
       h('figure', { class: 'dads-table' }, h('figcaption', { class: 'dads-table__caption' }, '条件ごとの判定結果'),
         h('table', { class: 'dads-table__table', 'data-cell-border': 'bottom' },

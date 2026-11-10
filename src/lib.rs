@@ -21,6 +21,7 @@ pub mod profile;
 pub mod python_env;
 pub mod reader;
 pub mod recording;
+pub mod relay;
 pub mod reported;
 pub mod review;
 pub mod review_execution;

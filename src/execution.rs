@@ -293,6 +293,17 @@ pub fn validate_recipe(recipe: &Recipe) -> io::Result<()> {
         ));
     }
     if let Some(trial) = &recipe.trial {
+        if (trial.fault == crate::trial::TrialFault::RelayCut)
+            != recipe
+                .containers
+                .as_ref()
+                .and_then(|c| c.relay.as_ref())
+                .is_some_and(|r| r.cut.is_some())
+        {
+            return Err(invalid(
+                "中継で接続を切る故障には、コンテナの設定の relay.cut を指定してください。それ以外の故障では指定しません",
+            ));
+        }
         if (trial.fault == crate::trial::TrialFault::HttpRejected)
             != recipe
                 .browser
@@ -1048,7 +1059,22 @@ pub fn execute_with_dependencies(
         None => None,
     };
     let mut session = match &recipe.containers {
-        Some(spec) => Some(crate::container::Session::start(&correlation.run_id, spec)?),
+        // 文を記録する中継には、追跡する値を渡す。値を含む文に目印が付く。
+        Some(spec) => Some(crate::container::Session::start_tracking(
+            &correlation.run_id,
+            spec,
+            recipe
+                .browser
+                .as_ref()
+                .map(|b| crate::tracking::values_of(b, &test_value))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|v| crate::relay::Tracked {
+                    slot: v.slot,
+                    value: v.value,
+                })
+                .collect(),
+        )?),
         None => None,
     };
     let container_ports = session.as_ref().map(|s| s.ports()).unwrap_or_default();
@@ -1074,6 +1100,12 @@ pub fn execute_with_dependencies(
         &work.join("input.json"),
         &crate::trial::substitute_json(&recipe.input, &test_value),
     )?;
+    // 文を記録する中継は、ここから数え始める。対象の起動時の初期化は数えない。
+    if let Some(session) = session.as_ref()
+        && session.all_ready()
+    {
+        session.mark_relay_phase("preparation")?;
+    }
     // 認証などの準備は正常なDBで行い、その後に保存操作の故障を注入する。
     let mut browser = match (&recipe.browser, session.as_ref()) {
         (Some(spec), Some(session)) if session.all_ready() => {
@@ -1226,6 +1258,9 @@ pub fn execute_with_dependencies(
         && (recipe.runtime != Runtime::Browser || browser.as_ref().is_some_and(|b| b.prepared()));
     let mut http_result = None;
     let mut http_exit = None;
+    if proceed && let Some(session) = session.as_ref() {
+        session.mark_relay_phase("action")?;
+    }
     let (status, timed_out, output_limit) = if proceed {
         if let Some(browser) = browser.as_mut() {
             let report = browser.run()?;
@@ -1396,6 +1431,28 @@ pub fn execute_with_dependencies(
             phase.database_scan_before = scan_before;
             phase.database_scan = scan_after;
         }
+    }
+    // 中継で接続を切る故障は、中継が実際に切ったことを記録で確かめる。
+    if recipe
+        .trial
+        .as_ref()
+        .is_some_and(|t| t.fault == crate::trial::TrialFault::RelayCut)
+        && let Some((applied, effective)) = fault.as_mut()
+    {
+        let cut = container_phase
+            .as_ref()
+            .and_then(|p| p.statements.iter().find(|s| s.cut.is_some()));
+        *effective = cut.is_some();
+        *applied = match cut {
+            Some(statement) => format!(
+                "中継が、対象からDBへの{}番目の文（{}）で接続を切った",
+                statement.ordinal,
+                serde_json::to_string(&statement.class)
+                    .unwrap_or_default()
+                    .trim_matches('"')
+            ),
+            None => "中継は指定した文に到達せず、接続を切っていない".into(),
+        };
     }
     let leftovers = match session.as_mut() {
         Some(session) => match session.cleanup() {

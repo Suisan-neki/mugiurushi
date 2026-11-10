@@ -85,7 +85,26 @@ pub struct ContainerSpec {
     /// 対象のコンテナから外部への通信。指定しなければ遮断する。
     #[serde(default, skip_serializing_if = "Egress::is_blocked")]
     pub egress: Egress,
+    /// 対象の手前の中継を、プロトコルを解釈する中継に置き換える指定。DBへ送った文の並びを記録する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelaySetting>,
 }
+
+/// プロトコルを解釈する中継を置く対象と、その中継に行わせること。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelaySetting {
+    /// 中継を置く対象の名前。通常はDBのコンテナ。
+    pub service: String,
+    pub protocol: crate::relay::Protocol,
+    /// 指定した文の決まった時点で接続を切る。故障の種類が「中継で接続を切る」の試行で使う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<crate::relay::CutPoint>,
+}
+
+/// 中継のコンテナの土台。基盤の実行ファイルをこの中で動かすため、同じ世代のglibcを持つイメージにする。
+const RELAY_IMAGE: &str =
+    "ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852";
 
 /// 試験用ネットワークの外部通信。`Allowed`は対象が外部へ通信できることを記録に残す。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +223,14 @@ pub struct ContainerPhase {
     /// 追跡した値ごとの、DB・HTTP・画面・ログでの出現。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_trace: Option<crate::tracking::ValueTrace>,
+    /// 対象がDBへ送った文の記録。文を記録する中継を置いた試行だけにある。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statements: Vec<crate::relay::StatementEvent>,
+    /// 記録に残さない文（読み出しなど）を含めた、種類ごとの数。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub statement_totals: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub statements_note: String,
 }
 
 /// 基盤から対象への接続を表す接続元の名前。ブラウザ操作器・HTTP操作・準備確認など。
@@ -346,6 +373,8 @@ pub struct Session {
     services: Vec<Running>,
     engine: String,
     cleaned: bool,
+    /// 文を記録する中継の指定と、中継へ渡す追跡する値。
+    relay: Option<(RelaySetting, Vec<crate::relay::Tracked>)>,
 }
 
 struct Running {
@@ -482,6 +511,23 @@ pub fn validate_spec(spec: &ContainerSpec) -> io::Result<()> {
     if databases > 1 {
         return Err(invalid("データベースの役割のコンテナは1件にしてください"));
     }
+    if let Some(relay) = &spec.relay {
+        if spec.egress != Egress::Blocked || !names.contains(relay.service.as_str()) {
+            return Err(invalid(
+                "文を記録する中継は、外部通信を遮断した試験の、実在する対象にだけ置けます",
+            ));
+        }
+        if let Some(cut) = &relay.cut
+            && (relay.protocol != crate::relay::Protocol::Mysql
+                || cut.occurrence == 0
+                || cut.shape.len() != 16
+                || !cut.shape.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(invalid(
+                "接続を切る時点は、文の形のハッシュ（16桁）と1以上の回数で指定してください",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -599,6 +645,15 @@ pub fn substitute_ports(value: &str, ports: &BTreeMap<String, u16>) -> String {
 
 impl Session {
     pub fn start(trial: &str, spec: &ContainerSpec) -> io::Result<Self> {
+        Self::start_tracking(trial, spec, vec![])
+    }
+
+    /// 追跡する値を、文を記録する中継へ渡して起動する。中継を置かない設定では値を使わない。
+    pub fn start_tracking(
+        trial: &str,
+        spec: &ContainerSpec,
+        values: Vec<crate::relay::Tracked>,
+    ) -> io::Result<Self> {
         validate_spec(spec)?;
         let engine = engine().map_err(io::Error::other)?;
         let trial = format!(
@@ -617,6 +672,7 @@ impl Session {
             services: vec![],
             engine,
             cleaned: false,
+            relay: spec.relay.clone().map(|setting| (setting, values)),
         };
         let mut create = vec!["network", "create", "--label", "eel.managed=1"];
         let label = format!("eel.trial={trial}");
@@ -757,7 +813,13 @@ impl Session {
             docker_text(&arg_refs)?;
         }
         let tap = if self.egress == Egress::Blocked {
-            match self.start_tap(service, port) {
+            let started = match &self.relay {
+                Some((setting, values)) if setting.service == service.name => {
+                    self.start_relay(service, port, setting, values)
+                }
+                _ => self.start_tap(service, port),
+            };
+            match started {
                 Ok(name) => Some(name),
                 Err(error) => {
                     let _ = docker(&["rm", "-f", &container]);
@@ -856,6 +918,171 @@ impl Session {
             return Err(error);
         }
         Ok(name)
+    }
+
+    /// プロトコルを解釈する中継を、既存の中継と同じ位置に置く。基盤の実行ファイルをコンテナへ入れて動かす。
+    fn start_relay(
+        &self,
+        service: &Service,
+        port: u16,
+        setting: &RelaySetting,
+        values: &[crate::relay::Tracked],
+    ) -> io::Result<String> {
+        pull(RELAY_IMAGE)?;
+        let binary = match std::env::var_os("EEL_RELAY_BINARY") {
+            Some(path) => PathBuf::from(path),
+            None => std::env::current_exe()?,
+        };
+        let name = format!("eel-{}-{}-tap", self.trial, service.name);
+        let config = serde_json::to_string(&crate::relay::Config {
+            listen: service.expose,
+            upstream: format!("{}:{}", self.alias(&service.name), service.expose),
+            protocol: setting.protocol,
+            values: values.to_vec(),
+            cut: setting.cut.clone(),
+        })
+        .map_err(io::Error::other)?;
+        let mut args: Vec<String> = vec![
+            "create".into(),
+            "--name".into(),
+            name.clone(),
+            "--label".into(),
+            "eel.managed=1".into(),
+            "--label".into(),
+            format!("eel.trial={}", self.trial),
+            "--label".into(),
+            "eel.role=tap".into(),
+            "--network".into(),
+            self.edge.clone(),
+            "--publish".into(),
+            format!("127.0.0.1:{port}:{}", service.expose),
+            "--restart".into(),
+            "no".into(),
+            "--env".into(),
+            format!("{}={config}", crate::relay::CONFIG_VARIABLE),
+        ];
+        harden(&mut args);
+        args.extend([
+            "--entrypoint".into(),
+            "/relay".into(),
+            RELAY_IMAGE.into(),
+            "relay".into(),
+        ]);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        docker_text(&refs)?;
+        let started = docker_text(&["cp", &binary.to_string_lossy(), &format!("{name}:/relay")])
+            .and_then(|_| {
+                docker_text(&[
+                    "network",
+                    "connect",
+                    "--alias",
+                    &service.name,
+                    &self.network,
+                    &name,
+                ])
+            })
+            .and_then(|_| docker_text(&["start", &name]));
+        // 実行ファイルがコンテナの中で動かない場合（別のOS向け、glibcの世代の違い）は、すぐに終了する。
+        let ready = started.and_then(|_| {
+            let until = Instant::now() + Duration::from_secs(10);
+            loop {
+                let logs = docker(&["logs", &name])?;
+                if String::from_utf8_lossy(&logs.stdout).contains("\"e\":\"ready\"") {
+                    return Ok(());
+                }
+                if !inspect_running(&name).unwrap_or(false) || Instant::now() >= until {
+                    return Err(io::Error::other(format!(
+                        "文を記録する中継を起動できません。基盤の実行ファイルが中継のコンテナの中で動くことを確認してください（EEL_RELAY_BINARY でLinux向けの実行ファイルを指定できます）: {}",
+                        String::from_utf8_lossy(&logs.stderr)
+                            .chars()
+                            .take(300)
+                            .collect::<String>()
+                    )));
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+        if let Err(error) = ready {
+            let _ = docker(&["rm", "-f", &name]);
+            return Err(error);
+        }
+        Ok(name)
+    }
+
+    /// 文を記録する中継の記録を読む。中継を置いていない試行では `None`。
+    fn statements(
+        &self,
+    ) -> Option<(
+        Vec<crate::relay::StatementEvent>,
+        BTreeMap<String, u64>,
+        String,
+    )> {
+        let (setting, _) = self.relay.as_ref()?;
+        let tap = self
+            .services
+            .iter()
+            .find(|s| s.spec.name == setting.service)?
+            .tap
+            .as_ref()?;
+        let output = match docker(&["logs", tap]) {
+            Ok(output) if output.status.success() => output,
+            _ => {
+                return Some((
+                    vec![],
+                    BTreeMap::new(),
+                    "中継の記録を取得できない。文がなかったことは意味しない".into(),
+                ));
+            }
+        };
+        let read = crate::relay::read_log(&String::from_utf8_lossy(&output.stdout));
+        let total: u64 = read.totals.values().sum();
+        let mut note = format!(
+            "準備と操作の間に、対象が {} へ送った文は{total}件。そのうち、書き込み・トランザクションの操作・追跡する値を含む文の{}件を記録した。SQLの本文は記録していない",
+            setting.service,
+            read.statements.len()
+        );
+        if total == 0 {
+            note.push_str("。基盤が段階を知らせる前の文は数えていない");
+        }
+        if !read.opaque.is_empty() {
+            note.push_str(&format!(
+                "。暗号化などで読めなかった接続が{}件あり、その中の文は記録していない",
+                read.opaque.len()
+            ));
+        }
+        if read.truncated {
+            note.push_str("。上限を超えた分は捨てた");
+        }
+        Some((read.statements, read.totals, note))
+    }
+
+    /// 文を記録する中継へ、試行の段階を知らせる。中継は、知らされた後の文だけを数える。
+    /// 対象の起動時の初期化を、試験の操作と混ぜないためである。中継を置いていない試行では何もしない。
+    pub fn mark_relay_phase(&self, phase: &str) -> io::Result<()> {
+        let Some((setting, _)) = &self.relay else {
+            return Ok(());
+        };
+        let Some(tap) = self
+            .services
+            .iter()
+            .find(|s| s.spec.name == setting.service)
+            .and_then(|s| s.tap.as_ref())
+        else {
+            return Ok(());
+        };
+        if !["preparation", "action"].contains(&phase) {
+            return Err(invalid("中継へ知らせる段階は preparation か action です"));
+        }
+        docker_text(&[
+            "exec",
+            tap,
+            "sh",
+            "-c",
+            &format!("printf %s {phase} > {}", crate::relay::PHASE_FILE),
+        ])?;
+        // 中継は段階を短い間隔で読み直す。読み直すまで待ってから、対象を操作する。
+        thread::sleep(Duration::from_millis(60));
+        Ok(())
     }
 
     /// 中継が記録した接続を、接続元と接続先の対象ごとに集計する。
@@ -1338,6 +1565,7 @@ impl Session {
             }
         }
         let (traffic, traffic_note) = self.traffic(&addresses);
+        let (statements, statement_totals, statements_note) = self.statements().unwrap_or_default();
         for service in &self.services {
             let _ = docker(&["stop", "-t", "2", &service.container]);
         }
@@ -1392,6 +1620,9 @@ impl Session {
             database_scan_before: None,
             database_scan: None,
             value_trace: None,
+            statements,
+            statement_totals,
+            statements_note,
             detail: if leftovers.is_empty() {
                 "試行用のコンテナ・ネットワーク・ボリュームをこの試行だけで使っている".into()
             } else {
@@ -1921,6 +2152,81 @@ mod tests {
     }
 
     #[test]
+    fn a_statement_relay_needs_a_blocked_network_a_known_service_and_a_well_formed_cut() {
+        let recipe: serde_json::Value =
+            serde_json::from_str(include_str!("../examples/openemr-browser/soap-recipe.json"))
+                .unwrap();
+        let base: ContainerSpec = serde_json::from_value(recipe["containers"].clone()).unwrap();
+        // 中継を指定しない既存の設定は、保存し直しても項目を持たない。
+        assert!(serde_json::to_value(&base).unwrap().get("relay").is_none());
+        let with = |relay: serde_json::Value, egress: Egress| {
+            let mut spec = base.clone();
+            spec.egress = egress;
+            spec.relay = Some(serde_json::from_value(relay).unwrap());
+            validate_spec(&spec)
+        };
+        let shape = "0123456789abcdef";
+        with(
+            serde_json::json!({"service": "mysql", "protocol": "mysql"}),
+            Egress::Blocked,
+        )
+        .unwrap();
+        with(
+            serde_json::json!({"service": "mysql", "protocol": "mysql",
+                "cut": {"shape": shape, "occurrence": 2, "phase": "after_forward_before_reply"}}),
+            Egress::Blocked,
+        )
+        .unwrap();
+        // 外部通信を許可した試験には中継がないので、置けない。
+        assert!(
+            with(
+                serde_json::json!({"service": "mysql", "protocol": "mysql"}),
+                Egress::Allowed
+            )
+            .is_err()
+        );
+        assert!(
+            with(
+                serde_json::json!({"service": "no-such", "protocol": "mysql"}),
+                Egress::Blocked
+            )
+            .is_err()
+        );
+        for cut in [
+            serde_json::json!({"shape": "short", "occurrence": 1, "phase": "after_reply"}),
+            serde_json::json!({"shape": "zzzzzzzzzzzzzzzz", "occurrence": 1, "phase": "after_reply"}),
+            serde_json::json!({"shape": shape, "occurrence": 0, "phase": "after_reply"}),
+        ] {
+            assert!(
+                with(
+                    serde_json::json!({"service": "mysql", "protocol": "mysql", "cut": cut}),
+                    Egress::Blocked
+                )
+                .is_err(),
+                "{cut}"
+            );
+        }
+        // 解釈しない中継では、文を数えられないので、切る時点を指定できない。
+        assert!(
+            with(
+                serde_json::json!({"service": "mysql", "protocol": "tcp",
+                    "cut": {"shape": shape, "occurrence": 1, "phase": "after_reply"}}),
+                Egress::Blocked
+            )
+            .is_err()
+        );
+        // 未知の時点と未知の項目は、読み込みの段階で拒否する。
+        for relay in [
+            serde_json::json!({"service": "mysql", "protocol": "mysql",
+                "cut": {"shape": shape, "occurrence": 1, "phase": "during_reply"}}),
+            serde_json::json!({"service": "mysql", "protocol": "mysql", "sql": "DROP"}),
+            serde_json::json!({"service": "mysql", "protocol": "oracle"}),
+        ] {
+            assert!(serde_json::from_value::<RelaySetting>(relay).is_err());
+        }
+    }
+
+    #[test]
     fn digest_is_required() {
         assert!(image_digest("nginx:1.27.4-alpine").is_none());
         assert!(image_digest(
@@ -1942,6 +2248,7 @@ mod tests {
                 ready_timeout_ms: 5000,
             }],
             egress: Egress::default(),
+            relay: None,
         };
         assert!(validate_spec(&spec).is_err());
     }
@@ -1981,6 +2288,7 @@ mod tests {
                 ready_timeout_ms: 5000,
             }],
             egress: Egress::default(),
+            relay: None,
         };
         assert!(validate_spec(&spec).is_ok());
         assert!(
