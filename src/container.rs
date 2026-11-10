@@ -1,6 +1,7 @@
 //! 試験専用のコンテナを、試行ごとに作って止めて消す。
 //! イメージはダイジェスト（`@sha256:` と64桁）付きだけを受け付ける。タグだけでは起動しない。
 //! 待ち受けは 127.0.0.1 だけに公開する。Dockerが使えないときはほかの方式へ切り替えない。
+use crate::database::DatabaseEngine;
 use crate::error::invalid;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -72,6 +73,9 @@ pub struct Service {
     pub command: Vec<String>,
     pub ready: ReadyCheck,
     pub ready_timeout_ms: u64,
+    /// DBの役割のコンテナの種類。指定のない設定はMariaDBとして読み、保存するときも省く。
+    #[serde(default, skip_serializing_if = "DatabaseEngine::is_default")]
+    pub engine: DatabaseEngine,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +457,10 @@ pub fn validate_spec(spec: &ContainerSpec) -> io::Result<()> {
         }
         if service.role == ServiceRole::Database {
             databases += 1;
+        } else if !service.engine.is_default() {
+            return Err(invalid(
+                "DBの種類は、データベースの役割のコンテナにだけ指定してください",
+            ));
         }
     }
     if spec.egress == Egress::Blocked
@@ -543,6 +551,17 @@ fn docker(args: &[&str]) -> io::Result<Output> {
         command.env("DOCKER_HOST", host);
     }
     command.output()
+}
+
+/// コンテナの中でDBのクライアントを起動する `docker exec` の引数。
+fn exec_args<'a>(container: &'a str, client: &'a crate::database::Client) -> Vec<&'a str> {
+    let mut args = vec!["exec"];
+    for value in &client.env {
+        args.extend(["--env", value.as_str()]);
+    }
+    args.push(container);
+    args.extend(client.argv.iter().map(String::as_str));
+    args
 }
 
 fn docker_text(args: &[&str]) -> io::Result<String> {
@@ -1157,25 +1176,13 @@ impl Session {
         if !inspect_running(&service.container).ok()? {
             return Some("データベースのコンテナは動いていない".into());
         }
-        let password = service
-            .spec
-            .env
-            .get("MYSQL_ROOT_PASSWORD")
-            .or_else(|| service.spec.env.get("MARIADB_ROOT_PASSWORD"));
-        let env = format!("MYSQL_PWD={}", password.map(String::as_str).unwrap_or(""));
-        let output = docker(&[
-            "exec",
-            "--env",
-            &env,
-            &service.container,
-            "mariadb",
-            "--user=root",
-            "--connect-timeout=5",
-            "-N",
-            "-e",
-            "SELECT 1",
-        ])
-        .ok()?;
+        let Some(client) = service.spec.engine.ping(&service.spec.env) else {
+            return Some(format!(
+                "DBの種類（{}）は基盤の読み出しに対応していないため、照会していない",
+                service.spec.engine.label()
+            ));
+        };
+        let output = docker(&exec_args(&service.container, &client)).ok()?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         Some(if output.status.success() {
@@ -1224,28 +1231,19 @@ impl Session {
             read.detail = "DBの識別子が不正".into();
             return read;
         }
-        let password = service
+        let sql = crate::browser::query(service.spec.engine, probe, test_value);
+        let Some(client) = service
             .spec
-            .env
-            .get("MYSQL_ROOT_PASSWORD")
-            .or_else(|| service.spec.env.get("MARIADB_ROOT_PASSWORD"));
-        let env = format!("MYSQL_PWD={}", password.map(String::as_str).unwrap_or(""));
-        let sql = crate::browser::query(probe, test_value);
-        match docker(&[
-            "exec",
-            "--env",
-            &env,
-            &service.container,
-            "mariadb",
-            "--user=root",
-            "--connect-timeout=5",
-            "--batch",
-            "--skip-column-names",
-            "--database",
-            &probe.database,
-            "--execute",
-            &sql,
-        ]) {
+            .engine
+            .run(&service.spec.env, &probe.database, &sql)
+        else {
+            read.detail = format!(
+                "DBの種類（{}）は基盤の読み出しに対応していないため、行を読んでいない。行の不存在とは扱わない",
+                service.spec.engine.label()
+            );
+            return read;
+        };
+        match docker(&exec_args(&service.container, &client)) {
             Ok(output) => {
                 read.performed = true;
                 read.exit_code = output.status.code();
@@ -1844,6 +1842,40 @@ mod tests {
     }
 
     #[test]
+    fn engine_is_only_for_the_database_role_and_is_omitted_when_default() {
+        let recipe: serde_json::Value =
+            serde_json::from_str(include_str!("../examples/openemr-browser/soap-recipe.json"))
+                .unwrap();
+        // 種類を書いていない既存の設定は、保存し直しても種類の項目を持たない。
+        // 判定条件の指紋はこの保存形から計算するため、既存の指紋が変わらない。
+        let spec: ContainerSpec = serde_json::from_value(recipe["containers"].clone()).unwrap();
+        assert!(spec.services.iter().all(|s| s.engine.is_default()));
+        assert!(
+            serde_json::to_value(&spec).unwrap()["services"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s.get("engine").is_none())
+        );
+        validate_spec(&spec).unwrap();
+
+        let mut declared = spec.clone();
+        declared.services[0].engine = DatabaseEngine::Postgres;
+        validate_spec(&declared).unwrap();
+        assert_eq!(
+            serde_json::to_value(&declared).unwrap()["services"][0]["engine"],
+            "postgres"
+        );
+        // DBではないコンテナへの指定と、未知の種類は拒否する。
+        let mut misplaced = spec.clone();
+        misplaced.services[1].engine = DatabaseEngine::Postgres;
+        assert!(validate_spec(&misplaced).is_err());
+        let mut unknown = recipe["containers"].clone();
+        unknown["services"][0]["engine"] = "oracle".into();
+        assert!(serde_json::from_value::<ContainerSpec>(unknown).is_err());
+    }
+
+    #[test]
     fn digest_is_required() {
         assert!(image_digest("nginx:1.27.4-alpine").is_none());
         assert!(image_digest(
@@ -1859,6 +1891,7 @@ mod tests {
                 env: BTreeMap::new(),
                 volumes: vec![],
                 web_build: None,
+                engine: DatabaseEngine::default(),
                 command: vec![],
                 ready: ReadyCheck::Tcp,
                 ready_timeout_ms: 5000,
@@ -1897,6 +1930,7 @@ mod tests {
                 env: BTreeMap::new(),
                 volumes: vec![],
             web_build: None,
+            engine: DatabaseEngine::default(),
                 command: vec![],
                 ready: ReadyCheck::Http { path: "/".into(), tls: false },
                 ready_timeout_ms: 5000,

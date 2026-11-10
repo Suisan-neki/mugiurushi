@@ -9,6 +9,7 @@ pub mod browser_recipes;
 pub mod comparison;
 pub mod container;
 pub mod coverage;
+pub mod database;
 pub mod environment;
 pub mod error;
 pub mod execution;

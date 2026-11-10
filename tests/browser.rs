@@ -48,7 +48,11 @@ fn validates_declarative_steps_and_rejects_remote_navigation_and_sql_identifiers
     invalid = original.clone();
     invalid.database[0].table = "patient`; DROP TABLE patient;--".into();
     assert!(validate(&invalid, &containers).is_err());
-    let sql = query(&original.database[0], "x'; DELETE FROM patient; --");
+    let sql = query(
+        Default::default(),
+        &original.database[0],
+        "x'; DELETE FROM patient; --",
+    );
     assert!(!sql.contains("DELETE"));
     assert!(sql.contains("CONVERT(0x"));
 }

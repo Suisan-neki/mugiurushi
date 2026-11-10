@@ -1573,7 +1573,7 @@ mod tests {
     }
 
     fn bundled(n: usize) -> Recipe {
-        let catalog = crate::browser_recipes::catalog().unwrap();
+        let catalog = crate::browser_recipes::load(&crate::browser_recipes::examples()).unwrap();
         serde_json::from_value(catalog["recipes"][n]["recipe"].clone()).unwrap()
     }
     fn link_to(recipe: &Recipe, id: &str) -> (Vec<Aspect>, Vec<SettingsRecord>) {

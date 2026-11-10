@@ -367,26 +367,16 @@ pub fn rejection_observed(spec: &BrowserSpec, report: &BrowserReport) -> bool {
         })
 }
 /// 列名と検索値を別々に検査し、1件の試験値に一致する行だけを読む。任意のSQLは受け取らない。
-pub fn query(q: &DatabaseProbe, test_value: &str) -> String {
-    let columns = q
-        .columns
-        .iter()
-        .map(|c| format!("`{c}`"))
-        .collect::<Vec<_>>()
-        .join(",");
+pub fn query(
+    engine: crate::database::DatabaseEngine,
+    q: &DatabaseProbe,
+    test_value: &str,
+) -> String {
     let match_value = q.match_value.as_deref().map_or_else(
         || test_value.to_owned(),
         |value| crate::trial::substitute(value, test_value),
     );
-    let hex = match_value
-        .as_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    format!(
-        "SELECT {columns} FROM `{}` WHERE `{}` = CONVERT(0x{hex} USING utf8mb4) LIMIT 100",
-        q.table, q.match_column
-    )
+    engine.rows_sql(&q.table, &q.match_column, &q.columns, &match_value)
 }
 fn unavailable(run_id: &str, detail: &str) -> BrowserReport {
     BrowserReport {

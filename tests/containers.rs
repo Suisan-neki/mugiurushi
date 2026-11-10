@@ -65,6 +65,7 @@ fn nginx(name: &str, role: ServiceRole) -> Service {
         env: Default::default(),
         volumes: vec![],
         web_build: None,
+        engine: Default::default(),
         command: vec![],
         ready: ReadyCheck::Http {
             path: "/".into(),
@@ -613,6 +614,7 @@ fn orthanc_stores_the_sample_dicom() {
             env,
             volumes: vec![],
             web_build: None,
+            engine: Default::default(),
             command: vec![],
             ready: ReadyCheck::Http {
                 path: "/system".into(),
@@ -700,6 +702,7 @@ fn openemr_becomes_ready_with_pinned_images() {
                     path: "/var/lib/mysql".into(),
                 }],
                 web_build: None,
+                engine: Default::default(),
                 command: vec!["mariadbd".into(), "--character-set-server=utf8mb4".into()],
                 ready: ReadyCheck::Exec {
                     args: vec![
@@ -719,6 +722,7 @@ fn openemr_becomes_ready_with_pinned_images() {
                 env: app_env,
                 volumes: vec![],
                 web_build: None,
+                engine: Default::default(),
                 command: vec![],
                 ready: ReadyCheck::Http {
                     path: "/meta/health/readyz".into(),
@@ -1106,4 +1110,170 @@ fn container_log_checks_include_the_targets_standard_error() {
         "{}",
         service.log_note
     );
+}
+
+const POSTGRES: &str =
+    "postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac";
+
+fn postgres(engine: mugiurushi::database::DatabaseEngine) -> ContainerSpec {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("POSTGRES_USER".into(), "clinic".into());
+    env.insert("POSTGRES_PASSWORD".into(), "eel-pg-trial".into());
+    env.insert("POSTGRES_DB".into(), "records".into());
+    ContainerSpec {
+        services: vec![Service {
+            name: "db".into(),
+            image: POSTGRES.into(),
+            role: ServiceRole::Database,
+            expose: 5432,
+            env,
+            volumes: vec![],
+            web_build: None,
+            engine,
+            command: vec![],
+            ready: ReadyCheck::Exec {
+                args: ["pg_isready", "-U", "clinic", "-d", "records"]
+                    .map(String::from)
+                    .to_vec(),
+            },
+            ready_timeout_ms: 60000,
+        }],
+        egress: Egress::Blocked,
+    }
+}
+
+/// 対象アプリの代わりに、試験の側でSQLを実行する。基盤の読み出しとは別の経路。
+fn psql(container: &str, sql: &str) {
+    let output = Command::new("docker")
+        .args([
+            "exec",
+            "--env",
+            "PGPASSWORD=eel-pg-trial",
+            container,
+            "psql",
+            "-U",
+            "clinic",
+            "-d",
+            "records",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            sql,
+        ])
+        .output()
+        .expect("docker exec");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn visit_probe(
+    match_column: &str,
+    match_value: Option<&str>,
+) -> mugiurushi::browser::DatabaseProbe {
+    mugiurushi::browser::DatabaseProbe {
+        id: "visit".into(),
+        service: "db".into(),
+        database: "records".into(),
+        table: "visit".into(),
+        match_column: match_column.into(),
+        columns: vec!["reason".into(), "patient".into(), "note".into()],
+        match_value: match_value.map(String::from),
+        before_actions: false,
+    }
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn postgres_rows_are_read_when_the_engine_is_declared() {
+    use mugiurushi::database::DatabaseEngine;
+    if !docker_available() {
+        return;
+    }
+    let mut session = Session::start("pg-read", &postgres(DatabaseEngine::Postgres)).unwrap();
+    assert!(session.all_ready());
+    let container = container_named("pg-read", "db");
+    // 引用符と日本語を含む架空の値。SQLの文字列として解釈されないことも確かめる。
+    let value = "eel-test-pg'; DROP TABLE visit;-- 行";
+    psql(
+        &container,
+        "CREATE TABLE visit (id serial PRIMARY KEY, reason text, patient integer, note text)",
+    );
+    psql(
+        &container,
+        &format!("INSERT INTO visit (reason, patient) VALUES ($eel${value}$eel$, 7)"),
+    );
+    let read = session.read_database(&visit_probe("reason", None), value);
+    assert!(read.performed, "{}", read.detail);
+    assert_eq!(read.exit_code, Some(0), "{}", read.detail);
+    // 列はタブ区切り、NULLはMariaDBと同じ表記で返る。
+    assert_eq!(read.text, format!("{value}\t7\tNULL\n"));
+    // 一致する行がない場合は、読取は成功で0行。
+    let absent = session.read_database(&visit_probe("reason", None), "eel-test-absent");
+    assert!(absent.performed);
+    assert_eq!((absent.exit_code, absent.text.as_str()), (Some(0), ""));
+    // 文字列でない列も、文字列として照合できる。
+    let by_number = session.read_database(&visit_probe("patient", Some("7")), value);
+    assert_eq!(by_number.exit_code, Some(0), "{}", by_number.detail);
+    assert!(by_number.text.starts_with(value));
+    // 存在しない表は読取の失敗で、0行とは区別される。
+    let mut missing_table = visit_probe("reason", None);
+    missing_table.table = "no_such_table".into();
+    let failed = session.read_database(&missing_table, value);
+    assert!(failed.performed);
+    assert_ne!(failed.exit_code, Some(0));
+    assert!(failed.text.is_empty());
+    assert!(
+        session
+            .query_database()
+            .is_some_and(|q| q.contains("応答は 1")),
+        "{:?}",
+        session.query_database()
+    );
+    // 故障の操作はDBの種類によらない。
+    assert!(session.stop_database().unwrap());
+    let stopped = session.read_database(&visit_probe("reason", None), value);
+    assert!(!stopped.performed);
+    assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn a_postgres_container_without_the_engine_setting_is_not_read_as_zero_rows() {
+    use mugiurushi::database::DatabaseEngine;
+    if !docker_available() {
+        return;
+    }
+    // 種類を指定しない設定はMariaDBとして読む。PostgreSQLのコンテナにはそのクライアントがない。
+    let mut session = Session::start("pg-default", &postgres(DatabaseEngine::default())).unwrap();
+    assert!(session.all_ready());
+    let container = container_named("pg-default", "db");
+    psql(
+        &container,
+        "CREATE TABLE visit (reason text, patient integer, note text)",
+    );
+    psql(
+        &container,
+        "INSERT INTO visit (reason) VALUES ('eel-test-pg')",
+    );
+    let read = session.read_database(&visit_probe("reason", None), "eel-test-pg");
+    assert_ne!(read.exit_code, Some(0), "{}", read.detail);
+    assert!(read.text.is_empty());
+    assert!(read.detail.contains("行の不存在とは扱わない") || read.detail.contains("起動できない"));
+    assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+
+    // 読み出しに対応していない種類として宣言した場合は、照会そのものを行わない。
+    let mut session = Session::start("pg-other", &postgres(DatabaseEngine::Other)).unwrap();
+    let read = session.read_database(&visit_probe("reason", None), "eel-test-pg");
+    assert!(!read.performed);
+    assert_eq!(read.exit_code, None);
+    assert!(read.detail.contains("対応していない"), "{}", read.detail);
+    assert!(
+        session
+            .query_database()
+            .is_some_and(|q| q.contains("対応していない"))
+    );
+    assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
 }

@@ -45,6 +45,48 @@ ChromiumはPlaywrightに固定された通常版をheadlessモードで起動し
 
 #140のうち、操作・三種類の観測・途中失敗の記録を扱う最初の基盤。OpenEMRの患者登録・診療記録、OHIFの一覧・画像表示を実行確認したという意味ではない。
 
+## 画面から選ぶ試験の一覧
+
+画面で選べる試験は、運営者が`EEL_RECIPE_DIR`で指定したディレクトリの`*.catalog.json`から作る。ディレクトリの直下と1段下を名前順に読み、シンボリックリンクは読まない。基盤のバイナリは対象の試験を含まない。
+
+```json
+{
+  "schema_version": 1,
+  "base": "soap-recipe.json",
+  "note": "架空の患者と診療記録で試します。",
+  "entries": [
+    { "id": "openemr-soap", "title": "SOAPの保存と再表示" },
+    { "id": "openemr-soap-db-stopped", "title": "SOAPの保存直前にDBを停止",
+      "fault": "database_stopped", "fault_before_step": "save-soap",
+      "keep_checks": { "id_prefix": "soap-" } }
+  ]
+}
+```
+
+- `base`は、一覧のファイルと同じディレクトリから見たレシピの相対パス。`..`や絶対パス、リンクは拒否する。
+- `fault`は、もとのレシピの故障を置き換える。
+- `fault_before_step`は、その手順より前の操作を準備へ移す。故障は準備の後に入るので、その手順の直前に故障が入る。
+- `keep_checks`は、残す判定条件を`ids`か`id_prefix`で指定する。`add_checks`は判定条件を足す。
+- 指定した手順や判定条件がレシピにない場合、足す条件のIDが重複する場合、派生したレシピが検査に通らない場合は、一覧の読み込み全体が失敗する。一部だけを黙って省かない。
+
+OpenEMRの3件は`examples/openemr-browser/soap.catalog.json`にある。`EEL_RECIPE_DIR=examples`で起動すると、変更前にバイナリへ含めていた一覧と同じJSONを返す。同じであることは`src/browser_recipes.rs`のテストで確かめる。
+
+## DBの種類
+
+基盤がDBを直接読むときのクライアントとSQLの書き方は、DBの役割のコンテナの`engine`で決める。イメージの名前からは推定しない。
+
+| `engine` | 読み出し | 認証情報 |
+| --- | --- | --- |
+| 省略、`mariadb` | コンテナの中の`mariadb`クライアント | `MYSQL_ROOT_PASSWORD`か`MARIADB_ROOT_PASSWORD` |
+| `postgres` | コンテナの中の`psql` | `POSTGRES_USER`（省略時は`postgres`）と`POSTGRES_PASSWORD` |
+| `other` | 行わない | なし |
+
+- 省略した設定はMariaDBとして読み、保存するときも項目を出さない。既存のレシピの内容と、判定条件の指紋は変わらない。
+- `other`では基盤が照会を行わず、DBの行を使う判定条件は「観測できなかった」になる。行がなかったとは扱わない。
+- PostgreSQLでは識別子を二重引用符で囲むため、表と列の名前は大文字と小文字を区別する。照合する列は文字列へ変換して比べる。
+- DBの停止、切断、ボリュームの読み取り専用化は、種類によらず同じ操作で行う。
+- 対応している種類は、この表の2つだけである。種類ごとの差は`src/database.rs`にまとめている。
+
 ## 結果画面で観測と画面写真を開く
 
 事例の「ブラウザの観測と画面写真」を開くと、準備・試験操作の完了状況、表示の文字列、HTTP応答、DBの直接読取を別の欄で確認できる。各手順の「画面写真を開く」で、撮影時の写真をダイアログに表示する。写真がなくても、元の判定と観測記録を書き換えない。
