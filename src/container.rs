@@ -607,6 +607,116 @@ fn docker(args: &[&str]) -> io::Result<Output> {
     command.output()
 }
 
+/// 期限、停止の合図、出力の上限を付けて `docker` を実行した結果。
+struct Bounded {
+    ended: crate::tracking::Ended,
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// 標準エラーを受け取る上限。
+const MAX_BOUNDED_STDERR: usize = 64 * 1024;
+
+/// `docker` を実行し、期限に達するか、停止を求められるか、出力が上限を超えたら、待つのをやめて止める。
+/// 出力は上限までしかメモリに持たない。止めるのはホストの側の `docker` のプロセスだけなので、
+/// コンテナの中で始めた処理を止めるのは呼び出し側の役目である。
+fn docker_bounded(
+    args: &[&str],
+    within: Duration,
+    stop: Option<&std::sync::atomic::AtomicBool>,
+    max_stdout: usize,
+) -> io::Result<Bounded> {
+    use crate::tracking::Ended;
+    use std::{
+        io::Read,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+    let deadline = Instant::now() + within;
+    let mut command = Command::new("docker");
+    command
+        .args(args)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(host) = std::env::var_os("DOCKER_HOST") {
+        command.env("DOCKER_HOST", host);
+    }
+    let mut child = command.spawn()?;
+    let overflow = Arc::new(AtomicBool::new(false));
+    // 上限までを持ち、超えた分は捨てる。上限を超えたことは親へ知らせる。
+    let reader = |mut pipe: Box<dyn Read + Send>, limit: usize, flag: Option<Arc<AtomicBool>>| {
+        thread::spawn(move || {
+            let mut kept = Vec::new();
+            let mut buffer = [0u8; 16 * 1024];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(size) => {
+                        let room = limit.saturating_sub(kept.len());
+                        kept.extend_from_slice(&buffer[..size.min(room)]);
+                        if size > room
+                            && let Some(flag) = &flag
+                        {
+                            flag.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+            }
+            kept
+        })
+    };
+    let out = reader(
+        Box::new(child.stdout.take().expect("piped stdout")),
+        max_stdout,
+        Some(overflow.clone()),
+    );
+    let err = reader(
+        Box::new(child.stderr.take().expect("piped stderr")),
+        MAX_BOUNDED_STDERR,
+        None,
+    );
+    let (ended, status) = loop {
+        if let Some(status) = child.try_wait()? {
+            break (Ended::Exited, Some(status));
+        }
+        let ended = if overflow.load(Ordering::SeqCst) {
+            Some(Ended::OutputLimit)
+        } else if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+            Some(Ended::Stopped)
+        } else if Instant::now() >= deadline {
+            Some(Ended::Deadline)
+        } else {
+            None
+        };
+        if let Some(ended) = ended {
+            let _ = child.kill();
+            let _ = child.wait();
+            break (ended, None);
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = out.join().unwrap_or_default();
+    let stderr = err.join().unwrap_or_default();
+    // 終了と同時に上限を超えた場合も、出力が欠けているので、上限を超えたものとして扱う。
+    let ended = if ended == Ended::Exited && overflow.load(Ordering::SeqCst) {
+        Ended::OutputLimit
+    } else {
+        ended
+    };
+    Ok(Bounded {
+        ended,
+        success: ended == Ended::Exited && status.is_some_and(|s| s.success()),
+        stdout,
+        stderr,
+    })
+}
+
 /// コンテナの中でDBのクライアントを起動する `docker exec` の引数。
 fn exec_args<'a>(container: &'a str, client: &'a crate::database::Client) -> Vec<&'a str> {
     let mut args = vec!["exec"];
@@ -1435,6 +1545,22 @@ impl Session {
         &self,
         values: &[crate::tracking::TrackedValue],
     ) -> crate::tracking::DatabaseScan {
+        // 実行中の試行に停止を求める経路は、基盤にまだない。探索は期限だけで止まる。
+        self.scan_database_within(
+            values,
+            crate::tracking::SCAN_BUDGET,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    }
+
+    /// 探索の全体に許す時間と、停止の合図を指定して探す。
+    /// 時間に達するか、`stop` が真になると、実行中の照会をDBの側で止めてから戻る。
+    pub fn scan_database_within(
+        &self,
+        values: &[crate::tracking::TrackedValue],
+        budget: Duration,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> crate::tracking::DatabaseScan {
         use crate::tracking::{DatabaseScan, Executed};
         let Some(service) = self
             .services
@@ -1450,11 +1576,18 @@ impl Session {
             service.spec.engine,
             &service.spec.env,
             values,
-            crate::tracking::SCAN_BUDGET,
-            |client| {
-                let output = docker(&exec_args(&service.container, client))?;
+            budget,
+            stop,
+            |request| {
+                let output = docker_bounded(
+                    &exec_args(&service.container, request.client),
+                    request.within,
+                    (!request.ignore_stop).then_some(stop),
+                    crate::tracking::MAX_OUTPUT,
+                )?;
                 Ok(Executed {
-                    success: output.status.success(),
+                    ended: output.ended,
+                    success: output.success,
                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                     stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                 })

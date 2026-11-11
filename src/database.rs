@@ -2,7 +2,14 @@
 //! 種類で変わるのは、クライアントの起動、認証情報の渡し方、識別子の囲み方、値の渡し方の4点だけ。
 //! 種類はコンテナの設定で明示する。イメージの名前からは推定しない。
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
+
+/// 期限つきの照会が最初に出す行の目印。続けて、その接続のサーバー側の番号が並ぶ。
+pub const SESSION_MARK: &str = "#session";
+/// 期限つきの照会の接続に付ける名前。PostgreSQLで、止める相手を取り違えないために使う。
+const LIMITED_APPLICATION: &str = "mugiurushi-scan";
+/// 接続を止める操作そのものに、サーバー側で許す時間。
+const CANCEL_STATEMENT_MS: u64 = 4000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -135,27 +142,54 @@ impl DatabaseEngine {
         Some(client)
     }
 
-    /// 複数のSQLを1回のクライアントの起動で順に実行する。各SQLは1行を出力する想定。
-    pub fn run_many(
+    /// 複数のSQLを、サーバー側の制限時間つきで順に実行する。
+    /// 最初に接続の番号を出力するので、ホストの側で待つのをやめた後に、その接続を名指しで止められる。
+    /// 制限時間は、実行中の文と、表の施錠を待つ時間の両方に効く。クライアントの接続の制限だけでは、これらは止まらない。
+    pub fn run_limited(
         self,
         env: &BTreeMap<String, String>,
         database: &str,
         statements: &[String],
+        limit: Duration,
     ) -> Option<Client> {
         let mut client = self.base(env)?;
+        let millis = limit.as_millis().clamp(1, 3_600_000) as u64;
         match self {
             Self::Mariadb => {
+                let seconds = millis.div_ceil(1000);
+                let mut sql = format!(
+                    "SET SESSION max_statement_time={}.{:03},lock_wait_timeout={seconds},innodb_lock_wait_timeout={seconds};\
+                     SELECT '{SESSION_MARK}',CONNECTION_ID()",
+                    millis / 1000,
+                    millis % 1000
+                );
+                for statement in statements {
+                    sql.push(';');
+                    sql.push_str(statement);
+                }
+                // 止められた接続をクライアントがつなぎ直して、続きの文を実行しないようにする。
+                // 結果は文ごとに書き出させ、途中までの答えと接続の番号を受け取れるようにする。
                 client.argv.extend(strings(&[
+                    "--skip-reconnect",
+                    "--unbuffered",
                     "--batch",
                     "--skip-column-names",
                     "--database",
                     database,
                     "--execute",
                 ]));
-                client.argv.push(statements.join(";"));
+                client.argv.push(sql);
             }
             Self::Postgres => {
+                client.env.push(format!("PGAPPNAME={LIMITED_APPLICATION}"));
+                client.env.push(format!(
+                    "PGOPTIONS=-c statement_timeout={millis} -c lock_timeout={millis}"
+                ));
                 client.argv.push(format!("--dbname={database}"));
+                client.argv.push("--command".into());
+                client
+                    .argv
+                    .push(format!("SELECT '{SESSION_MARK}', pg_backend_pid()"));
                 for statement in statements {
                     client.argv.push("--command".into());
                     client.argv.push(statement.clone());
@@ -164,6 +198,74 @@ impl DatabaseEngine {
             Self::Other => return None,
         }
         Some(client)
+    }
+
+    /// 期限つきの照会の出力から、接続の番号を読む。
+    pub fn session_of(stdout: &str) -> Option<u64> {
+        stdout.lines().find_map(|line| {
+            let mut fields = line.split('\t');
+            (fields.next()? == SESSION_MARK).then_some(())?;
+            fields.next()?.trim().parse().ok()
+        })
+    }
+
+    /// 番号で指した接続を止め、その接続が残っている数を数える。最後の行が `0` なら残っていない。
+    /// 番号は `session_of` で読んだ数だけを受け取る。
+    pub fn cancel(
+        self,
+        env: &BTreeMap<String, String>,
+        database: &str,
+        session: u64,
+    ) -> Option<Client> {
+        let mut client = self.base(env)?;
+        match self {
+            Self::Mariadb => {
+                let left = format!(
+                    "SELECT COUNT(*) FROM information_schema.processlist WHERE id={session}"
+                );
+                // 止める相手がすでにいない場合の誤りでは止まらず、数えるところまで進む。
+                client.argv.extend(strings(&[
+                    "--force",
+                    "--batch",
+                    "--skip-column-names",
+                    "--database",
+                    database,
+                    "--execute",
+                ]));
+                client.argv.push(format!(
+                    "SET SESSION max_statement_time={}.{:03};KILL {session};DO SLEEP(0.2);{left};DO SLEEP(0.6);{left}",
+                    CANCEL_STATEMENT_MS / 1000,
+                    CANCEL_STATEMENT_MS % 1000
+                ));
+            }
+            Self::Postgres => {
+                let mine = format!(
+                    "FROM pg_stat_activity WHERE pid={session} AND application_name='{LIMITED_APPLICATION}'"
+                );
+                client.env.push(format!(
+                    "PGOPTIONS=-c statement_timeout={CANCEL_STATEMENT_MS}"
+                ));
+                client.argv.push(format!("--dbname={database}"));
+                for sql in [
+                    format!("SELECT pg_terminate_backend(pid) {mine}"),
+                    "SELECT pg_sleep(0.2)".to_owned(),
+                    format!("SELECT count(*) {mine}"),
+                    "SELECT pg_sleep(0.6)".to_owned(),
+                    format!("SELECT count(*) {mine}"),
+                ] {
+                    client.argv.push("--command".into());
+                    client.argv.push(sql);
+                }
+            }
+            Self::Other => return None,
+        }
+        Some(client)
+    }
+
+    /// `cancel` の出力から、止めた接続が残っているかを読む。読めない場合は `None`。
+    pub fn cancelled(stdout: &str) -> Option<bool> {
+        let last = stdout.lines().rev().find(|l| !l.trim().is_empty())?;
+        last.trim().parse::<u64>().ok().map(|left| left == 0)
     }
 
     /// 探索のときに接続するデータベース。MariaDBは表をスキーマ付きで指すので、どこからでも読める。
@@ -379,23 +481,6 @@ mod tests {
             "SELECT 0,COUNT(*) FILTER (WHERE POSITION(convert_from(decode('78','hex'),'UTF8') IN \"a\") > 0),\
              COUNT(*) FILTER (WHERE \"a\" = convert_from(decode('78','hex'),'UTF8')) FROM \"public\".\"t\""
         );
-        let statements = ["SELECT 1".to_owned(), "SELECT 2".to_owned()];
-        let many = DatabaseEngine::Mariadb
-            .run_many(&env(&[]), "information_schema", &statements)
-            .unwrap();
-        assert_eq!(many.argv.last().unwrap(), "SELECT 1;SELECT 2");
-        let many = DatabaseEngine::Postgres
-            .run_many(&env(&[]), "records", &statements)
-            .unwrap();
-        assert_eq!(
-            &many.argv[many.argv.len() - 4..],
-            ["--command", "SELECT 1", "--command", "SELECT 2"]
-        );
-        assert!(
-            DatabaseEngine::Other
-                .run_many(&env(&[]), "d", &statements)
-                .is_none()
-        );
         assert_eq!(
             DatabaseEngine::Mariadb.scan_database(&env(&[])),
             "information_schema"
@@ -421,5 +506,93 @@ mod tests {
             DatabaseEngine::Postgres
         );
         assert!(serde_json::from_str::<DatabaseEngine>("\"oracle\"").is_err());
+    }
+
+    #[test]
+    fn limited_runs_report_their_session_and_carry_the_time_limit_to_the_server() {
+        let statements = ["SELECT 1".to_owned(), "SELECT 2".to_owned()];
+        let maria = DatabaseEngine::Mariadb
+            .run_limited(
+                &env(&[]),
+                "information_schema",
+                &statements,
+                Duration::from_millis(2500),
+            )
+            .unwrap();
+        // つなぎ直して続きを実行しない。結果は文ごとに書き出す。
+        assert!(maria.argv.iter().any(|a| a == "--skip-reconnect"));
+        assert!(maria.argv.iter().any(|a| a == "--unbuffered"));
+        assert_eq!(
+            maria.argv.last().unwrap(),
+            "SET SESSION max_statement_time=2.500,lock_wait_timeout=3,innodb_lock_wait_timeout=3;\
+             SELECT '#session',CONNECTION_ID();SELECT 1;SELECT 2"
+        );
+        let pg = DatabaseEngine::Postgres
+            .run_limited(
+                &env(&[]),
+                "records",
+                &statements,
+                Duration::from_millis(2500),
+            )
+            .unwrap();
+        assert!(pg.env.iter().any(|e| e == "PGAPPNAME=mugiurushi-scan"));
+        assert!(
+            pg.env
+                .iter()
+                .any(|e| e == "PGOPTIONS=-c statement_timeout=2500 -c lock_timeout=2500")
+        );
+        assert_eq!(
+            &pg.argv[pg.argv.len() - 6..],
+            [
+                "--command",
+                "SELECT '#session', pg_backend_pid()",
+                "--command",
+                "SELECT 1",
+                "--command",
+                "SELECT 2"
+            ]
+        );
+        // 0の制限時間は「制限なし」を意味するので、渡さない。
+        let shortest = DatabaseEngine::Mariadb
+            .run_limited(&env(&[]), "d", &statements, Duration::ZERO)
+            .unwrap();
+        assert!(shortest.argv.last().unwrap().starts_with(
+            "SET SESSION max_statement_time=0.001,lock_wait_timeout=1,innodb_lock_wait_timeout=1;"
+        ));
+        assert!(
+            DatabaseEngine::Other
+                .run_limited(&env(&[]), "d", &statements, Duration::from_secs(1))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_session_is_cancelled_by_its_number_and_the_leftover_is_counted() {
+        assert_eq!(
+            DatabaseEngine::session_of("#session\t41\n0\t1\t1\n"),
+            Some(41)
+        );
+        assert_eq!(DatabaseEngine::session_of("0\t1\t1\n"), None);
+        assert_eq!(DatabaseEngine::session_of("#session\tx\n"), None);
+        let maria = DatabaseEngine::Mariadb
+            .cancel(&env(&[]), "information_schema", 41)
+            .unwrap();
+        assert!(maria.argv.iter().any(|a| a == "--force"));
+        let sql = maria.argv.last().unwrap();
+        assert!(sql.contains(";KILL 41;"), "{sql}");
+        assert!(sql.ends_with("SELECT COUNT(*) FROM information_schema.processlist WHERE id=41"));
+        let pg = DatabaseEngine::Postgres
+            .cancel(&env(&[]), "records", 41)
+            .unwrap();
+        // 止める操作の接続は、止める相手と同じ名前を名乗らない。
+        assert!(!pg.env.iter().any(|e| e.starts_with("PGAPPNAME=")));
+        assert!(pg.argv.iter().any(|a| a
+            == "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid=41 AND application_name='mugiurushi-scan'"));
+        assert!(DatabaseEngine::Other.cancel(&env(&[]), "d", 41).is_none());
+        // 最後の行が0のときだけ、残っていないと読む。
+        assert_eq!(DatabaseEngine::cancelled("1\n0\n"), Some(true));
+        assert_eq!(DatabaseEngine::cancelled("t\n\n1\n\n1\n"), Some(false));
+        assert_eq!(DatabaseEngine::cancelled(""), None);
+        assert_eq!(DatabaseEngine::cancelled("ERROR\n"), None);
     }
 }

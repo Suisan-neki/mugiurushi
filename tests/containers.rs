@@ -1503,6 +1503,274 @@ fn mariadb_scan_finds_where_a_value_went_without_being_told_the_schema() {
     assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
 }
 
+/// 中継のない、MariaDBだけの構成。
+fn mariadb_alone() -> ContainerSpec {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("MYSQL_ROOT_PASSWORD".into(), "eel-root-trial".into());
+    ContainerSpec {
+        services: vec![Service {
+            name: "db".into(),
+            image: MARIADB.into(),
+            role: ServiceRole::Database,
+            expose: 3306,
+            env,
+            volumes: vec![],
+            web_build: None,
+            engine: Default::default(),
+            command: vec![],
+            ready: ReadyCheck::Exec {
+                args: [
+                    "/usr/local/bin/healthcheck.sh",
+                    "--su-mysql",
+                    "--connect",
+                    "--innodb_initialized",
+                ]
+                .map(String::from)
+                .to_vec(),
+            },
+            ready_timeout_ms: 120000,
+        }],
+        egress: Egress::Blocked,
+        relay: None,
+    }
+}
+
+/// コンテナの中で動いているプロセスの一覧。コンテナの中の道具に頼らず、ホストの側から見る。
+fn processes_in(container: &str) -> String {
+    let output = Command::new("docker")
+        .args(["top", container, "-eo", "pid,args"])
+        .output()
+        .expect("docker top");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// 期限つきの探索を、遅い照会、施錠待ち、停止の求めの3つの場面で実行し、
+/// 時間内に戻ること、調べた範囲と調べていない範囲を分けて記録すること、
+/// コンテナの中のクライアントとDBの中の照会が残らないことを確かめる。
+/// `leftover` は、探索の接続か、探索の文を実行中の接続が、DBに残っている数を返す。
+fn scan_stops_in_time(
+    session: &Session,
+    container: &str,
+    schema: &str,
+    hold_lock: &mut dyn FnMut() -> std::process::Child,
+    leftover: &dyn Fn() -> String,
+) {
+    use mugiurushi::tracking::ScanStop;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    let values = [tracked("test_value", "EEL-TEST-SCAN-9")];
+    let no_stop = AtomicBool::new(false);
+    let nothing_left = |scene: &str| {
+        let clients = processes_in(container);
+        assert!(
+            !clients.contains("#session"),
+            "{scene}: 探索のクライアントがコンテナに残っている\n{clients}"
+        );
+        assert_eq!(
+            leftover().trim(),
+            "0",
+            "{scene}: 探索の照会がDBに残っている"
+        );
+    };
+    let partial = |scene: &str, scan: &mugiurushi::tracking::DatabaseScan, blocked: &str| {
+        assert!(scan.truncated, "{scene}: {}", scan.detail);
+        assert!(!scan.examined(schema, blocked), "{scene}: {}", scan.detail);
+        assert!(!scan.examined(schema, "z_last"), "{scene}: {}", scan.detail);
+        if scan.performed {
+            // 止まる前に調べ終えた表の結果は残る。調べていない表は、値がなかった表として数えない。
+            assert!(scan.examined(schema, "a_first"), "{scene}: {}", scan.detail);
+            assert_eq!(
+                found(scan),
+                [("a_first".into(), "note".into(), "test_value".into(), 1, 1)],
+                "{scene}"
+            );
+            assert!(scan.tables_scanned < scan.tables_listed, "{scene}");
+            assert!(scan.detail.contains("値がなかったとは言えない"), "{scene}");
+        } else {
+            assert!(scan.hits.is_empty() && scan.stopped.is_some(), "{scene}");
+        }
+    };
+
+    // 1. 遅い照会。結果を返すまで60秒かかる表が、列の一覧の途中にある。
+    let started = Instant::now();
+    let slow = session.scan_database_within(&values, Duration::from_secs(8), &no_stop);
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(10), "遅い照会: {took:?}");
+    assert!(slow.performed, "{}", slow.detail);
+    partial("遅い照会", &slow, "m_slow");
+    nothing_left("遅い照会");
+    // 途中で止めた探索を操作の前の探索として使うと、調べていない表での出現は、新しい出現として扱われない。
+    let mut later = slow.clone();
+    later.hits.push(mugiurushi::tracking::ScanHit {
+        table: "z_last".into(),
+        ..slow.hits[0].clone()
+    });
+    let added = mugiurushi::tracking::new_hits(Some(&slow), &later);
+    assert_eq!(added.len(), 1);
+    assert!(added[0].baseline_unknown && added[0].table == "z_last");
+
+    // 2. 停止の求め。遅い照会の実行中に求められたら、時間を待たずに戻り、実行中の接続を止める。
+    let stop = AtomicBool::new(false);
+    let started = Instant::now();
+    let stopped = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(2500));
+            stop.store(true, Ordering::SeqCst);
+        });
+        session.scan_database_within(&values, Duration::from_secs(60), &stop)
+    });
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(8), "停止の求め: {took:?}");
+    assert_eq!(
+        stopped.stopped,
+        Some(ScanStop::StopRequested),
+        "{}",
+        stopped.detail
+    );
+    assert!(
+        stopped
+            .cancel
+            .as_deref()
+            .is_some_and(|c| c.contains("残っていないことを確かめた")),
+        "{:?}",
+        stopped.cancel
+    );
+    partial("停止の求め", &stopped, "m_slow");
+    nothing_left("停止の求め");
+
+    // 3. 施錠待ち。別の接続が表を施錠している間は、その表の照会が進まない。
+    let mut holder = hold_lock();
+    std::thread::sleep(Duration::from_millis(1500));
+    let started = Instant::now();
+    let locked = session.scan_database_within(&values, Duration::from_secs(8), &no_stop);
+    let took = started.elapsed();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(took < Duration::from_secs(10), "施錠待ち: {took:?}");
+    partial("施錠待ち", &locked, "k_locked");
+    nothing_left("施錠待ち");
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn mariadb_scan_returns_within_its_budget_and_leaves_no_query_behind() {
+    if !docker_available() {
+        return;
+    }
+    let mut session = Session::start("maria-budget", &mariadb_alone()).unwrap();
+    assert!(session.all_ready());
+    let container = container_named("maria-budget", "db");
+    let run = |statement: &str| {
+        let output = maria(&container, false, statement);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    run("CREATE DATABASE clinic CHARACTER SET utf8mb4; \
+         CREATE TABLE clinic.a_first (note VARCHAR(200)); \
+         CREATE TABLE clinic.k_locked (note VARCHAR(200)); \
+         CREATE VIEW clinic.m_slow AS SELECT CAST(SLEEP(60) AS CHAR(20)) AS note; \
+         CREATE TABLE clinic.z_last (note VARCHAR(200)); \
+         INSERT INTO clinic.a_first VALUES ('EEL-TEST-SCAN-9'); \
+         INSERT INTO clinic.z_last VALUES ('EEL-TEST-SCAN-9')");
+    let mut hold = || {
+        Command::new("docker")
+            .args([
+                "exec",
+                "--env",
+                "MYSQL_PWD=eel-root-trial",
+                &container,
+                "mariadb",
+                "--user=root",
+                "-e",
+                "LOCK TABLES clinic.k_locked WRITE; SELECT SLEEP(40)",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("docker exec")
+    };
+    // 探索の文（どの表も CONVERT で比べる）を実行中か待っている接続。施錠している接続は数えない。
+    let leftover = || {
+        run("SELECT COUNT(*) FROM information_schema.processlist \
+             WHERE id <> CONNECTION_ID() AND info LIKE '%CONVERT(0x%'")
+    };
+    scan_stops_in_time(&session, &container, "clinic", &mut hold, &leftover);
+    assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn postgres_scan_returns_within_its_budget_and_leaves_no_query_behind() {
+    use mugiurushi::database::DatabaseEngine;
+    if !docker_available() {
+        return;
+    }
+    let mut session = Session::start("pg-budget", &postgres(DatabaseEngine::Postgres)).unwrap();
+    assert!(session.all_ready());
+    let container = container_named("pg-budget", "db");
+    // このイメージは、初期化の後にサーバーを起動し直す。その間は接続できないので、接続できるまで待つ。
+    for _ in 0..40 {
+        let ready = Command::new("docker")
+            .args(["exec", "--env", "PGPASSWORD=eel-pg-trial", &container])
+            .args(["psql", "-U", "clinic", "-d", "records", "-c", "SELECT 1"])
+            .output()
+            .expect("docker exec");
+        if ready.status.success() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    psql(
+        &container,
+        "CREATE TABLE a_first (note text); \
+         CREATE TABLE k_locked (note text); \
+         CREATE VIEW m_slow AS SELECT pg_sleep(60)::text AS note; \
+         CREATE TABLE z_last (note text); \
+         INSERT INTO a_first VALUES ('EEL-TEST-SCAN-9'); \
+         INSERT INTO z_last VALUES ('EEL-TEST-SCAN-9')",
+    );
+    let client = |sql: &str| {
+        let mut command = Command::new("docker");
+        command.args([
+            "exec",
+            "--env",
+            "PGPASSWORD=eel-pg-trial",
+            &container,
+            "psql",
+            "-U",
+            "clinic",
+            "-d",
+            "records",
+            "--no-align",
+            "--tuples-only",
+            "-c",
+            sql,
+        ]);
+        command
+    };
+    let mut hold = || {
+        client("BEGIN; LOCK TABLE k_locked IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(40)")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("docker exec")
+    };
+    let leftover = || {
+        let output = client(
+            "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'mugiurushi-scan'",
+        )
+        .output()
+        .expect("docker exec");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    scan_stops_in_time(&session, &container, "public", &mut hold, &leftover);
+    assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+}
+
 fn mariadb_with_relay(cut: Option<mugiurushi::relay::CutPoint>) -> ContainerSpec {
     let mut env = std::collections::BTreeMap::new();
     env.insert("MYSQL_ROOT_PASSWORD".into(), "eel-root-trial".into());

@@ -41,19 +41,22 @@ assert.equal(scan?.performed, true, scan?.detail);
 
 // 手で書いた読み出し先（表と、読む列）と、基盤が見つけた場所を比べる。
 const handwritten = [...new Set(recipe.browser.database.flatMap(p => [p.match_column, ...p.columns].map(c => `${p.database}.${p.table}.${c}`)))].sort();
-const added = phase.value_trace.appearances.flatMap(a => a.database.map(h => ({slot: a.slot, place: `${h.schema}.${h.table}.${h.column}`, rows: h.rows, exact_rows: h.exact_rows})));
+const added = phase.value_trace.appearances.flatMap(a => a.database.map(h => ({slot: a.slot, place: `${h.schema}.${h.table}.${h.column}`, rows: h.rows, exact_rows: h.exact_rows, exact_rows_before: h.exact_rows_before ?? 0, baseline_unknown: h.baseline_unknown ?? false})));
 const places = [...new Set(added.map(h => h.place))].sort();
 const draft = cli(['case', 'draft', caseDir, '--evidence', evidence.id]);
 const summary = {
   verdict: view.checks.find(c => c.check_id === 'openemr')?.verdict,
   value_per_step: perStep,
   values: phase.value_trace.values.map(v => ({slot: v.slot, template: v.template})),
-  scan: {before: before && {performed: before.performed, hits: before.hits.length}, tables: scan.tables_scanned, columns: scan.columns_scanned, truncated: scan.truncated, skipped: scan.skipped.length, elapsed_ms: scan.elapsed_ms, before_elapsed_ms: before?.elapsed_ms},
+  scan: {before: before && {performed: before.performed, hits: before.hits.length, truncated: before.truncated, stopped: before.stopped ?? null}, tables: scan.tables_scanned, columns: scan.columns_scanned, tables_listed: scan.tables_listed, columns_listed: scan.columns_listed, stopped: scan.stopped ?? null, cancel: scan.cancel ?? null, truncated: scan.truncated, skipped: scan.skipped.length, elapsed_ms: scan.elapsed_ms, before_elapsed_ms: before?.elapsed_ms},
   handwritten_places: handwritten,
   found_places: places,
   handwritten_not_found: handwritten.filter(p => !places.includes(p)),
   found_not_handwritten: places.filter(p => !handwritten.includes(p)),
   exact_places: [...new Set(added.filter(h => h.exact_rows > 0).map(h => h.place))].sort(),
+  // 操作の前から等しい行があった場所と、操作の前に調べていない場所。どちらも候補にならない。
+  places_with_rows_before: [...new Set(added.filter(h => h.exact_rows_before > 0).map(h => h.place))].sort(),
+  places_with_unknown_baseline: [...new Set(added.filter(h => h.baseline_unknown).map(h => h.place))].sort(),
   requests_with_values: [...new Set(phase.value_trace.appearances.flatMap(a => a.requests.map(e => `${e.method} ${e.path} -> ${e.status}`)))].sort(),
   handwritten_urls: recipe.browser.responses.map(w => `${w.method} ${w.path}`).sort(),
   screens_with_values: [...new Set(phase.value_trace.appearances.flatMap(a => a.screens))],
