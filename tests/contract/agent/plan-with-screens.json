@@ -1,0 +1,71 @@
+{
+  "system": {
+    "summary": "説明は書かれていない。コードの抜粋から読み取れる範囲で照合する。",
+    "excerpts": [
+      {
+        "ref": "app/auth.py",
+        "text": "def login(user, password):\n    return True\n"
+      }
+    ],
+    "code_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "screens": {
+      "run_id": "run-screens",
+      "image_digests": {
+        "web": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "truncated": false,
+      "records": [
+        {
+          "ref": "screen:bd9c3123dca46cd2b30c6164cf4b76d9eed4828b6411258e814541030378405a",
+          "step": "open",
+          "phase": "action",
+          "path": "/login",
+          "title": "架空のログイン",
+          "frames": [
+            {
+              "chain": [],
+              "path": "/login",
+              "headings": [
+                "ログイン"
+              ],
+              "fields": [
+                {
+                  "tag": "input",
+                  "input_type": "password",
+                  "name": "pin",
+                  "id": null,
+                  "label": "暗証",
+                  "required": true,
+                  "readonly": false,
+                  "disabled": false,
+                  "autocomplete": null,
+                  "maxlength": null,
+                  "form_action": "/session",
+                  "form_method": "post"
+                }
+              ],
+              "controls": [],
+              "links": []
+            }
+          ],
+          "document": {
+            "status": 200,
+            "headers": {
+              "cache-control": "no-store"
+            },
+            "cookies": []
+          },
+          "truncated": false
+        }
+      ]
+    }
+  },
+  "findings": [
+    {
+      "id": "f-1",
+      "requirement": "二要素認証",
+      "how": "入力欄の種類を見る"
+    }
+  ],
+  "answers": []
+}

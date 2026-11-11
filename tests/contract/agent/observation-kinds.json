@@ -1,0 +1,106 @@
+[
+  {
+    "id": "exit_code",
+    "support": "judged"
+  },
+  {
+    "id": "stdout",
+    "support": "judged"
+  },
+  {
+    "id": "stderr",
+    "support": "judged"
+  },
+  {
+    "id": "stored_file",
+    "support": "judged"
+  },
+  {
+    "id": "readback_output",
+    "support": "judged"
+  },
+  {
+    "id": "server_output",
+    "support": "judged"
+  },
+  {
+    "id": "container_log",
+    "support": "judged"
+  },
+  {
+    "id": "database_query",
+    "support": "judged"
+  },
+  {
+    "id": "browser_text",
+    "support": "judged"
+  },
+  {
+    "id": "browser_response",
+    "support": "judged"
+  },
+  {
+    "id": "browser_canvas",
+    "support": "judged"
+  },
+  {
+    "id": "server_http",
+    "support": "judged"
+  },
+  {
+    "id": "database_rows",
+    "support": "judged"
+  },
+  {
+    "id": "database_relation",
+    "support": "judged"
+  },
+  {
+    "id": "browser_attribute",
+    "support": "judged"
+  },
+  {
+    "id": "browser_header",
+    "support": "judged"
+  },
+  {
+    "id": "screen_structure",
+    "support": "recorded_only"
+  },
+  {
+    "id": "http_exchanges",
+    "support": "recorded_only"
+  },
+  {
+    "id": "program_observation",
+    "support": "judged"
+  },
+  {
+    "id": "reported_observation",
+    "support": "judged"
+  },
+  {
+    "id": "traffic_summary",
+    "support": "recorded_only"
+  },
+  {
+    "id": "code_inspection",
+    "support": "inference"
+  },
+  {
+    "id": "network_payload",
+    "support": "unsupported"
+  },
+  {
+    "id": "distributed_trace",
+    "support": "unsupported"
+  },
+  {
+    "id": "external_destination",
+    "support": "unsupported"
+  },
+  {
+    "id": "production_environment",
+    "support": "unsupported"
+  }
+]

@@ -1693,6 +1693,37 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
     assert_eq!(flow_read(&f.directory).unwrap(), saved);
 }
 
+/// AIエージェント（mugiurushi-ai）との受け渡しを固定したファイルと比べる。
+/// 同じファイルを mugiurushi-ai の `tests/contract/mugiurushi/` に置き、そちらの試験が入力として使う。
+/// 内容を変えた場合は `MUGIURUSHI_UPDATE_CONTRACT=1` で書き直し、mugiurushi-ai の側も同じ内容に更新する。
+fn contract(name: &str, actual: &serde_json::Value) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/contract/agent")
+        .join(name);
+    if std::env::var_os("MUGIURUSHI_UPDATE_CONTRACT").is_some() {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string_pretty(actual).unwrap() + "\n").unwrap();
+    }
+    let expected: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+    )
+    .unwrap();
+    assert_eq!(
+        actual, &expected,
+        "{name}: AIエージェントへ送る内容が、固定したファイルと違う。意図した変更なら、ファイルと mugiurushi-ai の側を更新する"
+    );
+}
+
+/// 観測の種類の名前と扱いは、AIエージェントの側の一覧（`src/mugiurushi_ai/kinds.py`）と同じでなければならない。
+#[test]
+fn observation_kinds_match_the_list_shared_with_the_agent() {
+    let kinds: Vec<serde_json::Value> = mugiurushi::coverage::catalog()
+        .iter()
+        .map(|k| serde_json::json!({"id": k.id, "support": k.support}))
+        .collect();
+    contract("observation-kinds.json", &serde_json::json!(kinds));
+}
+
 /// 画面の記録は、選んだときだけ照合の入力に入る。渡していない画面を指す候補は受け取らない。
 #[test]
 fn screens_join_the_scan_input_only_when_chosen_and_unsent_screen_references_are_rejected() {
@@ -1764,10 +1795,7 @@ fn screens_join_the_scan_input_only_when_chosen_and_unsent_screen_references_are
         vec![(
             "/v1/scan",
             200,
-            finding(serde_json::json!([
-                "app/auth.py",
-                format!("screen:{hash}#/pin")
-            ])),
+            finding(serde_json::json!(["app/auth.py", format!("screen:{hash}")])),
         )],
     );
     let config = good.config();
@@ -1798,6 +1826,31 @@ fn screens_join_the_scan_input_only_when_chosen_and_unsent_screen_references_are
         good.received.lock().unwrap().is_empty(),
         "確認の段階では送らない"
     );
+    // AIエージェントへ送る内容を、両方のリポジトリが同じファイルで確かめる。
+    contract("scan-with-screens.json", &with["payload"]);
+    contract("scan-without-screens.json", &without["payload"]);
+    let planned = mugiurushi::agent::plan(
+        Some(&config),
+        &store,
+        mugiurushi::agent::PlanRequest {
+            repository: "example/clinic".into(),
+            commit: commit.clone(),
+            files: vec!["app/auth.py".into()],
+            summary: String::new(),
+            answers: vec![],
+            findings: vec![mugiurushi::agent::PlanFinding {
+                id: "f-1".into(),
+                requirement: "二要素認証".into(),
+                how: "入力欄の種類を見る".into(),
+            }],
+            confirm: None,
+            screen_evidence: None,
+        },
+        Some(&input),
+    )
+    .unwrap();
+    assert_eq!(planned["payload"]["system"], with["payload"]["system"]);
+    contract("plan-with-screens.json", &planned["payload"]);
     // 確認した内容と、画面を添えずに組み立てた内容は一致しないので送らない。
     assert!(flow_scan(Some(&config), &store, request(confirm(&with)), None).is_err());
     let scanned = flow_scan(Some(&config), &store, request(confirm(&with)), Some(&input)).unwrap();
@@ -1831,6 +1884,27 @@ fn screens_join_the_scan_input_only_when_chosen_and_unsent_screen_references_are
         )
         .is_err(),
         "渡していない画面を指す候補は受け取らない"
+    );
+    // 渡した画面の参照に、欄などを指す文字を続けた候補は受け取らない。指す先を確かめられないためである。
+    let fragment = FakeAgent::start(
+        &f.directory,
+        vec![(
+            "/v1/scan",
+            200,
+            finding(serde_json::json!([format!("screen:{hash}#/pin")])),
+        )],
+    );
+    let config = fragment.config();
+    let preview = flow_scan(Some(&config), &store, request(None), Some(&input)).unwrap();
+    assert!(
+        flow_scan(
+            Some(&config),
+            &store,
+            request(confirm(&preview)),
+            Some(&input)
+        )
+        .is_err(),
+        "画面の参照に続きの文字がある候補は受け取らない"
     );
     // コードだけを指す候補の根拠は、コードだけになる。
     let code_only = FakeAgent::start(

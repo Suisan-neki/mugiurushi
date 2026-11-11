@@ -605,6 +605,8 @@ fn screens_payload(input: &ScreenInput) -> io::Result<(Value, std::collections::
 }
 
 /// 候補の参照を、コードの抜粋と画面の記録に分ける。渡していない画面を指す参照は拒否する。
+/// 画面の参照は、渡した記録の `ref` と同じ文字列だけを受け取る。欄などを指す文字を続けた参照は、
+/// 指す先が記録にあることを確かめられないので受け取らない。
 fn basis_of(
     refs: &[String],
     sent_screens: &std::collections::BTreeSet<String>,
@@ -613,8 +615,7 @@ fn basis_of(
     let mut screen = false;
     for reference in refs {
         match reference.strip_prefix("screen:") {
-            Some(rest) => {
-                let hash = rest.split('#').next().unwrap_or_default();
+            Some(hash) => {
                 if !sent_screens.contains(hash) {
                     return Err(invalid(
                         "渡していない画面の記録を指す照合の候補は受け取りません",
