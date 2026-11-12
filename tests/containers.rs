@@ -1166,10 +1166,20 @@ fn postgres(engine: mugiurushi::database::DatabaseEngine) -> ContainerSpec {
             web_build: None,
             engine,
             command: vec![],
+            // このイメージは、初期化の間だけUNIXソケットで待ち受けるサーバーを動かし、止めてから本番のサーバーを起動する。
+            // 接続先を指定しないと、初期化用のサーバーで準備できたと判定してしまう。TCPで待ち受けるのは本番のサーバーだけである。
             ready: ReadyCheck::Exec {
-                args: ["pg_isready", "-U", "clinic", "-d", "records"]
-                    .map(String::from)
-                    .to_vec(),
+                args: [
+                    "pg_isready",
+                    "-h",
+                    "127.0.0.1",
+                    "-U",
+                    "clinic",
+                    "-d",
+                    "records",
+                ]
+                .map(String::from)
+                .to_vec(),
             },
             ready_timeout_ms: 60000,
         }],
