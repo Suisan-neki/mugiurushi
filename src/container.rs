@@ -19,9 +19,13 @@ use std::{
 static SESSION: AtomicU64 = AtomicU64::new(1);
 
 pub const PORT_PREFIX: &str = "{{port:";
-pub const MAX_READY_MS: u64 = 300_000;
+/// コンテナ1つの準備を待つ上限。初回の起動でDBのスキーマを作る対象は、数分では終わらない
+/// （OpenMRS 3.8.0 の初回の起動は、4コアの環境で約13分だった）。
+pub const MAX_READY_MS: u64 = 1_800_000;
 const MAX_SERVICES: usize = 8;
 const MAX_LOG: usize = 8192;
+/// 記録に残すログの末尾の行数。
+const EXCERPT_LINES: usize = 80;
 /// 判定に使うログの上限（標準出力・標準エラーそれぞれ）。超えた分は読み捨て、ログは最後まで読めていない扱いにする。
 const MAX_FULL_LOG: usize = 4 * 1024 * 1024;
 const MAX_BODY: usize = 1024 * 1024;
@@ -202,6 +206,9 @@ pub struct ContainerPhase {
     pub traffic_note: String,
 
     pub volumes: Vec<String>,
+    /// イメージの宣言でできた、設定に書いていないボリューム。試行の後に消す。古い記録にはない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_volumes: Vec<String>,
     pub services: Vec<ServicePhase>,
     pub leftovers: Vec<String>,
     pub database_query: Option<String>,
@@ -370,6 +377,8 @@ pub struct Session {
     egress: Egress,
     egress_confirmed: bool,
     volumes: Vec<String>,
+    /// イメージの宣言（VOLUME）でコンテナの作成時にできた、名前を指定していないボリューム。
+    image_volumes: Vec<String>,
     services: Vec<Running>,
     engine: String,
     cleaned: bool,
@@ -444,7 +453,9 @@ pub fn validate_spec(spec: &ContainerSpec) -> io::Result<()> {
             return Err(invalid("コンテナ内の待ち受けポートを指定してください"));
         }
         if !(1..=MAX_READY_MS).contains(&service.ready_timeout_ms) {
-            return Err(invalid("準備の待機上限は1〜300000ミリ秒です"));
+            return Err(invalid(format!(
+                "準備の待機上限は1〜{MAX_READY_MS}ミリ秒です"
+            )));
         }
         if service.env.len() > 32
             || service.volumes.len() > 8
@@ -779,6 +790,7 @@ impl Session {
             egress: spec.egress,
             egress_confirmed: false,
             volumes: vec![],
+            image_volumes: vec![],
             services: vec![],
             engine,
             cleaned: false,
@@ -916,12 +928,13 @@ impl Session {
             ])
             .and_then(|_| docker_text(&["start", &container]));
             if let Err(error) = copied {
-                let _ = docker(&["rm", "-f", &container]);
+                let _ = remove_container(&container);
                 return Err(error);
             }
         } else {
             docker_text(&arg_refs)?;
         }
+        self.note_image_volumes(&container);
         let tap = if self.egress == Egress::Blocked {
             let started = match &self.relay {
                 Some((setting, values)) if setting.service == service.name => {
@@ -932,7 +945,7 @@ impl Session {
             match started {
                 Ok(name) => Some(name),
                 Err(error) => {
-                    let _ = docker(&["rm", "-f", &container]);
+                    let _ = remove_container(&container);
                     return Err(error);
                 }
             }
@@ -965,6 +978,26 @@ impl Session {
         }
         self.services.push(running);
         Ok(())
+    }
+
+    /// コンテナに載っているボリュームのうち、設定に書いていないものを控える。
+    /// 読み出せなかった場合は控えられないが、コンテナを消すときに `-v` で消す。
+    fn note_image_volumes(&mut self, container: &str) {
+        let Ok(text) = docker_text(&[
+            "inspect",
+            "--format",
+            "{{range .Mounts}}{{if eq .Type \"volume\"}}{{println .Name}}{{end}}{{end}}",
+            container,
+        ]) else {
+            return;
+        };
+        for name in text.split_whitespace() {
+            if !self.volumes.iter().any(|v| v == name)
+                && !self.image_volumes.iter().any(|v| v == name)
+            {
+                self.image_volumes.push(name.to_owned());
+            }
+        }
     }
 
     /// 対象の本体のネットワーク別名。遮断時は中継が元の名前を受け持つ。
@@ -1024,7 +1057,7 @@ impl Session {
         ])
         .and_then(|_| docker_text(&["start", &name]));
         if let Err(error) = started {
-            let _ = docker(&["rm", "-f", &name]);
+            let _ = remove_container(&name);
             return Err(error);
         }
         Ok(name)
@@ -1113,7 +1146,7 @@ impl Session {
             }
         });
         if let Err(error) = ready {
-            let _ = docker(&["rm", "-f", &name]);
+            let _ = remove_container(&name);
             return Err(error);
         }
         Ok(name)
@@ -1391,7 +1424,7 @@ impl Session {
             return Err(invalid("読み取り専用にするボリュームがありません"));
         }
         let name = self.services[index].spec.name.clone();
-        docker_text(&["rm", "-f", &self.services[index].container])?;
+        remove_container(&self.services[index].container)?;
         let spec = self.services[index].spec.clone();
         let port = self.services[index].port;
         let container = self.services[index].container.clone();
@@ -1434,6 +1467,7 @@ impl Session {
         args.extend(spec.command.iter().cloned());
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         docker_text(&arg_refs)?;
+        self.note_image_volumes(&container);
         Ok(index)
     }
 
@@ -1711,6 +1745,7 @@ impl Session {
             traffic,
             traffic_note,
             volumes: self.volumes.clone(),
+            image_volumes: self.image_volumes.clone(),
             services: self
                 .services
                 .iter()
@@ -1727,7 +1762,7 @@ impl Session {
                         ready: s.ready,
                         ready_after_ms: s.ready_after_ms,
                         running_after_stop: inspect_running(&s.container).unwrap_or(false),
-                        log_excerpt: tail(&log_text),
+                        log_excerpt: excerpt(&s.container, &log_text),
                         log_note: if log_complete {
                             format!(
                                 "標準出力・標準エラーのログを最後まで読んだ（{}バイト）",
@@ -1767,9 +1802,9 @@ impl Session {
     pub fn cleanup(&mut self) -> io::Result<Vec<String>> {
         for service in self.services.iter().rev() {
             if let Some(tap) = &service.tap {
-                let _ = docker(&["rm", "-f", tap]);
+                let _ = remove_container(tap);
             }
-            let _ = docker(&["rm", "-f", &service.container]);
+            let _ = remove_container(&service.container);
         }
         if !self.edge.is_empty() {
             let _ = docker(&["network", "rm", &self.edge]);
@@ -1781,7 +1816,13 @@ impl Session {
             let _ = docker(&["volume", "rm", volume]);
         }
         self.cleaned = true;
-        let leftovers = labeled(&self.trial);
+        let mut leftovers = labeled(&self.trial);
+        // イメージの宣言でできたボリュームには、試行のラベルが付かない。控えた名前で確かめる。
+        for volume in &self.image_volumes {
+            if volume_exists(volume) {
+                leftovers.push(format!("volume:{volume}"));
+            }
+        }
         if leftovers.is_empty() {
             Ok(leftovers)
         } else {
@@ -1943,13 +1984,52 @@ fn inspect_network(container: &str, network: &str) -> io::Result<bool> {
 }
 
 fn logs(container: &str) -> String {
-    tail(&read_logs(container).0)
+    match recent_logs(container) {
+        Some(recent) => tail(&recent),
+        None => tail(&read_logs(container).0),
+    }
 }
 
-/// 表示と記録に残すログの末尾（80行、MAX_LOG文字まで）。
+/// 記録に残すログの末尾。対象が最後に書いた行を読めた場合はそれを使う。
+/// `text`（`read_logs` の結果）は、標準出力の全文の後ろに標準エラーの全文が続き、上限で打ち切られる。
+/// その末尾は、対象が最後に書いた行とは限らない。読み直せなかった場合だけ、`text` の末尾を使う。
+fn excerpt(container: &str, text: &str) -> String {
+    match recent_logs(container) {
+        Some(recent) => tail(&recent),
+        None => tail(text),
+    }
+}
+
+/// 対象が最後に書いた行（EXCERPT_LINES行）を、標準出力と標準エラーを合わせて、書いた順のまま読む。
+/// 2つの出力を同じパイプで受けるので、`docker logs` が出した順が保たれる。
+fn recent_logs(container: &str) -> Option<String> {
+    let (reader, writer) = io::pipe().ok()?;
+    let mut command = Command::new("docker");
+    command
+        .args(["logs", "--tail", &EXCERPT_LINES.to_string(), container])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(Stdio::null())
+        .stdout(writer.try_clone().ok()?)
+        .stderr(writer);
+    if let Some(host) = std::env::var_os("DOCKER_HOST") {
+        command.env("DOCKER_HOST", host);
+    }
+    let mut child = command.spawn().ok()?;
+    // 書き込み側をこのプロセスが持ったままだと、読み出しが終わらない。
+    drop(command);
+    let (bytes, _) = drain(reader);
+    child
+        .wait()
+        .ok()?
+        .success()
+        .then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// 表示と記録に残すログの末尾（EXCERPT_LINES行、MAX_LOG文字まで）。
 fn tail(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let joined = lines[lines.len().saturating_sub(80)..].join("\n");
+    let joined = lines[lines.len().saturating_sub(EXCERPT_LINES)..].join("\n");
     let skip = joined.chars().count().saturating_sub(MAX_LOG);
     joined.chars().skip(skip).collect()
 }
@@ -2010,6 +2090,18 @@ fn read_logs(container: &str) -> (String, bool) {
         text.push_str(&String::from_utf8_lossy(&err));
     }
     (text, succeeded && out_whole && err_whole)
+}
+
+/// コンテナを消す。イメージの宣言でできた、名前を指定していないボリュームも一緒に消す。
+/// `-v` を付けないと、そのボリュームは試行のラベルを持たないまま残る。
+/// 名前を付けて作ったボリュームは `-v` では消えない。
+fn remove_container(name: &str) -> io::Result<String> {
+    docker_text(&["rm", "-f", "-v", name])
+}
+
+fn volume_exists(name: &str) -> bool {
+    docker(&["volume", "inspect", "--format", "{{.Name}}", name])
+        .is_ok_and(|output| output.status.success())
 }
 
 fn labeled(trial: &str) -> Vec<String> {
@@ -2402,6 +2494,24 @@ mod tests {
         );
         spec.egress = Egress::Allowed;
         assert!(validate_spec(&spec).is_ok());
+    }
+
+    #[test]
+    fn ready_timeout_accepts_thirty_minutes_and_rejects_more() {
+        let mut spec: ContainerSpec = serde_json::from_str(
+            r#"{"services":[{"name":"app","image":"nginx:1.27.4-alpine@sha256:4ff102c5d78d254a6f0da062b3cf39eaf07f01eec0927fd21e219d0af8bc0591","role":"app","expose":80,"ready":"tcp","ready_timeout_ms":1800000}]}"#,
+        ).unwrap();
+        assert!(validate_spec(&spec).is_ok());
+        for rejected in [0, 1_800_001] {
+            spec.services[0].ready_timeout_ms = rejected;
+            assert!(
+                validate_spec(&spec)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("1〜1800000ミリ秒"),
+                "{rejected}"
+            );
+        }
     }
 
     #[test]
