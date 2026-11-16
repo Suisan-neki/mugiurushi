@@ -13,6 +13,9 @@ pub const TEST_VALUE: &str = "{{test_value}}";
 /// 引数の中で、固定版（読み取り専用の複製）の最上位の場所に置き換える文字列。
 pub const SOURCE_ROOT: &str = "{{source}}";
 const MAX_STATE: u64 = 1024 * 1024;
+/// 故障を解除した後に、各コンテナの準備を待つ上限。初回の起動を待つ上限
+/// （`container::MAX_READY_MS`）とは分ける。復旧では、初期化の済んだコンテナを待つ。
+pub const MAX_RECOVERY_MS: u64 = 300_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,11 +31,14 @@ pub enum TrialFault {
     DatabaseUnreachable,
     VolumeReadOnly,
     HttpRejected,
+    /// 対象とDBの間の中継が、指定した文の決まった時点で接続を切る。
+    RelayCut,
 }
 impl TrialFault {
     pub fn label(self) -> &'static str {
         match self {
             Self::HttpRejected => "宣言したHTTP要求を試験用サーバーで拒否する",
+            Self::RelayCut => "対象とDBの間の接続を、指定した文の途中で切る",
             Self::Normal => "故障なし（通常時）",
             Self::StorageReadOnly => "保存先を書き込み不可にする",
             Self::StorageIsDirectory => "保存先に同名のディレクトリを置く",
@@ -74,6 +80,8 @@ pub enum CheckMethod {
     ServerHttp,
     DatabaseRows,
     DatabaseRelation,
+    BrowserAttribute,
+    BrowserHeader,
 }
 impl CheckMethod {
     /// 誰の観測かを示す。対象の報告と基盤の読み出しを同じ扱いにしない。
@@ -87,6 +95,8 @@ impl CheckMethod {
             Self::ServerOutput => "待つプロセス（受信側など）の出力",
             Self::ContainerLog => "コンテナのログ（対象の応答とは別）",
             Self::BrowserCanvas => "canvasの画面写真から読み出した画素",
+            Self::BrowserAttribute => "試験用ブラウザで読み出した要素の属性",
+            Self::BrowserHeader => "試験操作中にブラウザが受け取ったHTTP応答のヘッダー",
             Self::ServerHttp => "基盤が試験用サーバーへ直接要求して読み出した応答",
             Self::BrowserText => "試験用ブラウザで読み出した表示の文字列",
             Self::BrowserResponse => "試験操作中にブラウザが受け取ったHTTP応答",
@@ -388,6 +398,8 @@ pub fn validate(
         match (check.method, check.expect) {
             (CheckMethod::DatabaseRelation, Expectation::Equal | Expectation::NotEqual)
                 if check.text.is_none() && check.target.is_none() && check.relation.is_some() => {}
+            (CheckMethod::BrowserAttribute, Expectation::Equal | Expectation::NotEqual)
+                if text_ok && check.relation.is_none() => {}
             (CheckMethod::ExitCode, Expectation::Zero | Expectation::Nonzero)
                 if check.text.is_none() => {}
             (CheckMethod::ExitCode, _) => {
@@ -424,6 +436,8 @@ pub fn validate(
                 | CheckMethod::ServerHttp
                 | CheckMethod::BrowserText
                 | CheckMethod::BrowserResponse
+                | CheckMethod::BrowserAttribute
+                | CheckMethod::BrowserHeader
                 | CheckMethod::DatabaseRows
                 | CheckMethod::DatabaseRelation
         ) && !has_containers
@@ -444,8 +458,10 @@ pub fn validate(
                 "復旧後の読み直しは、データベースの停止・切断・読み取り専用の故障だけに使えます",
             ));
         }
-        if !(1..=crate::container::MAX_READY_MS).contains(&recovery.ready_timeout_ms) {
-            return Err(invalid("復旧後の待機上限は1〜300000ミリ秒です"));
+        if !(1..=MAX_RECOVERY_MS).contains(&recovery.ready_timeout_ms) {
+            return Err(invalid(format!(
+                "復旧後の待機上限は1〜{MAX_RECOVERY_MS}ミリ秒です"
+            )));
         }
     }
     if spec.fault == TrialFault::ServerNotStarted && !has_server {
@@ -509,6 +525,11 @@ pub fn apply_fault(spec: &TrialSpec, work: &Path) -> io::Result<(String, bool)> 
             false,
         )),
         (TrialFault::Normal, _) => Ok(("故障は加えていない".into(), true)),
+        // 切ったかどうかは、試行の後に中継の記録で確かめる。記録がなければ、故障を適用できなかった試行になる。
+        (TrialFault::RelayCut, _) => Ok((
+            "対象とDBの間の中継に、指定した文の時点で接続を切るよう設定した".into(),
+            false,
+        )),
         (TrialFault::SkipStateRead, _) => Ok((
             "対象は通常どおり動かし、基盤による保存先の読み出しだけを行わない".into(),
             true,
@@ -807,7 +828,7 @@ pub fn evaluate(spec: &TrialSpec, test_value: &str, out: &Outputs) -> Vec<CheckR
                     }
                     None => (Observed::NotObserved, "コンテナの記録がない".into()),
                 },
-                CheckMethod::BrowserCanvas | CheckMethod::ServerHttp | CheckMethod::BrowserText | CheckMethod::BrowserResponse | CheckMethod::DatabaseRows | CheckMethod::DatabaseRelation =>
+                CheckMethod::BrowserCanvas | CheckMethod::ServerHttp | CheckMethod::BrowserText | CheckMethod::BrowserResponse | CheckMethod::BrowserAttribute | CheckMethod::BrowserHeader | CheckMethod::DatabaseRows | CheckMethod::DatabaseRelation =>
                     crate::browser::evaluate(check, out.containers, &text),
                 CheckMethod::DatabaseQuery => {
                     match out.containers.and_then(|c| c.database_query.as_deref()) {
@@ -1032,6 +1053,17 @@ pub fn describe(check: &TrialCheck, spec: &TrialSpec) -> String {
         CheckMethod::ServerHttp => format!("サーバーの直接読取の応答に{text}{has}"),
         CheckMethod::BrowserText => format!("画面の文字列に{text}{has}"),
         CheckMethod::BrowserResponse => format!("ブラウザが受け取ったHTTP応答に{text}{has}"),
+        CheckMethod::BrowserAttribute => format!(
+            "画面の要素の属性の値{}",
+            match check.expect {
+                Expectation::Equal => format!("が{text}と等しい"),
+                Expectation::NotEqual => format!("が{text}と等しくない"),
+                _ => format!("に{text}{has}"),
+            }
+        ),
+        CheckMethod::BrowserHeader => {
+            format!("ブラウザが受け取ったHTTP応答のヘッダーに{text}{has}")
+        }
         CheckMethod::DatabaseRows => format!("DBから直接読み出した行に{text}{has}"),
         CheckMethod::DatabaseRelation => format!(
             "DBから読み出した2つの行の指定した列が{}",

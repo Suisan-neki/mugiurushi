@@ -24,7 +24,7 @@ for (const sha of [before, commit]) await writeFile(join(data, 'snapshots', repo
 const secrets = join(temp, 'secrets.json');
 await writeFile(secrets, JSON.stringify({ username: 'eel-operator', password: 'eel-pass-trial' }), { mode: 0o600 });
 const child = spawn(process.env.REVIEW_BINARY || join(root, 'target/debug/mugiurushi'), ['app', data, '--port', '0'], {
-  cwd: root, env: { ...process.env, EEL_BROWSER_SECRETS_FILE: relative(root, secrets) }, stdio: ['ignore', 'pipe', 'pipe'],
+  cwd: root, env: { ...process.env, EEL_BROWSER_SECRETS_FILE: relative(root, secrets), EEL_RECIPE_DIR: join(root, 'examples') }, stdio: ['ignore', 'pipe', 'pipe'],
 });
 let browser;
 try {

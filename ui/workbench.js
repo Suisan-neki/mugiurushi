@@ -39,7 +39,7 @@ const METHODS = [
 ];
 const SCOPES = ['受付', '書き込み', '後からの読み出し', '終了コードで失敗が分かる', 'エラー表示で失敗が分かる', '受信側のエラー'];
 const UNANALYZED = '解析に対応していない種類（未対応の言語、画像、設定など）';
-const FAULT_LABEL = { normal: '故障なし（通常時）', storage_read_only: '保存先を書き込み不可にする', storage_is_directory: '保存先に同名のディレクトリを置く', skip_state_read: '麦漆による保存先の読み出しを止める（観測の欠落）', network_unavailable: '外部への通信を遮断する', storage_directory_read_only: '保存先のディレクトリを書き込み不可にする', server_not_started: '受信サーバーなどの事前起動を行わない', database_stopped: 'データベースのコンテナを止める', database_unreachable: '対象とデータベースの間の通信を切る', volume_read_only: '保存先のボリュームを読み取り専用にする' };
+const FAULT_LABEL = { normal: '故障なし（通常時）', storage_read_only: '保存先を書き込み不可にする', storage_is_directory: '保存先に同名のディレクトリを置く', skip_state_read: '麦漆による保存先の読み出しを止める（観測の欠落）', network_unavailable: '外部への通信を遮断する', storage_directory_read_only: '保存先のディレクトリを書き込み不可にする', server_not_started: '受信サーバーなどの事前起動を行わない', database_stopped: 'データベースのコンテナを止める', database_unreachable: '対象とデータベースの間の通信を切る', volume_read_only: '保存先のボリュームを読み取り専用にする', relay_cut: '対象とデータベースの間の接続を、指定した文の途中で切る' };
 const LAUNCHES = [['file', 'ファイルを起動する'], ['module', 'モジュールとして起動する（python -m）'], ['script', '宣言されたコマンドを起動する（[project.scripts]）']];
 const LAUNCH_LABEL = Object.fromEntries(LAUNCHES);
 const DECISION = { modify: '修正する', hold: '保留する', verify: '追加で確かめる', ask: '質問する', release: '採用する' };
@@ -917,7 +917,7 @@ function trialFormView(check, form, plan, exec) {
         field({ label: '依存先', control: dependencies, support: '1行に1つ、「所有者/リポジトリ 40桁のコミット 読み込み先（任意）」。例: pydicom/pydicom 20aa4b73aef76bffb6fbc46a8827588dfa9bb89d src' }))),
     h('fieldset', {}, h('legend', {}, '試験専用のコンテナ（任意）'),
       h('p', { class: 'note' }, 'イメージはタグだけではなく @sha256: と64桁のダイジェストを付けます。試行ごとに新しいコンテナ・ネットワーク・ボリュームを作り、待ち受けは 127.0.0.1 だけに公開し、終わったら消します。Dockerが使えないときはほかの方式へ切り替えません。対象リポジトリの compose をそのまま実行はしません。'),
-      field({ label: 'コンテナ（JSONの配列）', control: containers, support: '各要素は name, image, role（app / database / other）, expose, ready（tcp または {"http":{"path":"/","tls":false}}）, ready_timeout_ms。任意で env, volumes, command。例のポートは {{port:名前}} で引数に使えます。' }),
+      field({ label: 'コンテナ（JSONの配列）', control: containers, support: '各要素は name, image, role（app / database / other）, expose, ready（tcp または {"http":{"path":"/","tls":false}}）, ready_timeout_ms。任意で env, volumes, command, start_after（先に準備を待つコンテナの名前の配列）, files（固定したコミットのファイルを置く指定。from と to）, aliases（別のホスト名の配列）。1回動いて終わるコンテナは ready を "completed" にし、expose を書きません。例のポートは {{port:名前}} で引数に使えます。' }),
       h('div', { class: 'inline-fields' }, field({ label: 'HTTPの操作先', control: httpService }), field({ label: 'HTTPの方法', control: httpMethod }), field({ label: 'HTTPのパス', control: httpPath })),
       h('div', { class: 'inline-fields' }, field({ label: 'HTTPの本文ファイル', control: httpBody, support: '固定コミットの中の相対パス。空なら本文なし。' }), field({ label: 'Content-Type', control: httpType }))),
     h('fieldset', {}, h('legend', {}, '先に起動するプロセス（任意）'),
@@ -1195,7 +1195,7 @@ function databaseTargets(probes = []) {
     h('h4', {}, '試験で読み取るDB'),
     h('p', { class: 'note' }, '試験設定で指定した読み取り先です。これだけでは、意図した保存先かどうかや、書き込み先を確認したことにはなりません。'),
     observationTable('DBの読み取り設定', ['観測ID', 'サービス', 'DB', 'テーブル', '照合する列', '読み取る列'],
-      probes.map(p => [p.id, p.service, p.database, p.table, p.match_column, (p.columns || []).join('、')])));
+      probes.map(p => [p.id, p.service, p.database, p.schema ? `${p.schema}.${p.table}` : p.table, p.match_column, (p.columns || []).join('、')])));
 }
 function browserEvidence(trace) {
   const browser = trace?.recipe?.browser;
@@ -1205,6 +1205,8 @@ function browserEvidence(trace) {
   const responses = phase?.browser?.responses || [];
   const watches = browser.responses || [];
   const incompleteText = (phase?.browser?.steps || []).filter(s => !s.completed && typeof s.text === 'string');
+  const exchanges = Array.isArray(phase?.browser?.exchanges) ? phase.browser.exchanges : [];
+  const screens = Array.isArray(phase?.browser?.screens) ? phase.browser.screens : [];
   const readStatus = read => !read ? '記録なし' : !read.performed ? '読み取りを実行できなかった' : read.exit_code == null ? '読み取りの終了状態は記録されていない' : read.exit_code !== 0 ? '読み取りに失敗した' : '読み取りが正常終了した';
   const readDetail = read => h('div', {}, h('p', {}, readStatus(read)),
     read?.detail ? h('p', {}, read.detail) : null,
@@ -1219,9 +1221,17 @@ function browserEvidence(trace) {
       return [w.id, `${w.method} ${w.path}`, found.length ? found.map(r => `HTTP ${r.status}${r.request_step ? `（操作 ${r.request_step}）` : ''}`).join('、') : '記録なし'];
     })) : h('p', {}, 'HTTP応答の観測は指定されていません。'),
     probes.length ? observationTable('指定したDBからの読み取り', ['観測ID', '指定した読み取り先', '操作前', '操作後'], probes.map(p => [p.id,
-      `${p.service} / ${p.database} / ${p.table}（照合: ${p.match_column}、列: ${(p.columns || []).join('、')}）`,
+      `${p.service} / ${p.database} / ${p.schema ? `${p.schema}.${p.table}` : p.table}（照合: ${p.match_column}、列: ${(p.columns || []).join('、')}）`,
       p.before_actions || before.some(r => r.id === p.id) ? readDetail(before.find(r => r.id === p.id)) : '指定なし', readDetail(reads.find(r => r.id === p.id))]))
       : h('p', {}, 'DBの読み取りは指定されていません。'),
+    h('p', { 'data-screen-record': '' }, h('strong', {}, '画面の構造の記録: '),
+      phase?.browser?.screens_note || (screens.length ? `${screens.length}件を記録した。` : '記録はありません。画面が空だったことを示すものではありません。')),
+    exchanges.length
+      ? disclosure(`操作中のHTTPのやり取り（${exchanges.length}件${phase.browser.exchange_limit ? '。上限に達した後は記録していない' : ''}）`,
+        h('div', { 'data-http-exchanges': '' },
+          h('p', { class: 'note' }, '試験設定での宣言の有無によらず、操作の段階で対象へ送った要求と応答です。本文とクエリ文字列は記録していません。'),
+          observationTable('要求と応答', ['手順', '要求', '応答', '種類'], exchanges.map(e => [e.step, `${e.method} ${e.path}`, `HTTP ${e.status}`, e.resource || '記録なし']))))
+      : h('p', { class: 'note', 'data-http-exchanges': '' }, '操作中のHTTPのやり取りの全件の記録はありません。通信がなかったことを示すものではありません。'),
     h('p', { class: 'note' }, 'DBを指定して読み取った結果です。指定先が意図した保存先であることや、この操作から個々の書き込みまでの経路を証明するものではありません。通信の集計は下の「コンテナの通信と隔離」で確認できます。'));
 }
 function containerObservations(phase) {
@@ -1510,6 +1520,8 @@ function evidenceCard(check, v, e) {
       s.dependencies?.length ? h('p', {}, h('strong', {}, '依存先: '), s.dependencies.join('、'), '（固定コミットの読み込み先だけを複製。インストールはしていない）') : null,
       s.server ? h('p', {}, h('strong', {}, '先に起動するプロセス: '), s.server.started ? `${s.server.detail}。${s.server.exited_before_stop ? `麦漆が止める前に終了していた（終了コード ${s.server.exit_code ?? 'なし'}）` : s.server.stopped_by_platform ? '操作の後に麦漆が止めた' : ''}` : s.server.detail) : null,
       s.containers ? h('p', {}, h('strong', {}, '試験専用コンテナ: '), s.containers.services.map(x => `${x.name}（${x.ready ? `${x.ready_after_ms}msで準備` : '準備できず'}、127.0.0.1:${x.port}）`).join('、'), s.containers.leftovers?.length ? `。残った資源: ${s.containers.leftovers.join('、')}` : '。試行の後に消した') : null,
+      s.containers?.statements_note ? h('p', { 'data-statements': '' }, h('strong', {}, 'DBへ送った文の記録: '), s.containers.statements_note,
+        (s.containers.statements || []).some((/** @type {any} */ x) => x.cut) ? ' 指定した文で、中継が接続を切った。' : '') : null,
       s.containers?.browser ? h('p', {}, h('strong', {}, 'ブラウザの実行: '), s.containers.browser.completed ? '記録した操作が完了した。' : s.containers.browser.prepared ? '準備はできたが、操作は完了していない。' : '準備できていない。', ' ', s.containers.browser.detail) : null,
       h('figure', { class: 'dads-table' }, h('figcaption', { class: 'dads-table__caption' }, '条件ごとの判定結果'),
         h('table', { class: 'dads-table__table', 'data-cell-border': 'bottom' },

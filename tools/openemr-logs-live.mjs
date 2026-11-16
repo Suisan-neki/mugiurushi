@@ -7,7 +7,7 @@ const root = path.resolve(import.meta.dirname, '..');
 const bin = process.env.REVIEW_BINARY || path.join(root, 'target/debug/mugiurushi'), out = process.env.OUT || path.join(root, 'evaluations/live-openemr-logs'); fs.mkdirSync(out, {recursive: true});
 // 1. 同梱の一覧を、そのバイナリのappから取り出す（手で作り直さない）。
 const data = path.join(out, 'app-data'); fs.mkdirSync(data);
-const app = spawn(bin, ['app', data, '--port', '0'], {stdio: ['ignore', 'pipe', 'pipe']});
+const app = spawn(bin, ['app', data, '--port', '0'], {env: {...process.env, EEL_RECIPE_DIR: path.join(root, 'examples')}, stdio: ['ignore', 'pipe', 'pipe']});
 let catalog;
 try {
   // 起動前の失敗（実行ファイルがない・すぐ終了した）は、上限まで待たずに理由を残して止める。

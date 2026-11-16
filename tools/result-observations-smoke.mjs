@@ -15,7 +15,7 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
     recipe: structuredClone(recipe), mode: 'local', runtime_version: '合成の実行環境', runtime_path: 'synthetic', exit_code: 1,
     stdout_excerpt: '', stderr_excerpt: '', trial: {},
     containers: { egress: 'blocked', egress_confirmed: true, traffic_note: '合成の記録。mysqlの中継ログは一部未観測。',
-      browser: { responses: [{ watch: 'soap-save', status: 200, request_step: 'save-soap' }], steps: [{ id: 'unexpected-display', completed: false, text: '<img src=x onerror=alert(1)>', detail: '待機終了後に記録した' }] },
+      browser: { responses: [{ watch: 'soap-save', status: 200, request_step: 'save-soap' }], exchanges: [{ step: 'save-soap', method: 'POST', path: '/<img src=x onerror=alert(4)>', status: 200, resource: 'document', headers: {}, cookies: [] }], steps: [{ id: 'unexpected-display', completed: false, text: '<img src=x onerror=alert(1)>', detail: '待機終了後に記録した' }] },
       database_reads: [
         { id: 'patient', performed: true, exit_code: null, detail: '終了状態不明' },
         { id: 'visit', performed: true, exit_code: 0, detail: '出力の記録なし' },
@@ -128,6 +128,11 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
     assert.match(await browserEvidence.innerText(), /mysql \/ openemr \/ form_soap/);
     assert.match(await browserEvidence.innerText(), /HTTP 200（操作 save-soap）/);
     assert.match(await browserEvidence.innerText(), /書き込みまでの経路を証明するものではありません/);
+    // 画面の構造の記録がない試行を、画面が空だったとは表示しない。全件のHTTPの記録は文字として表示する。
+    assert.match(await browserEvidence.locator('[data-screen-record]').innerText(), /記録はありません。画面が空だったことを示すものではありません/);
+    // 折りたたみの中にあるため、描画された文字ではなく要素の文字を読む。
+    assert.match(await browserEvidence.locator('[data-http-exchanges]').textContent(), /POST \/<img src=x onerror=alert\(4\)>/);
+    assert.match(await browserEvidence.locator('[data-http-exchanges]').textContent(), /本文とクエリ文字列は記録していません/);
     const rows = browserEvidence.locator('tbody tr');
     const subjective = rows.filter({ hasText: 'soap-subjective' });
     assert.match(await subjective.innerText(), /読み取りが正常終了した/);

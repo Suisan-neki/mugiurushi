@@ -425,11 +425,14 @@ pub fn scan(config: Option<&Config>, request: ScanRequest) -> io::Result<Value> 
         return Ok(preview);
     }
     let answer = config.post("/v1/scan", &payload)?;
-    scan_result(&answer)
+    scan_result(&answer, &std::collections::BTreeSet::new())
 }
 
 /// 照合の応答を確かめて、麦漆の観測の種類の一覧で試験できるかを付け直す。
-fn scan_result(answer: &Value) -> io::Result<Value> {
+fn scan_result(
+    answer: &Value,
+    sent_screens: &std::collections::BTreeSet<String>,
+) -> io::Result<Value> {
     let items = answer["findings"]
         .as_array()
         .ok_or_else(|| invalid("AIエージェントの照合の形が不正です"))?;
@@ -490,6 +493,7 @@ fn scan_result(answer: &Value) -> io::Result<Value> {
                 .as_str()
                 .filter(|p| matches!(*p, "high" | "medium" | "low"))
                 .unwrap_or("low"),
+            "basis": basis_of(&strings(&item["system_refs"]), sent_screens)?,
             "system_refs": strings(&item["system_refs"]),
         }));
     }
@@ -531,6 +535,102 @@ const MAX_FILES: usize = 40;
 const MAX_FILE_CHARS: usize = 20_000;
 const MAX_TOTAL_CHARS: usize = 400_000;
 const NO_SUMMARY: &str = "説明は書かれていない。コードの抜粋から読み取れる範囲で照合する。";
+
+/// 照合に添える、試行の画面の構造の記録。コードの抜粋（推定の材料）とは別の、実行時の観測。
+pub struct ScreenInput {
+    pub run_id: String,
+    /// 試行で実行したイメージ。読んだコミットと同じコードかは確かめていない。
+    pub image_digests: std::collections::BTreeMap<String, String>,
+    pub file: crate::screen::ScreenFile,
+}
+
+/// 事例の試行を指定して、その画面の記録を照合の入力にする。
+pub fn screens_for(directory: &std::path::Path, evidence_id: &str) -> io::Result<ScreenInput> {
+    let case = workspace::load(directory)?;
+    let trace = case
+        .evidence
+        .iter()
+        .find(|e| e.id == evidence_id)
+        .and_then(|e| e.execution.as_ref())
+        .ok_or_else(|| invalid("画面を記録した試行が、この事例にありません"))?;
+    let file = crate::browser_evidence::screens(directory, trace)?;
+    let image_digests = trace
+        .containers
+        .as_ref()
+        .map(|c| {
+            c.services
+                .iter()
+                .map(|s| (s.name.clone(), s.digest.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ScreenInput {
+        run_id: trace.correlation.run_id.clone(),
+        image_digests,
+        file,
+    })
+}
+
+/// 送る形にした画面の記録と、送った内容のハッシュの一覧。内容が同じ画面は1件にまとめる。
+fn screens_payload(input: &ScreenInput) -> io::Result<(Value, std::collections::BTreeSet<String>)> {
+    let mut sent = std::collections::BTreeSet::new();
+    let mut records = vec![];
+    for screen in &input.file.screens {
+        let Some(content) = &screen.content else {
+            continue;
+        };
+        if !sent.insert(screen.sha256.clone()) {
+            continue;
+        }
+        records.push(json!({
+            "ref": format!("screen:{}", screen.sha256),
+            "step": screen.step, "phase": screen.phase,
+            "path": content.path, "title": content.title,
+            "frames": content.frames, "document": content.document,
+            "truncated": content.truncated,
+        }));
+    }
+    let value = json!({
+        "run_id": input.run_id,
+        "image_digests": input.image_digests,
+        "truncated": input.file.truncated,
+        "records": records,
+    });
+    if value.to_string().chars().count() > MAX_TOTAL_CHARS {
+        return Err(invalid(
+            "画面の記録が多すぎます。画面の少ない試行を選ぶか、画面の記録を使わずに照合してください",
+        ));
+    }
+    Ok((value, sent))
+}
+
+/// 候補の参照を、コードの抜粋と画面の記録に分ける。渡していない画面を指す参照は拒否する。
+/// 画面の参照は、渡した記録の `ref` と同じ文字列だけを受け取る。欄などを指す文字を続けた参照は、
+/// 指す先が記録にあることを確かめられないので受け取らない。
+fn basis_of(
+    refs: &[String],
+    sent_screens: &std::collections::BTreeSet<String>,
+) -> io::Result<Vec<&'static str>> {
+    let mut code = false;
+    let mut screen = false;
+    for reference in refs {
+        match reference.strip_prefix("screen:") {
+            Some(hash) => {
+                if !sent_screens.contains(hash) {
+                    return Err(invalid(
+                        "渡していない画面の記録を指す照合の候補は受け取りません",
+                    ));
+                }
+                screen = true;
+            }
+            None => code = true,
+        }
+    }
+    Ok([(code, "code"), (screen, "screen")]
+        .into_iter()
+        .filter_map(|(used, name)| used.then_some(name))
+        .collect())
+}
 
 /// 利用者が選んだファイルを、固定コミットの読取記録から読んで抜粋にする。読むのは麦漆に保存した記録だけ。
 fn excerpts(
@@ -576,15 +676,26 @@ fn system_of(
     commit: &str,
     files: &[String],
     summary: &str,
-) -> io::Result<Value> {
+    screens: Option<&ScreenInput>,
+) -> io::Result<(Value, std::collections::BTreeSet<String>)> {
     let summary = summary.trim();
     if summary.chars().count() > MAX_SUMMARY {
         return Err(invalid("システムの説明は8000文字以内にしてください"));
     }
-    Ok(json!({
+    let mut system = json!({
         "summary": if summary.is_empty() { NO_SUMMARY } else { summary },
         "excerpts": excerpts(store, repository, commit, files)?,
-    }))
+    });
+    let mut sent = std::collections::BTreeSet::new();
+    // 画面の記録を添える場合だけ項目を足す。添えない場合の送信内容は従来と同じ。
+    // コードのコミットと実行したイメージは別の項目で送り、同じコードである前提を入力に含めない。
+    if let Some(input) = screens {
+        let (value, hashes) = screens_payload(input)?;
+        system["code_commit"] = json!(commit);
+        system["screens"] = value;
+        sent = hashes;
+    }
+    Ok((system, sent))
 }
 
 /// 新しい流れの照合。選んだファイルの抜粋と、任意の説明・ヒアリングの回答を送る。
@@ -600,26 +711,31 @@ pub struct FlowScanRequest {
     pub answers: Vec<HearingAnswer>,
     #[serde(default)]
     pub confirm: Option<Confirm>,
+    /// 画面の構造の記録を添える場合の、事例の試行のID。
+    #[serde(default)]
+    pub screen_evidence: Option<String>,
 }
 
 pub fn flow_scan(
     config: Option<&Config>,
     store: &crate::understanding::Store,
     request: FlowScanRequest,
+    screens: Option<&ScreenInput>,
 ) -> io::Result<Value> {
     let config = config.ok_or_else(|| invalid("AIエージェントは設定されていません"))?;
-    let system = system_of(
+    let (system, sent_screens) = system_of(
         store,
         &request.repository,
         &request.commit,
         &request.files,
         &request.summary,
+        screens,
     )?;
     let payload = json!({"system": system, "answers": request.answers});
     if let Some(preview) = preview_or_check("/v1/scan", &payload, request.confirm.as_ref())? {
         return Ok(preview);
     }
-    scan_result(&config.post("/v1/scan", &payload)?)
+    scan_result(&config.post("/v1/scan", &payload)?, &sent_screens)
 }
 
 /// 利用者からの質問。取り込んだ文書だけを根拠に答える。
@@ -688,6 +804,9 @@ pub struct PlanRequest {
     pub findings: Vec<PlanFinding>,
     #[serde(default)]
     pub confirm: Option<Confirm>,
+    /// 画面の構造の記録を添える場合の、事例の試行のID。
+    #[serde(default)]
+    pub screen_evidence: Option<String>,
 }
 
 /// 試験の案。人が了承するまで実行されない。観測の種類は麦漆で判定に使える種類だけを受け取る。
@@ -695,17 +814,19 @@ pub fn plan(
     config: Option<&Config>,
     store: &crate::understanding::Store,
     request: PlanRequest,
+    screens: Option<&ScreenInput>,
 ) -> io::Result<Value> {
     let config = config.ok_or_else(|| invalid("AIエージェントは設定されていません"))?;
     if request.findings.is_empty() || request.findings.len() > 24 {
         return Err(invalid("試験の案を作る候補を1〜24件選んでください"));
     }
-    let system = system_of(
+    let (system, _) = system_of(
         store,
         &request.repository,
         &request.commit,
         &request.files,
         &request.summary,
+        screens,
     )?;
     let payload =
         json!({"system": system, "findings": request.findings, "answers": request.answers});
