@@ -181,3 +181,127 @@ fn a_third_signal_ends_without_waiting_for_collection() {
     }
     assert!(all_stopped(&pids), "プロセス {pids:?} が残っている");
 }
+
+/// 架空の `docker` を置いて固定環境の実行を始め、コンテナを控えた状態でSIGTERMを送る。
+/// 終了コード、標準エラー、架空の `docker` が受けた呼び出しの記録を返す。
+/// 親の環境には `DOCKER_HOST` を設定する。固定環境の実行は、この変数を `docker` へ渡さない。
+fn stop_an_environment_run(reachable: bool) -> (Option<i32>, String, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = new_run_directory(&std::env::temp_dir().join("evidence-shutdown-tests"))
+        .unwrap()
+        .0;
+    let root = directory.join("repo");
+    fs::create_dir(&root).unwrap();
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.name", "Synthetic test"]);
+    git(&root, &["config", "user.email", "test@example.invalid"]);
+    git(
+        &root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git",
+        ],
+    );
+    fs::write(root.join("README.md"), "架空の対象\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "synthetic"]);
+    let commit = git(&root, &["rev-parse", "HEAD"]);
+    // 既存の例の準備設定を写し、対象だけを架空のリポジトリに変える。
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/monai-cpu");
+    let settings = directory.join("settings");
+    fs::create_dir(&settings).unwrap();
+    fs::copy(example.join("infer.py"), settings.join("infer.py")).unwrap();
+    let mut recipe: serde_json::Value =
+        serde_json::from_slice(&fs::read(example.join("recipe.json")).unwrap()).unwrap();
+    recipe["source"]["repository"] = "example/project".into();
+    recipe["source"]["commit"] = commit.into();
+    fs::write(
+        settings.join("recipe.json"),
+        serde_json::to_vec(&recipe).unwrap(),
+    )
+    .unwrap();
+    // 架空の `docker`。受けた呼び出しと `DOCKER_HOST` を記録する。コンテナの開始では待ち続ける。
+    let log = directory.join("docker.log");
+    let failing = "echo 'Cannot connect to the Docker daemon' >&2; exit 1";
+    let (rm, ps) = if reachable {
+        ("exit 0", "exit 0")
+    } else {
+        (failing, failing)
+    };
+    let bin = directory.join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(
+        bin.join("docker"),
+        format!(
+            "#!/bin/sh\necho \"$1 host=${{DOCKER_HOST:-}}\" >> '{}'\ncase \"$1\" in\n  version) echo 0.0.0 ;;\n  image) echo sha256:synthetic ;;\n  create) echo synthetic ;;\n  start) exec sleep 60 ;;\n  rm) {rm} ;;\n  ps) {ps} ;;\n  *) exit 0 ;;\nesac\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("docker"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mugiurushi"))
+        .args(["environment", "run"])
+        .arg(settings.join("recipe.json"))
+        .arg("--repository-root")
+        .arg(&root)
+        .arg("--output")
+        .arg(directory.join("runs"))
+        .env("PATH", path)
+        .env("DOCKER_HOST", "unix:///nonexistent/eel-test.sock")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // コンテナを開始する呼び出しが届くまで待つ。この時点で、実行器はコンテナを控えている。
+    let until = Instant::now() + Duration::from_secs(30);
+    while !fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .any(|line| line.starts_with("start "))
+    {
+        if child.try_wait().unwrap().is_some() || Instant::now() >= until {
+            let (exit, stderr) = wait_within(child, Duration::from_secs(1));
+            panic!("コンテナの開始まで進まなかった（終了コード {exit:?}）: {stderr}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    send_signal(child.id(), "TERM");
+    let (exit, stderr) = wait_within(child, Duration::from_secs(20));
+    (exit, stderr, fs::read_to_string(&log).unwrap())
+}
+
+#[test]
+fn a_held_environment_container_is_removed_through_the_connection_that_created_it() {
+    let (exit, stderr, log) = stop_an_environment_run(true);
+    assert_eq!(exit, Some(143), "{stderr}");
+    assert!(stderr.contains("コンテナ1件"), "{stderr}");
+    assert!(stderr.contains("残った資源はない"), "{stderr}");
+    // 消す呼び出しと、残りを確かめる呼び出しが届いている。
+    assert!(log.lines().any(|line| line.starts_with("rm ")), "{log}");
+    assert!(log.lines().any(|line| line.starts_with("ps ")), "{log}");
+    // 作るときも消すときも、親の `DOCKER_HOST` を渡していない。同じ接続先を使っている。
+    assert!(log.lines().all(|line| line.ends_with("host=")), "{log}");
+}
+
+#[test]
+fn a_failed_docker_query_is_not_reported_as_nothing_left() {
+    let (exit, stderr, _) = stop_an_environment_run(false);
+    assert_eq!(exit, Some(143), "{stderr}");
+    assert!(
+        stderr.contains("残りを確かめられなかった資源: コンテナ eel-env-"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Cannot connect to the Docker daemon"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("残った資源はない"), "{stderr}");
+}

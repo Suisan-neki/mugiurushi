@@ -230,14 +230,22 @@ pub(crate) fn collect(held: &Held) -> String {
     for pid in &held.groups {
         signal_group(*pid, libc::SIGKILL);
     }
+    // 残った資源と、残りを確かめられなかった資源は分けて報告する。
+    // Dockerに尋ねられなかった場合に、残りがないとは言わない。
     let mut left = vec![];
+    let mut unknown = vec![];
     for name in &held.containers {
-        if !crate::container::remove_named(name) {
-            left.push(format!("container:{name}"));
+        match crate::environment::remove_held(name) {
+            Ok(true) => {}
+            Ok(false) => left.push(format!("container:{name}")),
+            Err(error) => unknown.push(format!("コンテナ {name}（{}）", brief(&error))),
         }
     }
     for trial in &held.trials {
-        left.extend(crate::container::remove_labeled(trial));
+        match crate::container::remove_labeled(trial) {
+            Ok(found) => left.extend(found),
+            Err(error) => unknown.push(format!("試行 {trial}（{}）", brief(&error))),
+        }
     }
     // 試行の側が実行していた `docker` コマンドのうち、まだ動いているもの。
     // コンテナを消すと、ログの読み取りやコンテナの中のコマンドは終わる。イメージの取得などは残るので止める。
@@ -248,18 +256,30 @@ pub(crate) fn collect(held: &Held) -> String {
             unsafe { libc::kill(pid, libc::SIGTERM) };
         }
     }
+    let outcome = match (left.is_empty(), unknown.is_empty()) {
+        (true, true) => "残った資源はない".to_owned(),
+        (false, true) => format!("残った資源: {}", left.join("、")),
+        (true, false) => format!("残りを確かめられなかった資源: {}", unknown.join("、")),
+        (false, false) => format!(
+            "残った資源: {}。残りを確かめられなかった資源: {}",
+            left.join("、"),
+            unknown.join("、")
+        ),
+    };
     format!(
-        "子のプロセスグループ{}件と実行中のdockerコマンド{}件を止め、試行{}件とコンテナ{}件の資源を回収した。{}",
+        "子のプロセスグループ{}件と実行中のdockerコマンド{}件を止め、試行{}件とコンテナ{}件の資源の回収を行った。{outcome}",
         held.groups.len(),
         commands.len(),
         held.trials.len(),
         held.containers.len(),
-        if left.is_empty() {
-            "残った資源はない".to_owned()
-        } else {
-            format!("残った資源: {}", left.join("、"))
-        }
     )
+}
+
+/// エラーの内容を、報告の1行に入る長さにする。
+fn brief(error: &io::Error) -> String {
+    let text = error.to_string();
+    let line = text.lines().next().unwrap_or_default();
+    line.chars().take(160).collect()
 }
 
 #[cfg(test)]

@@ -2528,18 +2528,13 @@ fn remove_container(name: &str) -> io::Result<String> {
     docker_text(&["rm", "-f", "-v", name])
 }
 
-/// 名前で指すコンテナを消す。消えたか、もともとなければ真を返す。
-pub(crate) fn remove_named(name: &str) -> bool {
-    let _ = remove_container(name);
-    docker(&["inspect", "--format", "{{.Id}}", name]).is_ok_and(|output| !output.status.success())
-}
-
 /// 試行のラベルを持つコンテナ・ネットワーク・ボリュームを消し、残ったものを返す。
 /// 終了の合図を受けたときに、試行を動かしているスレッドとは別のスレッドから呼ぶ。
 /// 試行の側が資源を作っている途中かもしれないので、残りがなくなるまで数回くり返す。
-pub(crate) fn remove_labeled(trial: &str) -> Vec<String> {
+/// Dockerに尋ねられなかった場合は、残りがないとは言えないので、エラーを返す。
+pub(crate) fn remove_labeled(trial: &str) -> io::Result<Vec<String>> {
     for _ in 0..3 {
-        let found = labeled(trial);
+        let found = labeled_checked(trial)?;
         if found.is_empty() {
             break;
         }
@@ -2558,7 +2553,7 @@ pub(crate) fn remove_labeled(trial: &str) -> Vec<String> {
             }
         }
     }
-    labeled(trial)
+    labeled_checked(trial)
 }
 
 fn volume_exists(name: &str) -> bool {
@@ -2581,6 +2576,22 @@ fn labeled(trial: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// 試行のラベルを持つコンテナ・ネットワーク・ボリュームを返す。Dockerに尋ねられなかった場合は、エラーを返す。
+fn labeled_checked(trial: &str) -> io::Result<Vec<String>> {
+    let filter = format!("label=eel.trial={trial}");
+    let mut found = vec![];
+    for (kind, args) in [
+        ("container", &["ps", "-aq", "--filter", &filter][..]),
+        ("network", &["network", "ls", "-q", "--filter", &filter][..]),
+        ("volume", &["volume", "ls", "-q", "--filter", &filter][..]),
+    ] {
+        for id in docker_text(args)?.split_whitespace() {
+            found.push(format!("{kind}:{id}"));
+        }
+    }
+    Ok(found)
 }
 
 fn http_request(

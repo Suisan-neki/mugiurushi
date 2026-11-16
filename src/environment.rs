@@ -301,6 +301,24 @@ impl Drop for Container {
         crate::shutdown::release_container(&self.0);
     }
 }
+/// 終了の合図を受けたときに、名前で指すコンテナを消す。作ったときと同じ接続先（`command` の環境）を使う。
+/// 消えたことを確かめられたら真、残っていたら偽を返す。Dockerに尋ねられなかった場合は、エラーを返す。
+pub(crate) fn remove_held(name: &str) -> io::Result<bool> {
+    let _ = small_output(command("docker", &["rm", "-f", "-v", name]));
+    // 名前の絞り込みは部分一致なので、一覧の中に同じ名前があるかを確かめる。
+    let listed = small_output(command(
+        "docker",
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name={name}"),
+            "--format",
+            "{{.Names}}",
+        ],
+    ))?;
+    Ok(!listed.lines().any(|line| line.trim() == name))
+}
 /// 未コミットの作業ファイルは使わず、Gitの固定コミットをアーカイブしてコンテナへ渡す。
 pub fn run(recipe_path: &Path, root: &Path, output: &Path) -> io::Result<PathBuf> {
     let plan = inspect(recipe_path)?;
