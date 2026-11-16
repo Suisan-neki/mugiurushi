@@ -66,6 +66,8 @@ fn nginx(name: &str, role: ServiceRole) -> Service {
         volumes: vec![],
         web_build: None,
         start_after: vec![],
+        files: vec![],
+        aliases: vec![],
         engine: Default::default(),
         command: vec![],
         ready: ReadyCheck::Http {
@@ -301,6 +303,43 @@ fn tag_without_digest_is_rejected() {
     };
     spec.services[0].image = "nginx:1.27.4-alpine".into();
     assert!(validate_spec(&spec).is_err());
+}
+
+#[test]
+fn a_file_missing_from_the_pinned_commit_is_rejected_before_anything_starts() {
+    let (directory, root, commit) = fixture();
+    let mut web = nginx("web", ServiceRole::App);
+    web.files = vec![FileMount {
+        from: "configs/missing.conf".into(),
+        to: "/etc/nginx/conf.d/missing.conf".into(),
+    }];
+    let mut absent = check(
+        "absent",
+        "ログの値",
+        CheckMethod::ContainerLog,
+        Expectation::NotContains,
+        "EEL-NEVER",
+    );
+    absent.target = Some("web".into());
+    let error = execute(
+        &root,
+        &directory.join("runs"),
+        recipe(&commit, vec![web], TrialFault::Normal, vec![absent]),
+        Condition {
+            id: "web".into(),
+            version: 1,
+            text: "ファイルを置く".into(),
+            origin: "試験".into(),
+            kind: ConditionKind::Custom,
+        },
+        None,
+    )
+    .expect_err("拒否")
+    .to_string();
+    assert!(
+        error.contains("configs/missing.conf") && error.contains("固定コミットにありません"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -620,6 +659,8 @@ fn orthanc_stores_the_sample_dicom() {
             volumes: vec![],
             web_build: None,
             start_after: vec![],
+            files: vec![],
+            aliases: vec![],
             engine: Default::default(),
             command: vec![],
             ready: ReadyCheck::Http {
@@ -709,6 +750,8 @@ fn openemr_becomes_ready_with_pinned_images() {
                 }],
                 web_build: None,
                 start_after: vec![],
+                files: vec![],
+                aliases: vec![],
                 engine: Default::default(),
                 command: vec!["mariadbd".into(), "--character-set-server=utf8mb4".into()],
                 ready: ReadyCheck::Exec {
@@ -730,6 +773,8 @@ fn openemr_becomes_ready_with_pinned_images() {
                 volumes: vec![],
                 web_build: None,
                 start_after: vec![],
+                files: vec![],
+                aliases: vec![],
                 engine: Default::default(),
                 command: vec![],
                 ready: ReadyCheck::Http {
@@ -1169,6 +1214,8 @@ fn postgres(engine: mugiurushi::database::DatabaseEngine) -> ContainerSpec {
             volumes: vec![],
             web_build: None,
             start_after: vec![],
+            files: vec![],
+            aliases: vec![],
             engine,
             command: vec![],
             // このイメージは、初期化の間だけUNIXソケットで待ち受けるサーバーを動かし、止めてから本番のサーバーを起動する。
@@ -1464,6 +1511,8 @@ fn mariadb_scan_finds_where_a_value_went_without_being_told_the_schema() {
             volumes: vec![],
             web_build: None,
             start_after: vec![],
+            files: vec![],
+            aliases: vec![],
             engine: Default::default(),
             command: vec![],
             ready: ReadyCheck::Exec {
@@ -1554,6 +1603,8 @@ fn mariadb_alone() -> ContainerSpec {
             volumes: vec![],
             web_build: None,
             start_after: vec![],
+            files: vec![],
+            aliases: vec![],
             engine: Default::default(),
             command: vec![],
             ready: ReadyCheck::Exec {
@@ -1822,6 +1873,8 @@ fn mariadb_with_relay(cut: Option<mugiurushi::relay::CutPoint>) -> ContainerSpec
             volumes: vec![],
             web_build: None,
             start_after: vec![],
+            files: vec![],
+            aliases: vec![],
             engine: Default::default(),
             command: vec![],
             ready: ReadyCheck::Exec {
@@ -1882,7 +1935,7 @@ fn relay_records_what_the_target_sent_to_the_database() {
         value: "EEL-TEST-RELAY-1".into(),
     }];
     let mut session =
-        Session::start_tracking("relay-rec", &mariadb_with_relay(None), values).unwrap();
+        Session::start_tracking("relay-rec", &mariadb_with_relay(None), values, None).unwrap();
     assert!(session.all_ready());
     let container = container_named("relay-rec", "db");
     // 基盤が段階を知らせる前の文は、数えない。対象の起動時の初期化にあたる。
@@ -2253,4 +2306,148 @@ fn a_service_starts_after_the_one_it_waits_for() {
     );
     let names: Vec<&str> = phase.services.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["web", "gateway"]);
+}
+
+fn http_get(port: u16, path: &str) -> String {
+    let output = Command::new("curl")
+        .args(["-sS", "--max-time", "10"])
+        .arg(format!("http://127.0.0.1:{port}{path}"))
+        .output()
+        .expect("curl");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn files_aliases_and_a_completed_service_work_together() {
+    if !docker_available() {
+        return;
+    }
+    // 固定したコミットの写しにあたるディレクトリ。入口の設定と、最初に配る文書を置く。
+    let source = new_run_directory(&std::env::temp_dir().join("evidence-container-files"))
+        .expect("dir")
+        .0;
+    fs::create_dir_all(source.join("gateway")).unwrap();
+    fs::create_dir_all(source.join("seed")).unwrap();
+    let config =
+        "events{} http{server{listen 80; location / {proxy_pass http://web.example.test;}}}";
+    fs::write(source.join("gateway/nginx.conf"), config).unwrap();
+    fs::write(source.join("seed/message.txt"), "EEL-PLACED-FILE\n").unwrap();
+    let shared = |path: &str| VolumeMount {
+        name: "shared".into(),
+        path: path.into(),
+    };
+    // 1回動いて終わるコンテナ。置かれたファイルを、共有するボリュームへ写して終了する。
+    // 置き場所の親（/seed/in）はイメージにない。
+    let mut init = nginx("init", ServiceRole::Other);
+    init.expose = 0;
+    init.ready = ReadyCheck::Completed;
+    init.command = vec![
+        "sh".into(),
+        "-c".into(),
+        "cp /seed/in/message.txt /shared/message.txt".into(),
+    ];
+    init.files = vec![FileMount {
+        from: "seed/message.txt".into(),
+        to: "/seed/in/message.txt".into(),
+    }];
+    init.volumes = vec![shared("/shared")];
+    // アプリは、ドットを含む別名でも届く。
+    let mut web = nginx("web", ServiceRole::App);
+    web.volumes = vec![shared("/usr/share/nginx/html/shared")];
+    web.aliases = vec!["web.example.test".into()];
+    web.start_after = vec!["init".into()];
+    // 入口は、置かれた設定で、別名のアプリへ転送する。
+    let mut gateway = nginx("gateway", ServiceRole::Other);
+    gateway.files = vec![FileMount {
+        from: "gateway/nginx.conf".into(),
+        to: "/etc/nginx/nginx.conf".into(),
+    }];
+    gateway.start_after = vec!["web".into()];
+    for egress in [Egress::Blocked, Egress::Allowed] {
+        let spec = ContainerSpec {
+            services: vec![gateway.clone(), web.clone(), init.clone()],
+            egress,
+            relay: None,
+        };
+        let mut session =
+            Session::start_tracking("files-aliases", &spec, vec![], Some(&source)).unwrap();
+        let ports = session.ports();
+        let through_gateway = ports
+            .get("gateway")
+            .map(|port| http_get(*port, "/shared/message.txt"))
+            .unwrap_or_default();
+        let phase = session.snapshot();
+        session.cleanup().unwrap();
+        let details: Vec<_> = phase
+            .services
+            .iter()
+            .map(|s| (&s.name, &s.detail))
+            .collect();
+        assert!(
+            phase.services.iter().all(|s| s.ready),
+            "{egress:?}: {details:?}"
+        );
+        let names: Vec<&str> = phase.services.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["init", "web", "gateway"], "{egress:?}");
+        assert_eq!(
+            through_gateway, "EEL-PLACED-FILE\n",
+            "{egress:?}: {details:?}"
+        );
+        // 終了を待つコンテナには、公開したポートがない。
+        assert!(!ports.contains_key("init") && phase.services[0].port == 0);
+        assert!(phase.services[0].detail.contains("終了コード0"));
+        // 置いたファイルは、出所・置き場所・大きさ・SHA-256を記録に残す。
+        let placed = &phase.services[2].files;
+        assert_eq!(placed.len(), 1);
+        assert_eq!(
+            (
+                placed[0].from.as_str(),
+                placed[0].to.as_str(),
+                placed[0].bytes
+            ),
+            (
+                "gateway/nginx.conf",
+                "/etc/nginx/nginx.conf",
+                config.len() as u64
+            )
+        );
+        assert_eq!(placed[0].sha256.len(), 64);
+        assert!(phase.services[1].files.is_empty());
+    }
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn a_completed_service_that_fails_stops_the_start_and_leaves_its_log() {
+    if !docker_available() {
+        return;
+    }
+    let mut init = nginx("init", ServiceRole::Other);
+    init.expose = 0;
+    init.ready = ReadyCheck::Completed;
+    init.command = vec![
+        "sh".into(),
+        "-c".into(),
+        "echo EEL-INIT-FAILED >&2; exit 3".into(),
+    ];
+    let mut web = nginx("web", ServiceRole::App);
+    web.start_after = vec!["init".into()];
+    let spec = ContainerSpec {
+        services: vec![web, init],
+        egress: Egress::Blocked,
+        relay: None,
+    };
+    let mut session = Session::start("completed-failed", &spec).unwrap();
+    let ready = session.all_ready();
+    let phase = session.snapshot();
+    session.cleanup().unwrap();
+    assert!(!ready);
+    // 失敗したコンテナの後は起動しない。
+    assert_eq!(phase.services.len(), 1);
+    let detail = &phase.services[0].detail;
+    assert!(
+        detail.contains("終了コード 3") && detail.contains("EEL-INIT-FAILED"),
+        "{detail}"
+    );
 }

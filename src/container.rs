@@ -24,6 +24,12 @@ pub const PORT_PREFIX: &str = "{{port:";
 pub const MAX_READY_MS: u64 = 1_800_000;
 const MAX_SERVICES: usize = 8;
 const MAX_LOG: usize = 8192;
+/// コンテナへ置くファイル1件の上限。
+const MAX_PLACED_FILE: u64 = 1024 * 1024;
+/// コンテナ1つへ置くファイルの件数の上限。
+const MAX_PLACED_FILES: usize = 16;
+/// コンテナ1つに付ける別名の件数の上限。
+const MAX_ALIASES: usize = 8;
 /// 記録に残すログの末尾の行数。
 const EXCERPT_LINES: usize = 80;
 /// 判定に使うログの上限（標準出力・標準エラーそれぞれ）。超えた分は読み捨て、ログは最後まで読めていない扱いにする。
@@ -50,6 +56,28 @@ pub enum ReadyCheck {
     Exec {
         args: Vec<String>,
     },
+    /// コンテナが終了コード0で終わるまで待つ。証明書の用意のように、1回動いて終わるコンテナに使う。
+    /// 待ち受けを持たないので、中継を置かず、ホストへも公開しない。
+    Completed,
+}
+
+/// 固定したコミットの中のファイルを、コンテナの中へ置く指定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileMount {
+    /// リポジトリの最上位からの相対パス。
+    pub from: String,
+    /// コンテナの中の置き場所（絶対パス）。親のディレクトリがなければ作る。
+    pub to: String,
+}
+
+/// コンテナへ置いたファイルの記録。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRecord {
+    pub from: String,
+    pub to: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +94,8 @@ pub struct Service {
     pub image: String,
     pub role: ServiceRole,
     /// コンテナ内の待ち受けポート。ホスト側は基盤が 127.0.0.1 の空きポートを割り当てる。
+    /// 終了を待つコンテナ（`ready` が `completed`）では指定しない。
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub expose: u16,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
@@ -84,6 +114,16 @@ pub struct Service {
     /// 指定のないコンテナは、役割の順（DB、その他、アプリ）と一覧の順で起動する。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub start_after: Vec<String>,
+    /// 固定したコミットの中のファイルを、起動の前にコンテナの中へ置く。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileMount>,
+    /// 試験用ネットワークの中で、このコンテナに届く別の名前。ドットを含むホスト名を書ける。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+}
+
+fn is_zero(value: &u16) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +230,9 @@ pub struct ServicePhase {
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_build: Option<crate::prepared_web::BuildBasis>,
+    /// 起動の前にコンテナへ置いたファイル。古い記録にはない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,6 +431,8 @@ pub struct Session {
     cleaned: bool,
     /// 文を記録する中継の指定と、中継へ渡す追跡する値。
     relay: Option<(RelaySetting, Vec<crate::relay::Tracked>)>,
+    /// 固定したコミットの写し。コンテナへ置くファイルは、ここから読む。
+    source: Option<PathBuf>,
 }
 
 struct Running {
@@ -401,6 +446,7 @@ struct Running {
     detail: String,
     web_build: Option<crate::prepared_web::BuildBasis>,
     tap: Option<String>,
+    files: Vec<FileRecord>,
 }
 
 pub fn image_digest(image: &str) -> Option<&str> {
@@ -410,6 +456,39 @@ pub fn image_digest(image: &str) -> Option<&str> {
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
     .then_some(rest)
+}
+
+/// リポジトリの最上位からの相対パス。上の階層と絶対パスは受け付けない。
+fn repository_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 256
+        && !path.starts_with('/')
+        && !path.contains(['\0', '\\'])
+        && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+}
+
+/// コンテナの中の絶対パス。ファイルを指すので、`/` で終わらない。
+fn container_path(path: &str) -> bool {
+    path.len() <= 256
+        && !path.contains('\0')
+        && path.strip_prefix('/').is_some_and(|rest| {
+            !rest.is_empty() && rest.split('/').all(|part| !matches!(part, "" | "." | ".."))
+        })
+}
+
+/// DNSのホスト名。ラベルは英小文字・数字・ハイフンで、ハイフンで始めも終わりもしない。
+fn host_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
 }
 
 /// コンテナを起動する順番。役割の順（DB、その他、アプリ）と一覧の順を基本にし、
@@ -483,8 +562,39 @@ pub fn validate_spec(spec: &ContainerSpec) -> io::Result<()> {
                 service.image
             )));
         }
-        if service.expose == 0 {
+        if service.ready == ReadyCheck::Completed {
+            if service.expose != 0 || service.role == ServiceRole::Database {
+                return Err(invalid(format!(
+                    "終了を待つコンテナ {} には、待ち受けポートとデータベースの役割を指定できません",
+                    service.name
+                )));
+            }
+        } else if service.expose == 0 {
             return Err(invalid("コンテナ内の待ち受けポートを指定してください"));
+        }
+        if service.files.len() > MAX_PLACED_FILES {
+            return Err(invalid(format!(
+                "コンテナへ置くファイルは{MAX_PLACED_FILES}件以内です"
+            )));
+        }
+        let mut places = std::collections::BTreeSet::new();
+        for file in &service.files {
+            if !repository_path(&file.from)
+                || !container_path(&file.to)
+                || tar_names(file.to.trim_start_matches('/')).is_none()
+                || !places.insert(file.to.as_str())
+            {
+                return Err(invalid(format!(
+                    "コンテナ {} へ置くファイルは、リポジトリの中の相対パス（from）と、コンテナの中の重複しない絶対パス（to）で指定してください",
+                    service.name
+                )));
+            }
+        }
+        if service.aliases.len() > MAX_ALIASES || !service.aliases.iter().all(|a| host_name(a)) {
+            return Err(invalid(format!(
+                "コンテナ {} の別名は、{MAX_ALIASES}件以内のホスト名（英小文字・数字・ハイフンをドットでつないだ形）で指定してください",
+                service.name
+            )));
         }
         if !(1..=MAX_READY_MS).contains(&service.ready_timeout_ms) {
             return Err(invalid(format!(
@@ -547,7 +657,7 @@ pub fn validate_spec(spec: &ContainerSpec) -> io::Result<()> {
                     return Err(invalid("準備確認のコマンドを確認してください"));
                 }
             }
-            ReadyCheck::Tcp => {}
+            ReadyCheck::Tcp | ReadyCheck::Completed => {}
         }
         if service.role == ServiceRole::Database {
             databases += 1;
@@ -565,11 +675,32 @@ pub fn validate_spec(spec: &ContainerSpec) -> io::Result<()> {
     {
         return Err(invalid("コンテナの名前が中継用の接続先名と重複しています"));
     }
+    // 別名は、ほかのコンテナの名前・別名・中継用の接続先名と重ならないこと。重なると、どちらに届くか決まらない。
+    let mut taken: std::collections::BTreeSet<String> = spec
+        .services
+        .iter()
+        .flat_map(|s| [s.name.clone(), format!("{}-real", s.name)])
+        .collect();
+    for service in &spec.services {
+        for alias in &service.aliases {
+            if !taken.insert(alias.clone()) {
+                return Err(invalid(format!(
+                    "コンテナ {} の別名 {alias} が、ほかの名前と重複しています",
+                    service.name
+                )));
+            }
+        }
+    }
     if databases > 1 {
         return Err(invalid("データベースの役割のコンテナは1件にしてください"));
     }
     if let Some(relay) = &spec.relay {
-        if spec.egress != Egress::Blocked || !names.contains(relay.service.as_str()) {
+        if spec.egress != Egress::Blocked
+            || !spec
+                .services
+                .iter()
+                .any(|s| s.name == relay.service && s.ready != ReadyCheck::Completed)
+        {
             return Err(invalid(
                 "文を記録する中継は、外部通信を遮断した試験の、実在する対象にだけ置けます",
             ));
@@ -786,6 +917,79 @@ fn exec_args<'a>(container: &'a str, client: &'a crate::database::Client) -> Vec
     args
 }
 
+/// 標準入力へ内容を渡して `docker` を実行する。
+fn docker_with_input(args: &[&str], input: &[u8]) -> io::Result<Output> {
+    let mut command = Command::new("docker");
+    command
+        .args(args)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(host) = std::env::var_os("DOCKER_HOST") {
+        command.env("DOCKER_HOST", host);
+    }
+    let mut child = command.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input)?;
+    }
+    child.wait_with_output()
+}
+
+/// 試験用ネットワークの中で、対象に届く名前。コンテナの名前と別名。
+fn public_names(service: &Service) -> Vec<String> {
+    std::iter::once(service.name.clone())
+        .chain(service.aliases.iter().cloned())
+        .collect()
+}
+
+/// tarの見出しに入る形へ、パスを名前（100バイトまで）と前半（155バイトまで）に分ける。
+fn tar_names(path: &str) -> Option<(&str, &str)> {
+    if path.len() <= 100 {
+        return Some(("", path));
+    }
+    path.match_indices('/')
+        .map(|(at, _)| (&path[..at], &path[at + 1..]))
+        .find(|(prefix, name)| prefix.len() <= 155 && !name.is_empty() && name.len() <= 100)
+}
+
+/// ファイルだけを入れたtar（ustar）を作る。所有者はroot、時刻は0にして、同じ入力から同じ内容を作る。
+fn tar_archive(entries: &[(String, Vec<u8>, bool)]) -> io::Result<Vec<u8>> {
+    fn octal(field: &mut [u8], value: u64) {
+        let text = format!("{value:0width$o}", width = field.len() - 1);
+        field[..text.len()].copy_from_slice(text.as_bytes());
+    }
+    let mut out = vec![];
+    for (path, bytes, executable) in entries {
+        let (prefix, name) =
+            tar_names(path).ok_or_else(|| invalid("コンテナの中の置き場所が長すぎます"))?;
+        let mut header = [0u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        octal(
+            &mut header[100..108],
+            if *executable { 0o755 } else { 0o644 },
+        );
+        octal(&mut header[108..116], 0);
+        octal(&mut header[116..124], 0);
+        octal(&mut header[124..136], bytes.len() as u64);
+        octal(&mut header[136..148], 0);
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        header[345..345 + prefix.len()].copy_from_slice(prefix.as_bytes());
+        let sum: u64 = header.iter().map(|b| u64::from(*b)).sum();
+        let text = format!("{sum:06o}\0 ");
+        header[148..156].copy_from_slice(text.as_bytes());
+        out.extend_from_slice(&header);
+        out.extend_from_slice(bytes);
+        out.resize(out.len().div_ceil(512) * 512, 0);
+    }
+    out.resize(out.len() + 1024, 0);
+    Ok(out)
+}
+
 fn docker_text(args: &[&str]) -> io::Result<String> {
     let output = docker(args)?;
     if output.status.success() {
@@ -813,16 +1017,23 @@ pub fn substitute_ports(value: &str, ports: &BTreeMap<String, u16>) -> String {
 
 impl Session {
     pub fn start(trial: &str, spec: &ContainerSpec) -> io::Result<Self> {
-        Self::start_tracking(trial, spec, vec![])
+        Self::start_tracking(trial, spec, vec![], None)
     }
 
     /// 追跡する値を、文を記録する中継へ渡して起動する。中継を置かない設定では値を使わない。
+    /// `source` は固定したコミットの写しで、コンテナへ置くファイルの出所になる。
     pub fn start_tracking(
         trial: &str,
         spec: &ContainerSpec,
         values: Vec<crate::relay::Tracked>,
+        source: Option<&Path>,
     ) -> io::Result<Self> {
         validate_spec(spec)?;
+        if source.is_none() && spec.services.iter().any(|s| !s.files.is_empty()) {
+            return Err(invalid(
+                "コンテナへ置くファイルの出所（固定したコミットの写し）がありません",
+            ));
+        }
         let engine = engine().map_err(io::Error::other)?;
         let trial = format!(
             "{}-{}",
@@ -842,6 +1053,7 @@ impl Session {
             engine,
             cleaned: false,
             relay: spec.relay.clone().map(|setting| (setting, values)),
+            source: source.map(Path::to_path_buf),
         };
         let mut create = vec!["network", "create", "--label", "eel.managed=1"];
         let label = format!("eel.trial={trial}");
@@ -919,7 +1131,13 @@ impl Session {
             })
             .transpose()?;
         let digest = pull(&service.image)?;
-        let port = crate::server::free_port()?;
+        // 終了を待つコンテナは待ち受けを持たない。ポートを割り当てず、中継も置かない。
+        let listens = service.ready != ReadyCheck::Completed;
+        let port = if listens {
+            crate::server::free_port()?
+        } else {
+            0
+        };
         let container = format!("eel-{}-{}", self.trial, service.name);
         let mut args = vec![
             "run".into(),
@@ -934,12 +1152,14 @@ impl Session {
             format!("eel.role={}", role_label(service.role)),
             "--network".into(),
             self.network.clone(),
-            "--network-alias".into(),
-            self.alias(&service.name),
             "--restart".into(),
             "no".into(),
         ];
-        if self.egress == Egress::Allowed {
+        for alias in self.container_aliases(service) {
+            args.push("--network-alias".into());
+            args.push(alias);
+        }
+        if self.egress == Egress::Allowed && listens {
             args.push("--publish".into());
             args.push(format!("127.0.0.1:{port}:{}", service.expose));
         }
@@ -958,25 +1178,35 @@ impl Session {
         args.push(service.image.clone());
         args.extend(service.command.iter().cloned());
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        if let Some(assets) = &assets {
+        // ファイルを置く場合は、作成・複写・起動の順に行う。起動の前に置かないと、対象が読めない。
+        let files = if assets.is_some() || !service.files.is_empty() {
             let mut create = vec!["create"];
             create.extend(arg_refs.iter().copied().skip(2));
             docker_text(&create)?;
-            let copied = docker_text(&[
-                "cp",
-                &format!("{}/.", assets.directory.display()),
-                &format!("{container}:/usr/share/nginx/html"),
-            ])
-            .and_then(|_| docker_text(&["start", &container]));
-            if let Err(error) = copied {
-                let _ = remove_container(&container);
-                return Err(error);
+            let placed = match &assets {
+                Some(assets) => docker_text(&[
+                    "cp",
+                    &format!("{}/.", assets.directory.display()),
+                    &format!("{container}:/usr/share/nginx/html"),
+                ])
+                .map(|_| ()),
+                None => Ok(()),
+            }
+            .and_then(|()| self.put_files(&container, &service.files))
+            .and_then(|records| docker_text(&["start", &container]).map(|_| records));
+            match placed {
+                Ok(records) => records,
+                Err(error) => {
+                    let _ = remove_container(&container);
+                    return Err(error);
+                }
             }
         } else {
             docker_text(&arg_refs)?;
-        }
+            vec![]
+        };
         self.note_image_volumes(&container);
-        let tap = if self.egress == Egress::Blocked {
+        let tap = if self.egress == Egress::Blocked && listens {
             let started = match &self.relay {
                 Some((setting, values)) if setting.service == service.name => {
                     self.start_relay(service, port, setting, values)
@@ -1004,12 +1234,17 @@ impl Session {
             detail: String::new(),
             web_build: assets.as_ref().map(|s| s.basis.clone()),
             tap,
+            files,
         };
         match wait_ready(&running) {
             Ok(ms) => {
                 running.ready = true;
                 running.ready_after_ms = Some(ms);
-                running.detail = format!("127.0.0.1:{port} で準備できた（{ms}ms）");
+                running.detail = if listens {
+                    format!("127.0.0.1:{port} で準備できた（{ms}ms）")
+                } else {
+                    format!("終了コード0で終わった（{ms}ms）")
+                };
             }
             Err(error) => {
                 running.detail = error.to_string();
@@ -1039,6 +1274,73 @@ impl Session {
                 self.image_volumes.push(name.to_owned());
             }
         }
+    }
+
+    /// 対象の本体に付ける名前。遮断時は、元の名前と別名を中継が受け持つので、本体には付けない。
+    fn container_aliases(&self, service: &Service) -> Vec<String> {
+        match self.egress {
+            Egress::Blocked => vec![self.alias(&service.name)],
+            Egress::Allowed => public_names(service),
+        }
+    }
+
+    /// 固定したコミットの写しから、指定したファイルをコンテナの中へ置く。置いたファイルの記録を返す。
+    /// ファイルだけを入れたtarを `docker cp` へ渡す。親のディレクトリがなければ作られ、
+    /// 既にあるディレクトリの権限と所有者は変わらない。
+    fn put_files(&self, container: &str, files: &[FileMount]) -> io::Result<Vec<FileRecord>> {
+        if files.is_empty() {
+            return Ok(vec![]);
+        }
+        let source = self
+            .source
+            .as_ref()
+            .ok_or_else(|| invalid("コンテナへ置くファイルの出所がありません"))?;
+        let mut records = vec![];
+        let mut entries = vec![];
+        for file in files {
+            let path = source.join(&file.from);
+            let metadata = fs::symlink_metadata(&path).map_err(|_| {
+                invalid(format!(
+                    "コンテナへ置くファイル {} が、固定したコミットの写しにありません",
+                    file.from
+                ))
+            })?;
+            if !metadata.is_file() || metadata.len() > MAX_PLACED_FILE {
+                return Err(invalid(format!(
+                    "コンテナへ置くファイル {} は、{MAX_PLACED_FILE}バイト以内の通常のファイルにしてください",
+                    file.from
+                )));
+            }
+            let bytes = fs::read(&path)?;
+            use sha2::{Digest, Sha256};
+            records.push(FileRecord {
+                from: file.from.clone(),
+                to: file.to.clone(),
+                bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+            });
+            #[cfg(unix)]
+            let executable = {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            };
+            #[cfg(not(unix))]
+            let executable = false;
+            entries.push((
+                file.to.trim_start_matches('/').to_owned(),
+                bytes,
+                executable,
+            ));
+        }
+        let archive = tar_archive(&entries)?;
+        let output = docker_with_input(&["cp", "-", &format!("{container}:/")], &archive)?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "コンテナ {container} へファイルを置けません: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(records)
     }
 
     /// 対象の本体のネットワーク別名。遮断時は中継が元の名前を受け持つ。
@@ -1088,20 +1390,27 @@ impl Session {
         ]);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         docker_text(&refs)?;
-        let started = docker_text(&[
-            "network",
-            "connect",
-            "--alias",
-            &service.name,
-            &self.network,
-            &name,
-        ])
-        .and_then(|_| docker_text(&["start", &name]));
+        let started = self
+            .connect_as(service, &name)
+            .and_then(|_| docker_text(&["start", &name]));
         if let Err(error) = started {
             let _ = remove_container(&name);
             return Err(error);
         }
         Ok(name)
+    }
+
+    /// 中継を試験用ネットワークへつなぎ、対象の名前と別名を受け持たせる。
+    fn connect_as(&self, service: &Service, tap: &str) -> io::Result<String> {
+        let names = public_names(service);
+        let mut args = vec!["network", "connect"];
+        for name in &names {
+            args.push("--alias");
+            args.push(name);
+        }
+        args.push(&self.network);
+        args.push(tap);
+        docker_text(&args)
     }
 
     /// プロトコルを解釈する中継を、既存の中継と同じ位置に置く。基盤の実行ファイルをコンテナへ入れて動かす。
@@ -1155,16 +1464,7 @@ impl Session {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         docker_text(&refs)?;
         let started = docker_text(&["cp", &binary.to_string_lossy(), &format!("{name}:/relay")])
-            .and_then(|_| {
-                docker_text(&[
-                    "network",
-                    "connect",
-                    "--alias",
-                    &service.name,
-                    &self.network,
-                    &name,
-                ])
-            })
+            .and_then(|_| self.connect_as(service, &name))
             .and_then(|_| docker_text(&["start", &name]));
         // 実行ファイルがコンテナの中で動かない場合（別のOS向け、glibcの世代の違い）は、すぐに終了する。
         let ready = started.and_then(|_| {
@@ -1371,9 +1671,11 @@ impl Session {
         }
     }
 
+    /// ホストへ公開したポート。終了を待つコンテナは待ち受けを持たないので、含めない。
     pub fn ports(&self) -> BTreeMap<String, u16> {
         self.services
             .iter()
+            .filter(|s| s.port != 0)
             .map(|s| (s.spec.name.clone(), s.port))
             .collect()
     }
@@ -1381,7 +1683,7 @@ impl Session {
     pub fn port_of(&self, name: &str) -> io::Result<u16> {
         self.services
             .iter()
-            .find(|s| s.spec.name == name)
+            .find(|s| s.spec.name == name && s.port != 0)
             .map(|s| s.port)
             .ok_or_else(|| invalid(format!("コンテナ {name} のポートがありません")))
     }
@@ -1464,7 +1766,6 @@ impl Session {
         if self.services[index].spec.volumes.is_empty() {
             return Err(invalid("読み取り専用にするボリュームがありません"));
         }
-        let name = self.services[index].spec.name.clone();
         remove_container(&self.services[index].container)?;
         let spec = self.services[index].spec.clone();
         let port = self.services[index].port;
@@ -1480,11 +1781,13 @@ impl Session {
             format!("eel.trial={}", self.trial),
             "--network".into(),
             self.network.clone(),
-            "--network-alias".into(),
-            self.alias(&name),
             "--restart".into(),
             "no".into(),
         ];
+        for alias in self.container_aliases(&spec) {
+            args.push("--network-alias".into());
+            args.push(alias);
+        }
         if self.egress == Egress::Allowed {
             args.push("--publish".into());
             args.push(format!("127.0.0.1:{port}:{}", spec.expose));
@@ -1507,7 +1810,16 @@ impl Session {
         args.push(spec.image.clone());
         args.extend(spec.command.iter().cloned());
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        docker_text(&arg_refs)?;
+        if spec.files.is_empty() {
+            docker_text(&arg_refs)?;
+        } else {
+            // 作り直したコンテナにも、同じファイルを置いてから起動する。
+            let mut create = vec!["create"];
+            create.extend(arg_refs.iter().copied().skip(2));
+            docker_text(&create)?;
+            self.put_files(&container, &spec.files)?;
+            docker_text(&["start", &container])?;
+        }
         self.note_image_volumes(&container);
         Ok(index)
     }
@@ -1529,15 +1841,15 @@ impl Session {
                 (running, "データベースのコンテナを起動し直した")
             }
             TrialFault::DatabaseUnreachable => {
-                let alias = self.alias(&self.services[index].spec.name);
-                docker_text(&[
-                    "network",
-                    "connect",
-                    "--alias",
-                    &alias,
-                    &self.network,
-                    &self.services[index].container,
-                ])?;
+                let aliases = self.container_aliases(&self.services[index].spec);
+                let mut args = vec!["network", "connect"];
+                for alias in &aliases {
+                    args.push("--alias");
+                    args.push(alias);
+                }
+                args.push(&self.network);
+                args.push(&self.services[index].container);
+                docker_text(&args)?;
                 let connected = inspect_network(&self.services[index].container, &self.network)?;
                 (connected, "データベースを試験用ネットワークへ接続し直した")
             }
@@ -1820,6 +2132,7 @@ impl Session {
                         log_text,
                         detail: s.detail.clone(),
                         web_build: s.web_build.clone(),
+                        files: s.files.clone(),
                     }
                 })
                 .collect(),
@@ -1952,6 +2265,9 @@ fn wait_ready(running: &Running) -> io::Result<u64> {
 }
 
 fn wait_ready_for(running: &Running, timeout: Duration) -> io::Result<u64> {
+    if running.spec.ready == ReadyCheck::Completed {
+        return wait_completed(running, timeout);
+    }
     let started = Instant::now();
     loop {
         if !inspect_running(&running.container)? {
@@ -1977,6 +2293,7 @@ fn wait_ready_for(running: &Running, timeout: Duration) -> io::Result<u64> {
                 cmd.extend(args.iter().map(String::as_str));
                 docker(&cmd).map(|o| o.status.success()).unwrap_or(false)
             }
+            ReadyCheck::Completed => unreachable!("終了を待つコンテナは wait_completed で待つ"),
         };
         if ok {
             return Ok(started.elapsed().as_millis() as u64);
@@ -1984,6 +2301,39 @@ fn wait_ready_for(running: &Running, timeout: Duration) -> io::Result<u64> {
         if started.elapsed() >= timeout {
             return Err(io::Error::other(format!(
                 "コンテナ {} が {}ms 以内に準備できなかった: {}",
+                running.spec.name,
+                timeout.as_millis(),
+                logs(&running.container)
+            )));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// コンテナが終わるまで待つ。終了コード0だけを、準備できたとみなす。
+fn wait_completed(running: &Running, timeout: Duration) -> io::Result<u64> {
+    let started = Instant::now();
+    loop {
+        let state = docker_text(&[
+            "inspect",
+            "--format",
+            "{{.State.Status}} {{.State.ExitCode}}",
+            &running.container,
+        ])?;
+        match state.split_once(' ') {
+            Some(("exited", "0")) => return Ok(started.elapsed().as_millis() as u64),
+            Some(("exited" | "dead", code)) => {
+                return Err(io::Error::other(format!(
+                    "コンテナ {} が終了コード {code} で終わった: {}",
+                    running.spec.name,
+                    logs(&running.container)
+                )));
+            }
+            _ => {}
+        }
+        if started.elapsed() >= timeout {
+            return Err(io::Error::other(format!(
+                "コンテナ {} が {}ms 以内に終わらなかった: {}",
                 running.spec.name,
                 timeout.as_millis(),
                 logs(&running.container)
@@ -2514,6 +2864,8 @@ mod tests {
                 volumes: vec![],
                 web_build: None,
                 start_after: vec![],
+                files: vec![],
+                aliases: vec![],
                 engine: DatabaseEngine::default(),
                 command: vec![],
                 ready: ReadyCheck::Tcp,
@@ -2602,6 +2954,161 @@ mod tests {
         assert_eq!(order(&chained), ["certs", "seed", "db"]);
     }
 
+    fn one(extra: serde_json::Value) -> ContainerSpec {
+        let mut service = serde_json::json!({
+            "name": "app",
+            "image": "nginx:1.27.4-alpine@sha256:4ff102c5d78d254a6f0da062b3cf39eaf07f01eec0927fd21e219d0af8bc0591",
+            "role": "app", "expose": 80, "ready": "tcp", "ready_timeout_ms": 5000,
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            service[key] = value.clone();
+        }
+        serde_json::from_value(serde_json::json!({ "services": [service] })).unwrap()
+    }
+
+    #[test]
+    fn files_take_repository_paths_and_absolute_container_paths() {
+        let plain = one(serde_json::json!({}));
+        validate_spec(&plain).unwrap();
+        // 指定のない設定の保存形は変わらない。
+        let saved = serde_json::to_string(&plain).unwrap();
+        assert!(saved.contains("\"expose\":80"));
+        for absent in ["files", "aliases", "completed"] {
+            assert!(!saved.contains(absent), "{absent}: {saved}");
+        }
+        let file =
+            |from: &str, to: &str| one(serde_json::json!({"files": [{"from": from, "to": to}]}));
+        validate_spec(&file(
+            "configs/nginx/nginx.conf",
+            "/etc/nginx/nginx.conf.template",
+        ))
+        .unwrap();
+        for (from, to) in [
+            ("/etc/passwd", "/etc/x"),
+            ("../outside", "/etc/x"),
+            ("configs/../../outside", "/etc/x"),
+            ("configs//x", "/etc/x"),
+            ("", "/etc/x"),
+            ("configs/x", "etc/x"),
+            ("configs/x", "/etc/../x"),
+            ("configs/x", "/etc/x/"),
+            ("configs/x", "/"),
+        ] {
+            assert!(validate_spec(&file(from, to)).is_err(), "{from} -> {to}");
+        }
+        // 同じ置き場所を2回は指定できない。件数にも上限がある。
+        let twice = one(serde_json::json!({"files": [
+            {"from": "a", "to": "/etc/x"}, {"from": "b", "to": "/etc/x"}
+        ]}));
+        assert!(validate_spec(&twice).is_err());
+        let many: Vec<_> = (0..=MAX_PLACED_FILES)
+            .map(|i| serde_json::json!({"from": format!("f{i}"), "to": format!("/etc/f{i}")}))
+            .collect();
+        assert!(validate_spec(&one(serde_json::json!({"files": many}))).is_err());
+        // 出所の写しを渡さずに、ファイルを置く設定は起動できない。
+        let error = Session::start("no-source", &file("a", "/etc/a"))
+            .err()
+            .expect("拒否")
+            .to_string();
+        assert!(error.contains("出所"), "{error}");
+    }
+
+    #[test]
+    fn aliases_are_host_names_that_do_not_collide() {
+        let alias = |names: &[&str]| one(serde_json::json!({"aliases": names}));
+        validate_spec(&alias(&["oe.openelis.org", "oe-2"])).unwrap();
+        for bad in [
+            "",
+            "Upper.example",
+            "under_score",
+            "-start.example",
+            "end-.example",
+            "a..b",
+            "a b",
+        ] {
+            assert!(validate_spec(&alias(&[bad])).is_err(), "{bad}");
+        }
+        // 自分やほかのコンテナの名前、中継用の接続先名、ほかの別名とは重ねられない。
+        for taken in ["app", "app-real"] {
+            let error = validate_spec(&alias(&[taken])).unwrap_err().to_string();
+            assert!(error.contains("重複"), "{error}");
+        }
+        assert!(validate_spec(&alias(&["x.example", "x.example"])).is_err());
+        let mut two = named(&[("web", "app", &[]), ("db", "database", &[])]);
+        two.services[0].aliases = vec!["shared.example".into()];
+        two.services[1].aliases = vec!["shared.example".into()];
+        assert!(validate_spec(&two).is_err());
+        two.services[1].aliases = vec!["db.example".into()];
+        validate_spec(&two).unwrap();
+    }
+
+    #[test]
+    fn a_service_that_runs_to_completion_has_no_port_and_cannot_be_the_database() {
+        let completed: ContainerSpec = serde_json::from_value(serde_json::json!({"services": [{
+            "name": "certs",
+            "image": "nginx:1.27.4-alpine@sha256:4ff102c5d78d254a6f0da062b3cf39eaf07f01eec0927fd21e219d0af8bc0591",
+            "role": "other", "ready": "completed", "ready_timeout_ms": 5000,
+        }]}))
+        .unwrap();
+        validate_spec(&completed).unwrap();
+        let saved = serde_json::to_string(&completed).unwrap();
+        assert!(saved.contains("\"ready\":\"completed\"") && !saved.contains("expose"));
+        let mut with_port = completed.clone();
+        with_port.services[0].expose = 80;
+        assert!(validate_spec(&with_port).is_err());
+        let mut database = completed.clone();
+        database.services[0].role = ServiceRole::Database;
+        assert!(validate_spec(&database).is_err());
+        // 待ち受けるコンテナには、これまでどおりポートが要る。
+        let mut listening = completed;
+        listening.services[0].ready = ReadyCheck::Tcp;
+        assert!(validate_spec(&listening).is_err());
+    }
+
+    #[test]
+    fn tar_archive_holds_only_the_files_with_fixed_owner_and_time() {
+        let long = format!("{}/{}", "d".repeat(120), "f".repeat(90));
+        let archive = tar_archive(&[
+            (
+                "run/secrets/common.properties".into(),
+                b"a=b\n".to_vec(),
+                false,
+            ),
+            (long.clone(), vec![7u8; 600], true),
+        ])
+        .unwrap();
+        // 見出し1件、内容は512バイトの倍数に切り上げ、末尾に空の2ブロック。
+        assert_eq!(archive.len(), 512 + 512 + 512 + 1024 + 1024);
+        let field = |block: &[u8], range: std::ops::Range<usize>| {
+            String::from_utf8_lossy(&block[range])
+                .trim_end_matches(['\0', ' '])
+                .to_owned()
+        };
+        let first = &archive[..512];
+        assert_eq!(field(first, 0..100), "run/secrets/common.properties");
+        assert_eq!(field(first, 100..108), "0000644");
+        assert_eq!(
+            (field(first, 108..116), field(first, 116..124)),
+            ("0000000".into(), "0000000".into())
+        );
+        assert_eq!(field(first, 124..136), "00000000004");
+        assert_eq!(field(first, 136..148), "00000000000");
+        assert_eq!(first[156], b'0');
+        assert_eq!(&first[257..262], b"ustar");
+        // 検査用の合計は、合計の欄を空白として数えた値。
+        let mut blank = first.to_vec();
+        blank[148..156].fill(b' ');
+        let sum: u64 = blank.iter().map(|b| u64::from(*b)).sum();
+        assert_eq!(field(first, 148..154), format!("{sum:06o}"));
+        assert_eq!(&archive[512..516], b"a=b\n");
+        // 100バイトを超えるパスは、名前と前半に分ける。
+        let second = &archive[1024..1536];
+        assert_eq!(field(second, 0..100), "f".repeat(90));
+        assert_eq!(field(second, 345..500), "d".repeat(120));
+        assert_eq!(field(second, 100..108), "0000755");
+        assert!(tar_archive(&[("x".repeat(101), vec![], false)]).is_err());
+    }
+
     #[test]
     fn start_after_rejects_unknown_names_itself_duplicates_and_cycles() {
         for (spec, expected) in [
@@ -2654,6 +3161,8 @@ mod tests {
                 volumes: vec![],
             web_build: None,
             start_after: vec![],
+            files: vec![],
+            aliases: vec![],
             engine: DatabaseEngine::default(),
                 command: vec![],
                 ready: ReadyCheck::Http { path: "/".into(), tls: false },

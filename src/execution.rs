@@ -498,6 +498,7 @@ fn inventory(
     repository: &str,
     commit: &str,
     prefix: Option<&str>,
+    also: &[&str],
 ) -> io::Result<(String, Vec<SnapshotFile>)> {
     let found = git_text(
         root,
@@ -522,7 +523,9 @@ fn inventory(
         let (header, path) = entry
             .split_once('\t')
             .ok_or_else(|| invalid("Gitのファイル情報が不正です"))?;
-        if prefix.is_some_and(|p| path != p && !path.starts_with(&format!("{p}/"))) {
+        if prefix.is_some_and(|p| path != p && !path.starts_with(&format!("{p}/")))
+            && !also.contains(&path)
+        {
             continue;
         }
         relative(path)?;
@@ -978,13 +981,27 @@ pub fn execute_with_dependencies(
         ));
     }
     let root = fs::canonicalize(repository_root)?;
+    // コンテナへ置くファイルは、固定版に含めて、同じコミットの内容を渡す。
+    let placed: Vec<&str> = recipe
+        .containers
+        .iter()
+        .flat_map(|c| &c.services)
+        .flat_map(|s| &s.files)
+        .map(|f| f.from.as_str())
+        .collect();
     let (tree, files) = inventory(
         &root,
         &recipe.source.repository,
         &recipe.source.commit,
         (recipe.runtime == Runtime::Browser).then_some(recipe.source.path.as_str()),
+        &placed,
     )?;
     check_target_files(&recipe, &files)?;
+    if let Some(missing) = placed.iter().find(|p| !files.iter().any(|f| &f.path == *p)) {
+        return Err(invalid(format!(
+            "コンテナへ置くファイル {missing} が固定コミットにありません"
+        )));
+    }
     let (program, runtime_version) = runtime_available(&recipe.runtime).map_err(invalid)?;
     let mut dependencies: Vec<FetchedDependency> = vec![];
     if let Some(setup) = &recipe.python {
@@ -1009,6 +1026,7 @@ pub fn execute_with_dependencies(
                 &dependency.repository,
                 &dependency.commit,
                 dependency.root.as_deref(),
+                &[],
             )?;
             if dependency_files.is_empty() {
                 return Err(invalid(format!(
@@ -1074,6 +1092,7 @@ pub fn execute_with_dependencies(
                     value: v.value,
                 })
                 .collect(),
+            Some(&snapshot),
         )?),
         None => None,
     };
