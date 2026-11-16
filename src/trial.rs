@@ -13,6 +13,9 @@ pub const TEST_VALUE: &str = "{{test_value}}";
 /// 引数の中で、固定版（読み取り専用の複製）の最上位の場所に置き換える文字列。
 pub const SOURCE_ROOT: &str = "{{source}}";
 const MAX_STATE: u64 = 1024 * 1024;
+/// 故障を解除した後に、各コンテナの準備を待つ上限。初回の起動を待つ上限
+/// （`container::MAX_READY_MS`）とは分ける。復旧では、初期化の済んだコンテナを待つ。
+pub const MAX_RECOVERY_MS: u64 = 300_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -455,8 +458,10 @@ pub fn validate(
                 "復旧後の読み直しは、データベースの停止・切断・読み取り専用の故障だけに使えます",
             ));
         }
-        if !(1..=crate::container::MAX_READY_MS).contains(&recovery.ready_timeout_ms) {
-            return Err(invalid("復旧後の待機上限は1〜300000ミリ秒です"));
+        if !(1..=MAX_RECOVERY_MS).contains(&recovery.ready_timeout_ms) {
+            return Err(invalid(format!(
+                "復旧後の待機上限は1〜{MAX_RECOVERY_MS}ミリ秒です"
+            )));
         }
     }
     if spec.fault == TrialFault::ServerNotStarted && !has_server {

@@ -297,7 +297,7 @@ fn git(root: &Path, args: &[&str]) -> io::Result<String> {
 struct Container(String);
 impl Drop for Container {
     fn drop(&mut self) {
-        let _ = small_output(command("docker", &["rm", "-f", &self.0]));
+        let _ = small_output(command("docker", &["rm", "-f", "-v", &self.0]));
     }
 }
 /// 未コミットの作業ファイルは使わず、Gitの固定コミットをアーカイブしてコンテナへ渡す。
@@ -483,7 +483,7 @@ fn execute(
             record.report.preparation = Status::Failed;
         }
     }
-    small_output(command("docker", &["rm", "-f", &name]))?;
+    small_output(command("docker", &["rm", "-f", "-v", &name]))?;
     record.container_removed = true;
     Ok(())
 }

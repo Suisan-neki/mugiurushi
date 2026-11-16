@@ -1166,10 +1166,20 @@ fn postgres(engine: mugiurushi::database::DatabaseEngine) -> ContainerSpec {
             web_build: None,
             engine,
             command: vec![],
+            // このイメージは、初期化の間だけUNIXソケットで待ち受けるサーバーを動かし、止めてから本番のサーバーを起動する。
+            // 接続先を指定しないと、初期化用のサーバーで準備できたと判定してしまう。TCPで待ち受けるのは本番のサーバーだけである。
             ready: ReadyCheck::Exec {
-                args: ["pg_isready", "-U", "clinic", "-d", "records"]
-                    .map(String::from)
-                    .to_vec(),
+                args: [
+                    "pg_isready",
+                    "-h",
+                    "127.0.0.1",
+                    "-U",
+                    "clinic",
+                    "-d",
+                    "records",
+                ]
+                .map(String::from)
+                .to_vec(),
             },
             ready_timeout_ms: 60000,
         }],
@@ -2036,5 +2046,127 @@ fn relay_cuts_at_the_chosen_point_and_the_database_state_depends_on_the_point() 
             "{label}"
         );
         assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+    }
+}
+
+fn volume_present(name: &str) -> bool {
+    Command::new("docker")
+        .args(["volume", "inspect", name])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn volumes_declared_by_the_image_are_removed_with_the_trial() {
+    if !docker_available() {
+        return;
+    }
+    // MariaDBのイメージは /var/lib/mysql をボリュームとして宣言している。設定では何も載せない。
+    let mut session = Session::start("image-volume", &mariadb_alone()).unwrap();
+    let phase = session.snapshot();
+    assert!(phase.volumes.is_empty());
+    assert_eq!(phase.image_volumes.len(), 1, "{:?}", phase.image_volumes);
+    let volume = phase.image_volumes[0].clone();
+    assert!(volume_present(&volume));
+    assert_eq!(session.cleanup().unwrap(), Vec::<String>::new());
+    assert!(!volume_present(&volume), "{volume} が残っている");
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn an_image_volume_that_remains_is_reported_after_cleanup() {
+    if !docker_available() {
+        return;
+    }
+    let mut session = Session::start("image-volume-held", &mariadb_alone()).unwrap();
+    let phase = session.snapshot();
+    let volume = phase.image_volumes[0].clone();
+    // 別のコンテナが同じボリュームを載せていると、対象のコンテナを消してもボリュームは消えない。
+    let holder = format!("eel-test-holder-{}", std::process::id());
+    let created = Command::new("docker")
+        .args(["create", "--name", &holder, "--volumes-from"])
+        .arg(&phase.services[0].container)
+        .arg(NGINX)
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let outcome = session.cleanup();
+    let _ = Command::new("docker")
+        .args(["rm", "-f", "-v", &holder])
+        .output();
+    let _ = Command::new("docker")
+        .args(["volume", "rm", &volume])
+        .output();
+    let error = outcome.unwrap_err().to_string();
+    assert!(error.contains(&format!("volume:{volume}")), "{error}");
+    assert!(!volume_present(&volume), "試験の後始末で {volume} が残った");
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn a_service_that_never_becomes_ready_leaves_its_last_log_lines() {
+    if !docker_available() {
+        return;
+    }
+    // 起動の直後に標準エラーへ100行を書き、その後は標準出力へ書く。待ち受けは始めない。
+    // 2つ目は、記録に読み込む上限（4MiB）を超える量を標準出力へ書く。
+    let never_ready = |name: &str, script: &str| {
+        let mut service = nginx(name, ServiceRole::Other);
+        service.command = vec!["sh".into(), "-c".into(), script.into()];
+        service.ready = ReadyCheck::Tcp;
+        service.ready_timeout_ms = 8000;
+        service
+    };
+    let early = "i=0; while [ $i -lt 100 ]; do echo EEL-EARLY-$i >&2; i=$((i+1)); done";
+    for (name, script, complete) in [
+        (
+            "streams",
+            format!("{early}; sleep 1; echo working; echo EEL-LAST-LINE; sleep 300"),
+            true,
+        ),
+        (
+            "large",
+            format!(
+                "{early}; head -c 5000000 /dev/zero | tr '\\000' x | fold -w 100; echo; echo EEL-LAST-LINE; sleep 300"
+            ),
+            false,
+        ),
+    ] {
+        let spec = ContainerSpec {
+            services: vec![never_ready(name, &script)],
+            egress: Egress::Blocked,
+            relay: None,
+        };
+        let mut session = Session::start("log-tail", &spec).unwrap();
+        let phase = session.snapshot();
+        session.cleanup().unwrap();
+        let service = &phase.services[0];
+        assert!(!service.ready, "{name}");
+        assert_eq!(
+            service.log_complete, complete,
+            "{name}: {}",
+            service.log_note
+        );
+        let shown: String = service.detail.chars().rev().take(300).collect();
+        assert!(
+            service.detail.contains("準備できなかった"),
+            "{name}: {shown}"
+        );
+        assert!(service.detail.contains("EEL-LAST-LINE"), "{name}: {shown}");
+        assert!(service.log_excerpt.contains("EEL-LAST-LINE"), "{name}");
+        // 全文は、標準出力の後ろに標準エラーをつないだ形のまま残る。判定条件はこの全文を読む。
+        assert!(service.log_text.contains("EEL-EARLY-99"), "{name}");
+        if complete {
+            assert!(service.log_text.contains("EEL-LAST-LINE"), "{name}");
+            assert!(service.log_excerpt.contains("EEL-EARLY-99"), "{name}");
+            assert!(!service.log_excerpt.contains("EEL-EARLY-0\n"), "{name}");
+        } else {
+            assert!(!service.log_excerpt.contains("EEL-EARLY"), "{name}");
+        }
     }
 }

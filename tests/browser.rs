@@ -242,6 +242,21 @@ fn validates_the_pinned_openemr_recipe_without_running_it() {
 }
 
 #[test]
+fn validates_the_pinned_openmrs_recipe_without_running_it() {
+    let recipe: mugiurushi::execution::Recipe = serde_json::from_str(include_str!(
+        "../examples/openmrs-browser/register-recipe.json"
+    ))
+    .unwrap();
+    mugiurushi::execution::validate_recipe(&recipe).unwrap();
+    let services = &recipe.containers.as_ref().unwrap().services;
+    assert_eq!(services.len(), 4);
+    // 初回の起動でDBのスキーマを作るバックエンドは、5分では準備できない。
+    let backend = services.iter().find(|s| s.name == "backend").unwrap();
+    assert!(backend.ready_timeout_ms > 300_000);
+    assert!(backend.ready_timeout_ms <= mugiurushi::container::MAX_READY_MS);
+}
+
+#[test]
 fn relation_requires_existing_distinct_probes_and_columns() {
     let mut recipe: mugiurushi::execution::Recipe =
         serde_json::from_str(include_str!("../examples/openemr-browser/soap-recipe.json")).unwrap();
