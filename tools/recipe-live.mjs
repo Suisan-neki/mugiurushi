@@ -14,6 +14,7 @@ import path from 'node:path';
 import {spawnSync, execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {count} from './recipe-count.mjs';
+import {adopt} from './recipe-adopt.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), bin = process.env.REVIEW_BINARY || path.join(root, 'target/debug/mugiurushi');
 const [recipeFile, name, ...flags] = process.argv.slice(2);
 assert(recipeFile && /^[a-z0-9][a-z0-9-]{0,63}$/.test(name || ''), '使い方: node tools/recipe-live.mjs <レシピ> <出力先の名前（英小文字・数字・ハイフン）> [--track | --track-only] [--command=<サービス名>=<JSONの配列>] [--limit-ms=<ミリ秒>]');
@@ -100,23 +101,8 @@ if (phase?.value_trace) {
   summary.draft = {rules: draft.rules, database: draft.database.map(p => `${p.database}.${p.schema ? p.schema + '.' : ''}${p.table}.${p.match_column} = ${p.match_value}`), responses: draft.responses.map(w => `${w.method} ${w.path}`), checks: draft.checks.map(c => `${c.id}: ${c.method} ${c.expect} ${c.text}`), skipped: draft.skipped};
   fs.writeFileSync(path.join(output, 'draft.json'), JSON.stringify(draft, null, 1));
   if (flags.includes('--adopt')) {
-    // 候補を取り込む。DBの読み出し先は候補に置き換える。応答の観測先は、同じ要求を指すものがレシピにあればそれを使い、
-    // なければ足す。判定条件は、候補が作る種類（DBの行、HTTPの状態、コンテナのログ）を候補に置き換え、
-    // ほかの種類（画面の表示など）はレシピのものを残す。
-    const adopted = structuredClone(recipe), browser = adopted.browser;
-    const same = w => browser.responses.find(k => k.method === w.method && k.path === w.path);
-    const target = Object.fromEntries(draft.responses.map(w => [w.id, same(w)?.id || w.id]));
-    const provenance = {...(browser.provenance || {})};
-    provenance.responses = {...(provenance.responses || {})};
-    for (const w of draft.responses) if (!same(w)) { browser.responses.push(w); provenance.responses[w.id] = draft.provenance.responses[w.id]; }
-    browser.database = draft.database;
-    provenance.database = draft.provenance.database;
-    const generated = ['database_rows', 'browser_response', 'container_log'];
-    const kept = adopted.trial.checks.filter(c => !generated.includes(c.method));
-    adopted.trial.checks = [...kept, ...draft.checks.map(c => c.method === 'browser_response' ? {...c, target: target[c.target]} : c)];
-    provenance.checks = draft.provenance.checks;
-    browser.provenance = provenance;
-    if (flags.includes('--track')) { delete browser.track_values; delete browser.value_per_step; }
+    // 候補を取り込む。値の割り当て（値の追跡と、手順ごとの値）は、候補のもとになった試行のままにする。
+    const adopted = adopt(recipe, draft);
     const adoptedFile = path.join(output, 'adopted-recipe.json'); fs.writeFileSync(adoptedFile, JSON.stringify(adopted, null, 2));
     view = cli(['case', 'execute', caseDir, adoptedFile, '--repository-root', repository, '--mode', 'local', '--actor', '合成の試験担当', '--reason', name + '（候補を取り込んだレシピ）']);
     const run = view.workspace.evidence.at(-1);

@@ -17,6 +17,7 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   if (url.pathname === '/save') { let body = ''; for await (const chunk of req) body += chunk; saved.push(JSON.parse(body)); res.end('ok'); return; }
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  if (url.pathname === '/health') { res.end(); return; }
   if (url.pathname === '/side') { res.end(html('<label>メモ<input name="memo"></label>')); return; }
   if (url.pathname !== '/') { res.writeHead(404); res.end(); return; }
   res.end(html(`<label>利用者<input id="user"></label><label>パスワード<input type="password" id="pass"></label><button id="login">ログイン</button>
@@ -30,7 +31,8 @@ const server = createServer(async (req, res) => {
       let opened = 0;
       // 押すと、ボタンの文字が変わる。押す前の画面では「ログイン」という名前のボタンが1つだけある。
       document.querySelector('#login').onclick = event => { event.target.textContent = '処理中'; document.querySelector('#form').hidden = false; };
-      document.querySelector('#detail-2').onclick = () => { opened++; };
+      // 押すと、HEADの要求を送る。書き込みではないので、待ち合わせにはしない。
+      document.querySelector('#detail-2').onclick = () => { opened++; fetch('/health', {method: 'HEAD'}); };
       document.querySelector('#clear-contact').onclick = () => { document.querySelector('input[name=contact]').value = ''; };
       document.querySelector('#save').onclick = async () => {
         const memo = document.querySelector('iframe').contentDocument.querySelector('input').value;
@@ -63,6 +65,8 @@ try {
   await page.locator('label[for=sex-m] span').click();
   await page.frameLocator('iframe').locator('input').click(); await page.keyboard.type('メモ EEL-TEST-REC');
   await page.locator('#detail-2').click();
+  // HEADの応答が届いてから、次の操作をする。
+  await page.waitForResponse(r => r.request().method() === 'HEAD');
   // 入れた値を、別の操作が消す。人は同じ値を入れ直す。値は1回の入力で入る（貼り付けと同じ）。
   await page.locator('input[name=contact]').fill('内線 12');
   await page.locator('#clear-contact').click();

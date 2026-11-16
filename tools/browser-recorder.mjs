@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 
 export const RULES = 2;
+const WAITED_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
 const ROLES = ['button', 'textbox', 'link', 'combobox', 'checkbox', 'menuitem', 'tab', 'heading'];
 const slug = text => String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
 
@@ -75,12 +76,13 @@ function capture() {
  */
 export async function record(context, options) {
   const steps = [], problems = [], pending = new Set(), secrets = Object.entries(options.secrets || {}).filter(([, v]) => typeof v === 'string' && v.length);
-  // クリックの後に対象が送った書き込みの要求（GET以外）と、その応答。人が次の操作をする前に応答が届いていれば、
+  // クリックの後に対象が送った書き込みの要求と、その応答。対象にするメソッドは、レシピの応答の観測先が
+  // 受け付けるもののうち、GET以外である。HEADやOPTIONSを待ち合わせにすると、レシピの検査が拒否する。人が次の操作をする前に応答が届いていれば、
   // 人はその応答を待ったとみなし、手順に待ち合わせを付ける。付けないと、再実行は応答を待たずに次の操作へ進む。
   let sequence = 0, latest = null;
   const owners = new WeakMap(), waited = new Map(), bySequence = new Map();
   context.on('request', request => {
-    if (request.method() === 'GET' || latest?.kind !== 'click' || waited.has(latest.sequence)) return;
+    if (!WAITED_METHODS.includes(request.method()) || latest?.kind !== 'click' || waited.has(latest.sequence)) return;
     try { if (!options.origins.includes(new URL(request.url()).origin)) return; } catch { return; }
     owners.set(request, latest.sequence);
   });

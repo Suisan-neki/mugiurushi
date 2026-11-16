@@ -21,6 +21,7 @@
     "test:user-trial": "node tools/user-trial-smoke.mjs",
     "test:ui": "npm run test:journey && npm run test:dialogue && npm run test:user-trial",
     "test:trial-plan": "node --test tools/openemr-trial-plan-tests.mjs",
+    "test:recipe-adopt": "node --test tools/recipe-adopt-tests.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint \"ui/*.js\"",
     "test:api": "node --test tools/api-tests.mjs",
