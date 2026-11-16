@@ -7,7 +7,7 @@ import {mkdtemp, readFile, writeFile, mkdir, stat, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve, join} from 'node:path';
 import {chromium} from 'playwright';
-import {record} from './browser-recorder.mjs';
+import {record, RULES} from './browser-recorder.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const temp = await mkdtemp(join(tmpdir(), 'eel-recorder-'));
@@ -21,14 +21,18 @@ const server = createServer(async (req, res) => {
   if (url.pathname !== '/') { res.writeHead(404); res.end(); return; }
   res.end(html(`<label>利用者<input id="user"></label><label>パスワード<input type="password" id="pass"></label><button id="login">ログイン</button>
     <div id="form" hidden><label>記録<textarea name="note"></textarea></label><select name="ward" aria-label="病棟"><option>東</option><option>西</option></select>
+      <style>.hidden-input{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}</style>
+      <input class="hidden-input" type="radio" name="sex" id="sex-m" value="M"><label for="sex-m"><span>男</span></label>
+      <input class="hidden-input" type="radio" name="sex" id="sex-f" value="F"><label for="sex-f"><span>女</span></label>
       <button id="detail-1">詳細</button><button id="detail-2">詳細</button><iframe name="side" src="/side"></iframe><button id="save">保存</button><p id="result"></p></div>
     <script>
       let opened = 0;
-      document.querySelector('#login').onclick = () => { document.querySelector('#form').hidden = false; };
+      // 押すと、ボタンの文字が変わる。押す前の画面では「ログイン」という名前のボタンが1つだけある。
+      document.querySelector('#login').onclick = event => { event.target.textContent = '処理中'; document.querySelector('#form').hidden = false; };
       document.querySelector('#detail-2').onclick = () => { opened++; };
       document.querySelector('#save').onclick = async () => {
         const memo = document.querySelector('iframe').contentDocument.querySelector('input').value;
-        await (await fetch('/save', {method: 'POST', body: JSON.stringify({user: document.querySelector('#user').value, pass: document.querySelector('#pass').value, note: document.querySelector('textarea').value, ward: document.querySelector('select').value, memo, opened})})).text();
+        await (await fetch('/save', {method: 'POST', body: JSON.stringify({user: document.querySelector('#user').value, pass: document.querySelector('#pass').value, note: document.querySelector('textarea').value, ward: document.querySelector('select').value, sex: document.querySelector('input[name=sex]:checked')?.value ?? null, memo, opened})})).text();
         document.querySelector('#result').textContent = '保存した';
       };
     </script>`));
@@ -49,9 +53,12 @@ try {
   // ここからが「人の操作」。
   await page.locator('#user').click(); await page.keyboard.type(secrets.user);
   await page.locator('#pass').click(); await page.keyboard.type(secrets.pass);
-  await page.getByRole('button', {name: 'ログイン'}).click();
+  // 人がボタンを押している時間を置く。押し始めてから離すまでの間に、道具が押す前の画面を調べる。
+  await page.getByRole('button', {name: 'ログイン'}).click({delay: 150});
   await page.locator('textarea').click(); await page.keyboard.type('所見 EEL-TEST-REC');
   await page.locator('select').selectOption('西');
+  // 見た目を作り込んだラジオボタン。欄そのものは隠れていて、人はラベルの文字を押す。
+  await page.locator('label[for=sex-m] span').click();
   await page.frameLocator('iframe').locator('input').click(); await page.keyboard.type('メモ EEL-TEST-REC');
   await page.locator('#detail-2').click();
   await page.locator('#save').click();
@@ -70,21 +77,29 @@ try {
     ['click', '', 'role', 'ログイン', ''],
     ['fill', '', 'label', '記録', 'literal:所見 {{test_value}}'],
     ['select', '', 'label', '病棟', '西'],
+    // ラベルを押した操作は、ラベルとして記録する。隠れた欄へのクリックは記録しない。
+    ['click', '', 'css', 'label[for="sex-m"]', ''],
     ['fill', 'iframe[name="side"]', 'label', 'メモ', 'literal:メモ {{test_value}}'],
     // 同じ名前のボタンが2つあるので、役割では一意にならず、IDのCSSになる。
     ['click', '', 'css', '#detail-2', ''],
     ['click', '', 'role', '保存', ''],
   ]);
   assert.ok(recorded.actions.every(s => /^[a-z0-9_-]{1,64}$/.test(s.id)) && new Set(recorded.actions.map(s => s.id)).size === recorded.actions.length);
+  // 保存のボタンを押した後に送られた書き込みの要求は、次の操作の前に応答が届いたので、待ち合わせとして残る。
+  const save = recorded.actions.at(-1);
+  assert.deepEqual(recorded.responses, [{id: 'w-' + save.id, method: 'POST', path: '/save'}]);
+  assert.equal(save.wait_response, recorded.responses[0].id);
+  assert.ok(recorded.actions.slice(0, -1).every(s => !('wait_response' in s)));
+  assert.deepEqual(Object.keys(recorded.provenance.responses), [recorded.responses[0].id]);
   assert.deepEqual(Object.keys(recorded.provenance.steps), recorded.actions.map(s => s.id));
-  assert.ok(Object.values(recorded.provenance.steps).every(b => b.source === 'operation_recording' && b.run_id === 'recording-synthetic' && b.rules === 1));
+  assert.ok(Object.values(recorded.provenance.steps).every(b => b.source === 'operation_recording' && b.run_id === 'recording-synthetic' && b.rules === RULES));
   checks.push('操作をラベル・役割・CSSの順で一意に指し、秘密値と試験値を記録に残さない');
 
   // 記録した手順を、既存の実行器でそのまま再実行する。別の試験値で、同じ操作の結果になる。
   const dir = join(temp, 'replay'); await mkdir(dir);
   const secretsPath = join(temp, 'secrets.json'); await writeFile(secretsPath, JSON.stringify(secrets), {mode: 0o600});
   const run_id = 'synthetic-replay', test_value = 'EEL-TEST-REPLAY-7', timeout_ms = 20000 * Number(process.env.EEL_BROWSER_SMOKE_TIMEOUT_SCALE || 1);
-  const spec = {service: 'web', tls: false, start_path: '/', expected_version: version, preparation: [], actions: [...recorded.actions, {id: 'done', action: 'read_text', target: {locator: {by: 'css', selector: '#result'}}, contains: '保存した'}], responses: [], database: []};
+  const spec = {service: 'web', tls: false, start_path: '/', expected_version: version, preparation: [], actions: [...recorded.actions, {id: 'done', action: 'read_text', target: {locator: {by: 'css', selector: '#result'}}, contains: '保存した'}], responses: recorded.responses, database: []};
   await writeFile(join(dir, 'request.json'), JSON.stringify({schema_version: 1, spec, run_id, test_value, origin, origins: [origin], timeout_ms}));
   saved.length = 0;
   const child = spawn(process.execPath, [join(root, 'tools/browser-runner.mjs'), join(dir, 'request.json')], {env: {...process.env, EEL_PLAYWRIGHT_MODULE: join(root, 'node_modules/playwright/index.mjs'), EEL_BROWSER_SECRETS_FILE: secretsPath}, stdio: 'pipe'});
@@ -94,7 +109,7 @@ try {
   await writeFile(join(dir, 'continue.json'), JSON.stringify({run_id, proceed: true}));
   const result = await waitFile('result.json'); child.kill();
   assert.equal(result.completed, true, result.detail + '\n' + JSON.stringify(result.steps.filter(s => !s.completed)));
-  assert.deepEqual(saved, [{user: secrets.user, pass: secrets.pass, note: '所見 ' + test_value, ward: '西', memo: 'メモ ' + test_value, opened: 1}]);
+  assert.deepEqual(saved, [{user: secrets.user, pass: secrets.pass, note: '所見 ' + test_value, ward: '西', sex: 'M', memo: 'メモ ' + test_value, opened: 1}]);
   checks.push('記録した手順を既存の実行器で再実行でき、別の試験値で同じ操作の結果になる');
   console.log(JSON.stringify({version, steps: recorded.actions.length, checks}));
 } finally {

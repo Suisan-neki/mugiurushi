@@ -3,12 +3,15 @@
 //   --track       入力した値を追跡し、入力の手順ごとに異なる値を使う。等値で書いた手書きの判定条件は一致しなくなる。
 //   --track-only  入力した値を追跡するが、値は手順ごとに変えない。手書きの判定条件もそのまま評価する。
 //   --command     実行する環境の都合で、サービスの起動コマンドをこの1回だけ置き換える。レシピのファイルは変えない。
+//   --adopt       追跡した試行の候補（DBの読み出し先、応答の観測先、判定条件）をレシピへ取り込み、もう一度実行する。
+//                 取り込んだレシピは evaluations/<出力先の名前>/adopted-recipe.json に残す。
 // 結果は evaluations/<出力先の名前>/summary.json に残す。ログインの値は EEL_BROWSER_SECRETS_FILE で渡す。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync, execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {count} from './recipe-count.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), bin = process.env.REVIEW_BINARY || path.join(root, 'target/debug/mugiurushi');
 const [recipeFile, name, ...flags] = process.argv.slice(2);
 assert(recipeFile && /^[a-z0-9][a-z0-9-]{0,63}$/.test(name || ''), '使い方: node tools/recipe-live.mjs <レシピ> <出力先の名前（英小文字・数字・ハイフン）> [--track | --track-only] [--command=<サービス名>=<JSONの配列>]');
@@ -61,11 +64,41 @@ const summary = {
   appearances: phase?.value_trace?.appearances.map(a => ({slot: a.slot, database: a.database.map(h => `${h.schema}.${h.table}.${h.column} rows=${h.rows} exact=${h.exact_rows}${h.baseline_unknown ? ' 前の探索なし' : ''}`), requests: a.requests.map(e => `${e.method} ${e.path} -> ${e.status}`), screens: a.screens.length, logs: a.logs})),
   limits: phase?.value_trace?.limits,
   evidence_id: evidence.id,
+  count: count(recipe),
 };
 if (phase?.value_trace) {
   const draft = cli(['case', 'draft', caseDir, '--evidence', evidence.id]);
   summary.draft = {rules: draft.rules, database: draft.database.map(p => `${p.database}.${p.schema ? p.schema + '.' : ''}${p.table}.${p.match_column} = ${p.match_value}`), responses: draft.responses.map(w => `${w.method} ${w.path}`), checks: draft.checks.map(c => `${c.id}: ${c.method} ${c.expect} ${c.text}`), skipped: draft.skipped};
   fs.writeFileSync(path.join(output, 'draft.json'), JSON.stringify(draft, null, 1));
+  if (flags.includes('--adopt')) {
+    // 候補を取り込む。DBの読み出し先は候補に置き換える。応答の観測先は、同じ要求を指すものがレシピにあればそれを使い、
+    // なければ足す。判定条件は、候補が作る種類（DBの行、HTTPの状態、コンテナのログ）を候補に置き換え、
+    // ほかの種類（画面の表示など）はレシピのものを残す。
+    const adopted = structuredClone(recipe), browser = adopted.browser;
+    const same = w => browser.responses.find(k => k.method === w.method && k.path === w.path);
+    const target = Object.fromEntries(draft.responses.map(w => [w.id, same(w)?.id || w.id]));
+    const provenance = {...(browser.provenance || {})};
+    provenance.responses = {...(provenance.responses || {})};
+    for (const w of draft.responses) if (!same(w)) { browser.responses.push(w); provenance.responses[w.id] = draft.provenance.responses[w.id]; }
+    browser.database = draft.database;
+    provenance.database = draft.provenance.database;
+    const generated = ['database_rows', 'browser_response', 'container_log'];
+    const kept = adopted.trial.checks.filter(c => !generated.includes(c.method));
+    adopted.trial.checks = [...kept, ...draft.checks.map(c => c.method === 'browser_response' ? {...c, target: target[c.target]} : c)];
+    provenance.checks = draft.provenance.checks;
+    browser.provenance = provenance;
+    if (flags.includes('--track')) { delete browser.track_values; delete browser.value_per_step; }
+    const adoptedFile = path.join(output, 'adopted-recipe.json'); fs.writeFileSync(adoptedFile, JSON.stringify(adopted, null, 2));
+    view = cli(['case', 'execute', caseDir, adoptedFile, '--repository-root', repository, '--mode', 'local', '--actor', '合成の試験担当', '--reason', name + '（候補を取り込んだレシピ）']);
+    const run = view.workspace.evidence.at(-1);
+    summary.adopted = {
+      count: count(adopted),
+      verdict: view.checks.find(c => c.check_id === recipe.check_id)?.verdict,
+      completed: run.execution.containers?.browser?.completed,
+      results: run.execution.trial?.results?.map(r => `${r.id}: ${r.observed} ${String(r.detail || '').slice(0, 120)}`),
+      leftovers: run.execution.containers?.leftovers,
+    };
+  }
 }
 fs.writeFileSync(path.join(output, 'summary.json'), JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
