@@ -213,7 +213,7 @@ try{
  page.on('response',r=>{
   const p=(async()=>{const request_step=requests.get(r.request());const u=new URL(r.url());if(!request.origins.includes(u.origin))return;
    const observed=await headersOf(r);
-   try{if(r.request().isNavigationRequest()&&r.frame()===page.mainFrame())lastDocument={status:r.status(),headers:observed.headers,cookies:observed.cookies};}catch{}
+   try{if(r.request().isNavigationRequest()&&r.frame()===page.mainFrame())lastDocument={status:r.status(),headers:observed.headers,...(observed.truncated.length?{headers_truncated:observed.truncated}:{}),cookies:observed.cookies};}catch{}
    if(!spec.actions.some(s=>s.id===request_step))return;
    // 件数と合計の大きさの両方に上限を置く。操作器の記録全体が基盤の読み取り上限を超えないようにする。
    // 追跡する値が、要求（クエリ文字列と本文）と応答の本文に含まれていたかを調べる。本文は残さない。
@@ -225,7 +225,7 @@ try{
     const reading=r.body();reading.catch(()=>{});
     try{const body=await Promise.race([reading,new Promise((_,reject)=>setTimeout(()=>reject(Error('timeout')),1500))]);if(body.length<=1024*1024)response_slots=slotsIn([body.toString('utf8')]);else response_unread=true;}catch{response_unread=true;}
    }
-   const exchange={step:request_step,method:r.request().method(),path:u.pathname.slice(0,2048),status:r.status(),resource:r.request().resourceType().slice(0,32),headers:observed.headers,cookies:observed.cookies,request_slots,response_slots,response_unread},size=JSON.stringify(exchange).length;
+   const exchange={step:request_step,method:r.request().method(),path:u.pathname.slice(0,2048),status:r.status(),resource:r.request().resourceType().slice(0,32),headers:observed.headers,...(observed.truncated.length?{headers_truncated:observed.truncated}:{}),cookies:observed.cookies,request_slots,response_slots,response_unread},size=JSON.stringify(exchange).length;
    if(report.exchanges.length>=LIMITS.exchanges||exchangeBytes+size>LIMITS.exchangeBytes)report.exchange_limit=true;
    else{exchangeBytes+=size;report.exchanges.push(exchange);}
 for(const w of spec.responses){if(w.path!==u.pathname||w.method!==r.request().method())continue;if(report.responses.length>=200){report.response_limit=true;continue;}const record={watch:w.id,method:r.request().method(),path:u.pathname,status:r.status(),body_match:null,request_step,payload_sha256:null,headers:observed.headers,...(observed.truncated.length?{headers_truncated:observed.truncated}:{})};report.responses.push(record);if(w.contains!=null||w.payload){try{const body=await r.body();if(body.length<=1024*1024){if(w.contains!=null)record.body_match=body.toString('utf8').includes(replace(w.contains));if(w.payload){const payload=w.payload==='dicom_frame'?singleFrame(r.headers()['content-type']||'',body):body;record.payload_sha256=createHash('sha256').update(payload).digest('hex');}}}catch{}}}

@@ -48,7 +48,8 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/outer') { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(html('<h2>外側の枠</h2><iframe id="inner" src="/inner"></iframe>')); return; }
   if (url.pathname === '/inner') { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(html('<label>深い欄<input name="deep" disabled></label>')); return; }
-  if (url.pathname === '/many') { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(html('<h1>多い画面</h1>' + Array.from({length: 320}, (_, i) => `<input name="f${i}">`).join(''))); return; }
+  // 画面の文書の応答で、上限を超える長さのヘッダー。画像の出どころだけを指定し、画面の動作は変えない。
+  if (url.pathname === '/many') { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('Content-Security-Policy', 'img-src ' + 'https://img.example.invalid '.repeat(30)); res.end(html('<h1>多い画面</h1>' + Array.from({length: 320}, (_, i) => `<input name="f${i}">`).join(''))); return; }
   if (url.pathname === '/track') {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.end(html(`<label>記録<input id="note"></label><button id="send">送る</button><p id="shown"></p>
@@ -167,6 +168,10 @@ try {
   assert.equal(many.content.path, '/many'); assert.equal(many.content.truncated, true);
   assert.equal(many.content.frames[0].fields.length, 300);
   assert.equal(opened.content.truncated, false);
+  // 文書の応答の、上限で後半を切り捨てたヘッダーは、名前を別に残す。切り捨てていないヘッダーの名前は残さない。
+  assert.equal(many.content.document.headers['content-security-policy'].length, 512);
+  assert.deepEqual(many.content.document.headers_truncated, ['content-security-policy']);
+  assert.ok(!('headers_truncated' in opened.content.document));
   checks.push('上限を超えた欄は捨て、切り捨てたことを記録する');
 
   // HTTPのやり取り。宣言していない通信も、操作の段階のものは残る。準備の段階のものは混ぜない。
@@ -188,6 +193,9 @@ try {
   assert.equal(savedResponse.headers['content-security-policy'].length, 512);
   assert.ok(!savedResponse.headers['content-security-policy'].includes('unsafe-inline'));
   assert.deepEqual(savedResponse.headers_truncated, ['content-security-policy']);
+  // やり取りの記録にも、切り捨てたヘッダーの名前を残す。
+  assert.deepEqual(exchange('/save')[0].headers_truncated, ['content-security-policy']);
+  assert.ok(!('headers_truncated' in exchange('/api/undeclared')[0]));
   assert.ok(result.responses.filter(r => r.watch !== 'save').every(r => !('headers_truncated' in r)));
   checks.push('操作中のHTTPのやり取りを、宣言の有無によらず記録する');
 
