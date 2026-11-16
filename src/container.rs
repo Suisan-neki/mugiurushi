@@ -793,7 +793,15 @@ fn docker(args: &[&str]) -> io::Result<Output> {
     if let Some(host) = std::env::var_os("DOCKER_HOST") {
         command.env("DOCKER_HOST", host);
     }
-    command.output()
+    // コンテナ・ネットワーク・ボリュームを作る呼び出しは、終了の合図の回収と重ならないように行う。
+    // 回収が始まった後は、作らない。
+    let creates = matches!(args, ["create" | "run", ..])
+        || matches!(args, ["network" | "volume", "create", ..]);
+    if creates {
+        crate::shutdown::creating(|| crate::shutdown::output(&mut command))
+    } else {
+        crate::shutdown::output(&mut command)
+    }
 }
 
 /// 期限、停止の合図、出力の上限を付けて `docker` を実行した結果。
@@ -837,6 +845,9 @@ fn docker_bounded(
         command.env("DOCKER_HOST", host);
     }
     let mut child = command.spawn()?;
+    // 終了の合図を受けたときに止められるように、実行中のPIDを控える。
+    let pid = child.id();
+    crate::shutdown::hold_command(pid);
     let overflow = Arc::new(AtomicBool::new(false));
     // 上限までを持ち、超えた分は捨てる。上限を超えたことは親へ知らせる。
     let reader = |mut pipe: Box<dyn Read + Send>, limit: usize, flag: Option<Arc<AtomicBool>>| {
@@ -871,8 +882,13 @@ fn docker_bounded(
         None,
     );
     let (ended, status) = loop {
-        if let Some(status) = child.try_wait()? {
-            break (Ended::Exited, Some(status));
+        match child.try_wait() {
+            Ok(Some(status)) => break (Ended::Exited, Some(status)),
+            Ok(None) => {}
+            Err(error) => {
+                crate::shutdown::release_command(pid);
+                return Err(error);
+            }
         }
         let ended = if overflow.load(Ordering::SeqCst) {
             Some(Ended::OutputLimit)
@@ -890,6 +906,7 @@ fn docker_bounded(
         }
         thread::sleep(Duration::from_millis(10));
     };
+    crate::shutdown::release_command(pid);
     let stdout = out.join().unwrap_or_default();
     let stderr = err.join().unwrap_or_default();
     // 終了と同時に上限を超えた場合も、出力が欠けているので、上限を超えたものとして扱う。
@@ -931,10 +948,17 @@ fn docker_with_input(args: &[&str], input: &[u8]) -> io::Result<Output> {
         command.env("DOCKER_HOST", host);
     }
     let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input)?;
-    }
-    child.wait_with_output()
+    // 終了の合図を受けたときに止められるように、実行中のPIDを控える。
+    let pid = child.id();
+    crate::shutdown::hold_command(pid);
+    let written = match child.stdin.take() {
+        Some(mut stdin) => stdin.write_all(input),
+        None => Ok(()),
+    };
+    let output = child.wait_with_output();
+    crate::shutdown::release_command(pid);
+    written?;
+    output
 }
 
 /// 試験用ネットワークの中で、対象に届く名前。コンテナの名前と別名。
@@ -1041,6 +1065,8 @@ impl Session {
             SESSION.fetch_add(1, Ordering::Relaxed)
         );
         let network = format!("eel-{trial}");
+        // 終了の合図を受けたときにも、この試行の資源を回収できるように控える。
+        crate::shutdown::hold_trial(&trial);
         let mut session = Self {
             trial: trial.clone(),
             network: network.clone(),
@@ -1130,6 +1156,13 @@ impl Session {
                 crate::prepared_web::snapshot(Path::new(&root), build)
             })
             .transpose()?;
+        // 終了の合図を受けて回収を始めた後は、イメージの取得を始めない。
+        // コンテナを作る呼び出しは、`docker` の中でも確かめている。
+        if crate::shutdown::stopping() {
+            return Err(io::Error::other(
+                "終了の合図を受けたので、コンテナを起動しない",
+            ));
+        }
         let digest = pull(&service.image)?;
         // 終了を待つコンテナは待ち受けを持たない。ポートを割り当てず、中継も置かない。
         let listens = service.ready != ReadyCheck::Completed;
@@ -2174,6 +2207,7 @@ impl Session {
             let _ = docker(&["volume", "rm", volume]);
         }
         self.cleaned = true;
+        crate::shutdown::release_trial(&self.trial);
         let mut leftovers = labeled(&self.trial);
         // イメージの宣言でできたボリュームには、試行のラベルが付かない。控えた名前で確かめる。
         for volume in &self.image_volumes {
@@ -2494,6 +2528,34 @@ fn remove_container(name: &str) -> io::Result<String> {
     docker_text(&["rm", "-f", "-v", name])
 }
 
+/// 試行のラベルを持つコンテナ・ネットワーク・ボリュームを消し、残ったものを返す。
+/// 終了の合図を受けたときに、試行を動かしているスレッドとは別のスレッドから呼ぶ。
+/// 試行の側が資源を作っている途中かもしれないので、残りがなくなるまで数回くり返す。
+/// Dockerに尋ねられなかった場合は、残りがないとは言えないので、エラーを返す。
+pub(crate) fn remove_labeled(trial: &str) -> io::Result<Vec<String>> {
+    for _ in 0..3 {
+        let found = labeled_checked(trial)?;
+        if found.is_empty() {
+            break;
+        }
+        for item in &found {
+            match item.split_once(':') {
+                Some(("container", id)) => {
+                    let _ = remove_container(id);
+                }
+                Some(("network", id)) => {
+                    let _ = docker(&["network", "rm", id]);
+                }
+                Some(("volume", name)) => {
+                    let _ = docker(&["volume", "rm", name]);
+                }
+                _ => {}
+            }
+        }
+    }
+    labeled_checked(trial)
+}
+
 fn volume_exists(name: &str) -> bool {
     docker(&["volume", "inspect", "--format", "{{.Name}}", name])
         .is_ok_and(|output| output.status.success())
@@ -2514,6 +2576,22 @@ fn labeled(trial: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// 試行のラベルを持つコンテナ・ネットワーク・ボリュームを返す。Dockerに尋ねられなかった場合は、エラーを返す。
+fn labeled_checked(trial: &str) -> io::Result<Vec<String>> {
+    let filter = format!("label=eel.trial={trial}");
+    let mut found = vec![];
+    for (kind, args) in [
+        ("container", &["ps", "-aq", "--filter", &filter][..]),
+        ("network", &["network", "ls", "-q", "--filter", &filter][..]),
+        ("volume", &["volume", "ls", "-q", "--filter", &filter][..]),
+    ] {
+        for id in docker_text(args)?.split_whitespace() {
+            found.push(format!("{kind}:{id}"));
+        }
+    }
+    Ok(found)
 }
 
 fn http_request(
