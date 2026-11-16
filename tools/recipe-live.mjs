@@ -1,8 +1,10 @@
 // レシピを1つ受け取り、事例を作って麦漆の実行器で1回実行する。対象ごとの処理は持たない。
-// 使い方: node tools/recipe-live.mjs <レシピ> <出力先の名前> [--track | --track-only] [--command=<サービス名>=<JSONの配列>]
+// 使い方: node tools/recipe-live.mjs <レシピ> <出力先の名前> [--track | --track-only] [--command=<サービス名>=<JSONの配列>] [--limit-ms=<ミリ秒>]
 //   --track       入力した値を追跡し、入力の手順ごとに異なる値を使う。等値で書いた手書きの判定条件は一致しなくなる。
 //   --track-only  入力した値を追跡するが、値は手順ごとに変えない。手書きの判定条件もそのまま評価する。
 //   --command     実行する環境の都合で、サービスの起動コマンドをこの1回だけ置き換える。レシピのファイルは変えない。
+//   --limit-ms    実行器を待つ上限。省略すると、レシピ自身の待機の上限（各コンテナの準備、復旧後の準備、操作）から決める。
+//                 上限に達したら実行器を止め、その試行のコンテナ・ネットワーク・ボリュームを回収する。
 // 結果は evaluations/<出力先の名前>/summary.json に残す。ログインの値は EEL_BROWSER_SECRETS_FILE で渡す。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,13 +13,14 @@ import {spawnSync, execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), bin = process.env.REVIEW_BINARY || path.join(root, 'target/debug/mugiurushi');
 const [recipeFile, name, ...flags] = process.argv.slice(2);
-assert(recipeFile && /^[a-z0-9][a-z0-9-]{0,63}$/.test(name || ''), '使い方: node tools/recipe-live.mjs <レシピ> <出力先の名前（英小文字・数字・ハイフン）> [--track | --track-only] [--command=<サービス名>=<JSONの配列>]');
+assert(recipeFile && /^[a-z0-9][a-z0-9-]{0,63}$/.test(name || ''), '使い方: node tools/recipe-live.mjs <レシピ> <出力先の名前（英小文字・数字・ハイフン）> [--track | --track-only] [--command=<サービス名>=<JSONの配列>] [--limit-ms=<ミリ秒>]');
 const output = path.join(root, 'evaluations', name);
 fs.rmSync(output, {recursive: true, force: true}); fs.mkdirSync(output, {recursive: true});
 const recipe = JSON.parse(fs.readFileSync(recipeFile));
 if (flags.includes('--track')) { recipe.browser.track_values = true; recipe.browser.value_per_step = true; }
 // 手書きの判定条件も成立させたい場合は、手順ごとの値を使わずに追跡だけを有効にする。
-if (flags.includes('--track-only')) recipe.browser.track_values = true;
+// 入力のレシピが手順ごとの値を指定していても、外す。残すと、等値で書いた判定条件が一致しなくなる。
+if (flags.includes('--track-only')) { recipe.browser.track_values = true; delete recipe.browser.value_per_step; }
 const replaced = [];
 for (const flag of flags.filter(f => f.startsWith('--command='))) {
   const rest = flag.slice('--command='.length), at = rest.indexOf('=');
@@ -29,8 +32,34 @@ for (const flag of flags.filter(f => f.startsWith('--command='))) {
 }
 const repository = path.join(output, 'repository'); fs.mkdirSync(repository);
 for (const args of [['init', '-q', repository], ['-C', repository, 'remote', 'add', 'origin', 'https://github.com/' + recipe.source.repository + '.git'], ['-C', repository, 'fetch', '-q', '--depth', '1', 'origin', recipe.source.commit]]) execFileSync('git', args, {stdio: 'inherit'});
+// 実行器を待つ上限は、レシピ自身の待機の上限から決める。正しい設定の試行を、この道具が先に止めないためである。
+// コンテナは1つずつ準備を待つので、準備の上限は合計する。
+const services = recipe.containers?.services || [];
+const waits = services.reduce((sum, s) => sum + s.ready_timeout_ms, 0) + (recipe.trial?.recovery ? recipe.trial.recovery.ready_timeout_ms * services.length : 0);
+const limitFlag = flags.find(f => f.startsWith('--limit-ms='));
+const limit = limitFlag ? Number(limitFlag.slice('--limit-ms='.length)) : waits + 4 * recipe.timeout_ms + 15 * 60 * 1000;
+assert(Number.isInteger(limit) && limit > 0, '--limit-ms は正の整数（ミリ秒）で指定してください');
+// 止めた試行の資源を、試行のラベルで探して消す。実行器は、止められたときに後始末をしない。
+// この実行で作った試行のラベルだけを対象にし、ほかの試行の資源には触れない。
+function collect() {
+  const runs = path.join(output, 'case', 'runs');
+  const prefixes = (fs.existsSync(runs) ? fs.readdirSync(runs) : []).map(n => n.replace(/^run-/, '').replace(/[^A-Za-z0-9-]/g, '-').slice(0, 40) + '-');
+  const docker = args => spawnSync('docker', args, {encoding: 'utf8'});
+  const listed = (args, key) => (docker([...args, '--filter', 'label=eel.managed=1', '--format', `{{.${key}}}\t{{.Label "eel.trial"}}`]).stdout || '').split('\n').filter(Boolean).map(line => line.split('\t')).filter(([, trial]) => prefixes.some(p => (trial || '').startsWith(p))).map(([id]) => id);
+  const find = () => ({containers: listed(['ps', '-a'], 'ID'), networks: listed(['network', 'ls'], 'ID'), volumes: listed(['volume', 'ls'], 'Name')});
+  const found = find();
+  for (const id of found.containers) docker(['rm', '-f', '-v', id]);
+  for (const id of found.networks) docker(['network', 'rm', id]);
+  for (const volume of found.volumes) docker(['volume', 'rm', volume]);
+  return {removed: found, remaining: find()};
+}
 function cli(args) {
-  const r = spawnSync(bin, args, {encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 3600000});
+  const r = spawnSync(bin, args, {encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: limit});
+  if (r.error?.code === 'ETIMEDOUT') {
+    console.log(`実行器が ${limit}ms 以内に終わらなかったので止めた。その試行の資源を回収する`);
+    console.log(JSON.stringify(collect(), null, 1));
+    process.exit(1);
+  }
   if (r.status !== 0) { console.log('実行器の終了コード', r.status); console.log((r.stderr || '').slice(-3000)); process.exit(1); }
   return JSON.parse(r.stdout);
 }
