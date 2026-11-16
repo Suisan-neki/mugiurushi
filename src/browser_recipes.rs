@@ -231,7 +231,20 @@ pub fn load(directory: &Path) -> io::Result<Value> {
             )));
         }
         let directory = file.parent().unwrap_or(&root);
-        let base_path = directory.join(relative);
+        // 途中のディレクトリがリンクなら、指定したディレクトリの外のファイルを読んでしまう。
+        // 最後のファイルは read_plain が確かめるので、ここでは途中のディレクトリを確かめる。
+        let mut base_path = directory.to_path_buf();
+        let parts: Vec<_> = relative.components().collect();
+        for (index, part) in parts.iter().enumerate() {
+            base_path.push(part);
+            if index + 1 < parts.len() && !fs::symlink_metadata(&base_path)?.is_dir() {
+                return Err(invalid(format!(
+                    "{}: もとのレシピのパスの途中 {} は、リンクではない通常のディレクトリにしてください",
+                    file.display(),
+                    base_path.display()
+                )));
+            }
+        }
         let base: Value =
             serde_json::from_str(&read_plain(&base_path)?).map_err(io::Error::other)?;
         let origin = base_path
@@ -379,6 +392,48 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&from_files).unwrap(),
             serde_json::to_string(&before).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_base_recipe_behind_a_linked_directory_is_rejected() {
+        // 一覧のあるディレクトリの外に、形の正しいレシピを置く。
+        let dir = temp("linked-dir");
+        let outside = dir.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::copy(dir.join("target/recipe.json"), outside.join("recipe.json")).unwrap();
+        let catalog = |base: &str| {
+            fs::write(
+                dir.join("target/one.catalog.json"),
+                serde_json::to_vec(&json!({"schema_version":1,"base":base,"note":"架空の注記",
+                    "entries":[{"id":"linked","title":"リンクの先"}]}))
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        // 途中のディレクトリが通常のディレクトリなら読める。
+        fs::create_dir_all(dir.join("target/plain")).unwrap();
+        fs::copy(
+            dir.join("target/recipe.json"),
+            dir.join("target/plain/recipe.json"),
+        )
+        .unwrap();
+        catalog("plain/recipe.json");
+        assert_eq!(
+            load(&dir.join("target")).unwrap()["recipes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        // 途中のディレクトリが、外を指すリンクなら拒否する。最後のファイルは通常のファイルである。
+        std::os::unix::fs::symlink(&outside, dir.join("target/linked")).unwrap();
+        catalog("linked/recipe.json");
+        let error = load(&dir.join("target")).unwrap_err().to_string();
+        assert!(
+            error.contains("リンクではない通常のディレクトリ"),
+            "{error}"
         );
     }
 
