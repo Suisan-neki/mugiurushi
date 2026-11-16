@@ -61,7 +61,8 @@ function capture() {
     const el = event.target;
     if (!el.matches?.('input, textarea, select') || ['checkbox', 'radio', 'submit', 'button', 'file'].includes(el.type)) return;
     const secret = el.type === 'password';
-    window.__eelRecord({kind: el.tagName === 'SELECT' ? 'select' : 'fill', element: describe(el), secret, value: secret ? null : el.value});
+    // 確定（change）か、打った入力（input）かを届ける。遅れて届く確定だけを、記録の側で見分けるためである。
+    window.__eelRecord({kind: el.tagName === 'SELECT' ? 'select' : 'fill', element: describe(el), secret, value: secret ? null : el.value, settled: event.type === 'change'});
   };
   document.addEventListener('input', typed, true);
   document.addEventListener('change', typed, true);
@@ -146,7 +147,8 @@ export async function record(context, options) {
       const last = steps.at(-1), earlier = steps.findLast(same);
       if (last && same(last)) { last.value = step.value; return; }
       // フォーカスが外れたときに遅れて届く確定は、すでに記録した値と同じなので、手順を増やさない。
-      if (earlier && JSON.stringify(earlier.value) === JSON.stringify(step.value)) return;
+      // 打った入力は、前の値と同じでも記録する。別の操作で欄が空になった後に、人が同じ値を入れ直した場合である。
+      if (event.settled && earlier && JSON.stringify(earlier.value) === JSON.stringify(step.value)) return;
     }
     steps.push(step);
     bySequence.set(event.sequence, step);

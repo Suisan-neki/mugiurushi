@@ -24,15 +24,17 @@ const server = createServer(async (req, res) => {
       <style>.hidden-input{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}</style>
       <input class="hidden-input" type="radio" name="sex" id="sex-m" value="M"><label for="sex-m"><span>男</span></label>
       <input class="hidden-input" type="radio" name="sex" id="sex-f" value="F"><label for="sex-f"><span>女</span></label>
-      <button id="detail-1">詳細</button><button id="detail-2">詳細</button><iframe name="side" src="/side"></iframe><button id="save">保存</button><p id="result"></p></div>
+      <button id="detail-1">詳細</button><button id="detail-2">詳細</button>
+      <label>連絡先<input name="contact"></label><button id="clear-contact">連絡先を消す</button><iframe name="side" src="/side"></iframe><button id="save">保存</button><p id="result"></p></div>
     <script>
       let opened = 0;
       // 押すと、ボタンの文字が変わる。押す前の画面では「ログイン」という名前のボタンが1つだけある。
       document.querySelector('#login').onclick = event => { event.target.textContent = '処理中'; document.querySelector('#form').hidden = false; };
       document.querySelector('#detail-2').onclick = () => { opened++; };
+      document.querySelector('#clear-contact').onclick = () => { document.querySelector('input[name=contact]').value = ''; };
       document.querySelector('#save').onclick = async () => {
         const memo = document.querySelector('iframe').contentDocument.querySelector('input').value;
-        await (await fetch('/save', {method: 'POST', body: JSON.stringify({user: document.querySelector('#user').value, pass: document.querySelector('#pass').value, note: document.querySelector('textarea').value, ward: document.querySelector('select').value, sex: document.querySelector('input[name=sex]:checked')?.value ?? null, memo, opened})})).text();
+        await (await fetch('/save', {method: 'POST', body: JSON.stringify({user: document.querySelector('#user').value, pass: document.querySelector('#pass').value, note: document.querySelector('textarea').value, ward: document.querySelector('select').value, sex: document.querySelector('input[name=sex]:checked')?.value ?? null, contact: document.querySelector('input[name=contact]').value, memo, opened})})).text();
         document.querySelector('#result').textContent = '保存した';
       };
     </script>`));
@@ -61,6 +63,10 @@ try {
   await page.locator('label[for=sex-m] span').click();
   await page.frameLocator('iframe').locator('input').click(); await page.keyboard.type('メモ EEL-TEST-REC');
   await page.locator('#detail-2').click();
+  // 入れた値を、別の操作が消す。人は同じ値を入れ直す。値は1回の入力で入る（貼り付けと同じ）。
+  await page.locator('input[name=contact]').fill('内線 12');
+  await page.locator('#clear-contact').click();
+  await page.locator('input[name=contact]').fill('内線 12');
   await page.locator('#save').click();
   await page.locator('#result').filter({hasText: '保存した'}).waitFor();
   const recorded = await recorder.stop();
@@ -82,6 +88,10 @@ try {
     ['fill', 'iframe[name="side"]', 'label', 'メモ', 'literal:メモ {{test_value}}'],
     // 同じ名前のボタンが2つあるので、役割では一意にならず、IDのCSSになる。
     ['click', '', 'css', '#detail-2', ''],
+    // 前と同じ値の入れ直しも、手順として残す。残さないと、再実行で欄が空のままになる。
+    ['fill', '', 'label', '連絡先', 'literal:内線 12'],
+    ['click', '', 'role', '連絡先を消す', ''],
+    ['fill', '', 'label', '連絡先', 'literal:内線 12'],
     ['click', '', 'role', '保存', ''],
   ]);
   assert.ok(recorded.actions.every(s => /^[a-z0-9_-]{1,64}$/.test(s.id)) && new Set(recorded.actions.map(s => s.id)).size === recorded.actions.length);
@@ -109,7 +119,7 @@ try {
   await writeFile(join(dir, 'continue.json'), JSON.stringify({run_id, proceed: true}));
   const result = await waitFile('result.json'); child.kill();
   assert.equal(result.completed, true, result.detail + '\n' + JSON.stringify(result.steps.filter(s => !s.completed)));
-  assert.deepEqual(saved, [{user: secrets.user, pass: secrets.pass, note: '所見 ' + test_value, ward: '西', sex: 'M', memo: 'メモ ' + test_value, opened: 1}]);
+  assert.deepEqual(saved, [{user: secrets.user, pass: secrets.pass, note: '所見 ' + test_value, ward: '西', sex: 'M', contact: '内線 12', memo: 'メモ ' + test_value, opened: 1}]);
   checks.push('記録した手順を既存の実行器で再実行でき、別の試験値で同じ操作の結果になる');
   console.log(JSON.stringify({version, steps: recorded.actions.length, checks}));
 } finally {

@@ -43,13 +43,14 @@ const screens=[];let exchangeBytes=0,screenBytes=0,screensTruncated=false,lastDo
 const redactAll=value=>typeof value==='string'?redact(value):Array.isArray(value)?value.map(redactAll):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,redactAll(v)])):value;
 async function headersOf(response){
  // headers() はSet-Cookieを含まないため、全ヘッダーとSet-Cookieの各値を別に取る。
- const all=await response.allHeaders().catch(()=>response.headers()),headers={};
- for(const name of HEADER_NAMES)if(typeof all[name]==='string')headers[name]=redact(all[name]).slice(0,LIMITS.header);
+ // 上限で後半を切り捨てたヘッダーは、名前を別に残す。切り捨てた部分に何があったかは、判定の側では分からない。
+ const all=await response.allHeaders().catch(()=>response.headers()),headers={},truncated=[];
+ for(const name of HEADER_NAMES)if(typeof all[name]==='string'){const value=redact(all[name]);if(value.length>LIMITS.header)truncated.push(name);headers[name]=value.slice(0,LIMITS.header);}
  const cookies=(await response.headerValues('set-cookie').catch(()=>[])).slice(0,32).map(line=>{
   const parts=line.split(';').map(x=>x.trim()),flag=n=>parts.slice(1).some(x=>x.toLowerCase()===n),value=n=>parts.slice(1).find(x=>x.toLowerCase().startsWith(n+'='))?.slice(n.length+1)??null;
   return {name:parts[0].split('=')[0].slice(0,LIMITS.text),secure:flag('secure'),http_only:flag('httponly'),same_site:value('samesite')?.slice(0,16)??null,path:value('path')?.slice(0,LIMITS.text)??null};
  });
- return {headers,cookies};
+ return {headers,cookies,truncated};
 }
 // ページの中で実行する。DOMの属性だけを読み、valueは読まない。
 function collectFrame(limits){
@@ -212,7 +213,7 @@ try{
  page.on('response',r=>{
   const p=(async()=>{const request_step=requests.get(r.request());const u=new URL(r.url());if(!request.origins.includes(u.origin))return;
    const observed=await headersOf(r);
-   try{if(r.request().isNavigationRequest()&&r.frame()===page.mainFrame())lastDocument={status:r.status(),...observed};}catch{}
+   try{if(r.request().isNavigationRequest()&&r.frame()===page.mainFrame())lastDocument={status:r.status(),headers:observed.headers,cookies:observed.cookies};}catch{}
    if(!spec.actions.some(s=>s.id===request_step))return;
    // 件数と合計の大きさの両方に上限を置く。操作器の記録全体が基盤の読み取り上限を超えないようにする。
    // 追跡する値が、要求（クエリ文字列と本文）と応答の本文に含まれていたかを調べる。本文は残さない。
@@ -224,10 +225,10 @@ try{
     const reading=r.body();reading.catch(()=>{});
     try{const body=await Promise.race([reading,new Promise((_,reject)=>setTimeout(()=>reject(Error('timeout')),1500))]);if(body.length<=1024*1024)response_slots=slotsIn([body.toString('utf8')]);else response_unread=true;}catch{response_unread=true;}
    }
-   const exchange={step:request_step,method:r.request().method(),path:u.pathname.slice(0,2048),status:r.status(),resource:r.request().resourceType().slice(0,32),...observed,request_slots,response_slots,response_unread},size=JSON.stringify(exchange).length;
+   const exchange={step:request_step,method:r.request().method(),path:u.pathname.slice(0,2048),status:r.status(),resource:r.request().resourceType().slice(0,32),headers:observed.headers,cookies:observed.cookies,request_slots,response_slots,response_unread},size=JSON.stringify(exchange).length;
    if(report.exchanges.length>=LIMITS.exchanges||exchangeBytes+size>LIMITS.exchangeBytes)report.exchange_limit=true;
    else{exchangeBytes+=size;report.exchanges.push(exchange);}
-for(const w of spec.responses){if(w.path!==u.pathname||w.method!==r.request().method())continue;if(report.responses.length>=200){report.response_limit=true;continue;}const record={watch:w.id,method:r.request().method(),path:u.pathname,status:r.status(),body_match:null,request_step,payload_sha256:null,headers:observed.headers};report.responses.push(record);if(w.contains!=null||w.payload){try{const body=await r.body();if(body.length<=1024*1024){if(w.contains!=null)record.body_match=body.toString('utf8').includes(replace(w.contains));if(w.payload){const payload=w.payload==='dicom_frame'?singleFrame(r.headers()['content-type']||'',body):body;record.payload_sha256=createHash('sha256').update(payload).digest('hex');}}}catch{}}}
+for(const w of spec.responses){if(w.path!==u.pathname||w.method!==r.request().method())continue;if(report.responses.length>=200){report.response_limit=true;continue;}const record={watch:w.id,method:r.request().method(),path:u.pathname,status:r.status(),body_match:null,request_step,payload_sha256:null,headers:observed.headers,...(observed.truncated.length?{headers_truncated:observed.truncated}:{})};report.responses.push(record);if(w.contains!=null||w.payload){try{const body=await r.body();if(body.length<=1024*1024){if(w.contains!=null)record.body_match=body.toString('utf8').includes(replace(w.contains));if(w.payload){const payload=w.payload==='dicom_frame'?singleFrame(r.headers()['content-type']||'',body):body;record.payload_sha256=createHash('sha256').update(payload).digest('hex');}}}catch{}}}
   })().catch(()=>{});pending.add(p);p.finally(()=>pending.delete(p));
  });
  await page.goto(new URL(spec.start_path,request.origin).href,{timeout:remaining(),waitUntil:'domcontentloaded'});

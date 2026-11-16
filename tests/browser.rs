@@ -203,6 +203,7 @@ fn display_does_not_establish_database_success_and_mixed_http_responses_are_unkn
         ResponseRecord {
             payload_sha256: None,
             headers: None,
+            headers_truncated: vec![],
             watch: "save".into(),
             method: "POST".into(),
             path: "/save".into(),
@@ -213,6 +214,7 @@ fn display_does_not_establish_database_success_and_mixed_http_responses_are_unkn
         ResponseRecord {
             payload_sha256: None,
             headers: None,
+            headers_truncated: vec![],
             watch: "save".into(),
             method: "POST".into(),
             path: "/save".into(),
@@ -412,6 +414,7 @@ fn unknown_response_body_never_passes_negative_body_check_and_expressions_are_va
     p.browser.as_mut().unwrap().responses.push(ResponseRecord {
         payload_sha256: None,
         headers: None,
+        headers_truncated: vec![],
         watch: "save".into(),
         method: "POST".into(),
         path: "/save".into(),
@@ -492,6 +495,7 @@ fn missing_pixels_or_payload_hashes_do_not_satisfy_negative_expectations() {
         request_step: Some("message".into()),
         payload_sha256: None,
         headers: None,
+        headers_truncated: vec![],
     });
     assert_eq!(
         evaluate(
@@ -528,6 +532,7 @@ fn rejection_requires_the_declared_action_response_and_a_complete_record() {
         request_step: Some("message".into()),
         payload_sha256: None,
         headers: None,
+        headers_truncated: vec![],
     });
     assert!(rejection_observed(&s, report));
     report.responses[0].request_step = Some("username".into());
@@ -664,6 +669,52 @@ fn a_header_is_judged_only_from_recorded_action_responses() {
     assert_eq!(
         observe(&stored, Expectation::NotContains, "x-frame-options:"),
         Observed::Pass
+    );
+
+    // 上限で後半を切り捨てたヘッダーは、記録した部分に条件の文字がなくても「含まない」と判定しない。
+    // 切り捨てた部分に、禁止したい文字があるかもしれない。記録した部分にあれば「含む」と判定できる。
+    let cut = with_browser(|b| {
+        let mut r = response(json!({
+            "content-security-policy":"default-src 'self'; script-src 'self'",
+            "cache-control":"no-store"
+        }));
+        r["headers_truncated"] = json!(["content-security-policy"]);
+        b["responses"] = json!([r]);
+    });
+    for expect in [Expectation::NotContains, Expectation::Contains] {
+        assert_eq!(
+            observe(&cut, expect, "content-security-policy: unsafe-inline"),
+            Observed::NotObserved
+        );
+    }
+    assert_eq!(
+        observe(
+            &cut,
+            Expectation::Contains,
+            "content-security-policy: script-src"
+        ),
+        Observed::Pass
+    );
+    assert_eq!(
+        observe(
+            &cut,
+            Expectation::NotContains,
+            "content-security-policy: script-src"
+        ),
+        Observed::Fail
+    );
+    // 切り捨てていない別のヘッダーの判定は変わらない。
+    assert_eq!(
+        observe(&cut, Expectation::NotContains, "cache-control: public"),
+        Observed::Pass
+    );
+    // 切り捨ての印がない記録の保存形は変わらない。
+    let plain: ResponseRecord =
+        serde_json::from_value(response(json!({"cache-control":"no-store"}))).unwrap();
+    assert!(
+        !serde_json::to_string(&plain)
+            .unwrap()
+            .contains("headers_truncated")
     );
 
     // ヘッダーを記録していない変更前の記録、応答のない記録、上限に達した記録は判定しない。
