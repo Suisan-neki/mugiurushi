@@ -1,0 +1,52 @@
+{
+  "repository": "example/clinic",
+  "commit": "a94c311c951f7bbe5d6f7021a038544b6299acb4",
+  "operation": "患者の新規登録",
+  "summary": "架空の診療所の受付",
+  "architecture": null,
+  "material": [
+    {
+      "kind": "search",
+      "query": "national_id",
+      "ignore_case": false,
+      "hits": [
+        {
+          "path": "app/patient.py",
+          "line": 2,
+          "text": "    log.info(patient.national_id)",
+          "before": "def save(patient):",
+          "after": "    db.insert('patient', patient)"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "kind": "read",
+      "path": "app/patient.py",
+      "blob": "71ce983b01a548ced95df2ae55c35832cac0ddb3",
+      "total_lines": 3,
+      "start": 1,
+      "end": 3,
+      "text": "def save(patient):\n    log.info(patient.national_id)\n    db.insert('patient', patient)",
+      "truncated": false
+    },
+    {
+      "kind": "refused",
+      "request": "read \"app/conf/.env\" 1-1",
+      "reason": "app/conf/.env は送らないパスに当たるので読みません"
+    },
+    {
+      "kind": "list",
+      "prefix": "",
+      "paths": [
+        "README.md",
+        "app/"
+      ],
+      "truncated": false
+    }
+  ],
+  "budget": {
+    "rounds_left": 2,
+    "requests_per_round": 8
+  }
+}

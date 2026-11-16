@@ -83,7 +83,7 @@ impl Config {
         }
         Ok(token)
     }
-    fn post(&self, path: &str, body: &Value) -> io::Result<Value> {
+    pub(crate) fn post(&self, path: &str, body: &Value) -> io::Result<Value> {
         let token = self.token()?;
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .tls_config(

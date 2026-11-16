@@ -1,0 +1,12 @@
+{
+  "repository": "example/clinic",
+  "commit": "a94c311c951f7bbe5d6f7021a038544b6299acb4",
+  "operation": "患者の新規登録",
+  "summary": "架空の診療所の受付",
+  "architecture": null,
+  "material": [],
+  "budget": {
+    "rounds_left": 3,
+    "requests_per_round": 8
+  }
+}
