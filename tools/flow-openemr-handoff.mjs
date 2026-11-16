@@ -162,6 +162,26 @@ try {
   assert.equal(await row('ログに患者の情報を出さない').getAttribute('data-result'), 'other_version');
   assert.match(await row('ログに患者の情報を出さない').locator('[data-state-label]').innerText(), new RegExp(`別の版の試験：確認項目の参照先が ${pinned.slice(0, 7)} に変わっている（照合したのは ${other.slice(0, 7)}）`));
   assert.equal(await page.locator('[data-ng-count]').count(), 0, '別の版の結果を、このコミットの不足として数えない');
+  // 別の版の試験に実行済みの結果（期待と異なる・観測した）があっても、照合したコミットの不足・期待どおりとして数えない。
+  // 事例の記録の観測の状態を差し替えて確かめる。
+  let observedAs = null;
+  await page.route('**/api/v1/case', async route => {
+    const response = await route.fetch(); const json = await response.json();
+    if (observedAs) for (const cv of json.checks) for (const a of cv.coverage?.aspects || []) if (a.id === 'f-2') {
+      Object.assign(a, observedAs === 'contradicted' ? { status: 'contradicted', status_label: '期待と異なる', detail: '合成の結果' } : { status: 'observed', status_label: '観測した', detail: '合成の結果' });
+      cv.evidence = [{ id: 'ev-1', run_id: 'run-1', applicable: true, invalidated_by: [], observed: {} }]; cv.selected_evidence = 'ev-1';
+    }
+    return route.fulfill({ response, json });
+  });
+  for (const status of ['contradicted', 'observed']) {
+    observedAs = status;
+    await page.goto(flowUrl(other)); await page.locator('[data-result]').first().waitFor();
+    assert.equal(await row('ログに患者の情報を出さない').getAttribute('data-result'), 'other_version', `${status}: 別の版の結果は、別の版の試験のまま示す`);
+    assert.equal(await page.locator('[data-ng-count]').count(), 0, `${status}: 不足の件数に数えない`);
+    assert.equal(await page.getByRole('button', { name: '修正用のプロンプトを作る' }).count(), 0, `${status}: 修正用のプロンプトの対象にしない`);
+    assert.doesNotMatch(await page.locator('main').innerText(), /試験で期待どおりだった項目/, `${status}: 期待どおりだった項目に入れない`);
+  }
+  observedAs = null;
   // 6 再試験：前のコミットとの比較表でも、別の版の試験を、結果がない場合（—）と区別して示す。
   await page.getByRole('button', { name: /6 再試験/ }).click();
   const compare = page.locator('[data-compare-table]'); await compare.waitFor();
