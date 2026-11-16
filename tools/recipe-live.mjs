@@ -6,7 +6,7 @@
 //   --adopt       追跡した試行の候補（DBの読み出し先、応答の観測先、判定条件）をレシピへ取り込み、もう一度実行する。
 //                 取り込んだレシピは evaluations/<出力先の名前>/adopted-recipe.json に残す。
 //   --limit-ms    実行器を待つ上限。省略すると、レシピ自身の待機の上限（各コンテナの準備、復旧後の準備、操作）から決める。
-//                 上限に達したら実行器を止め、その試行のコンテナ・ネットワーク・ボリュームを回収する。
+//                 上限に達したら実行器を止める。実行器が資源を回収した後、残りがないことを確かめ、残っていれば消す。
 // 結果は evaluations/<出力先の名前>/summary.json に残す。ログインの値は EEL_BROWSER_SECRETS_FILE で渡す。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -43,7 +43,8 @@ const waits = services.reduce((sum, s) => sum + s.ready_timeout_ms, 0) + (recipe
 const limitFlag = flags.find(f => f.startsWith('--limit-ms='));
 const limit = limitFlag ? Number(limitFlag.slice('--limit-ms='.length)) : waits + 4 * recipe.timeout_ms + 15 * 60 * 1000;
 assert(Number.isInteger(limit) && limit > 0, '--limit-ms は正の整数（ミリ秒）で指定してください');
-// 止めた試行の資源を、試行のラベルで探して消す。実行器は、止められたときに後始末をしない。
+// 止めた試行の資源を、試行のラベルで探して消す。実行器は、終了の合図を受けると自分で資源を回収する。
+// ここでは、回収の後に残りがないことを確かめ、残っていれば消す。
 // この実行で作った試行のラベルだけを対象にし、ほかの試行の資源には触れない。
 function collect() {
   const runs = path.join(output, 'case', 'runs');
@@ -60,7 +61,8 @@ function collect() {
 function cli(args) {
   const r = spawnSync(bin, args, {encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: limit});
   if (r.error?.code === 'ETIMEDOUT') {
-    console.log(`実行器が ${limit}ms 以内に終わらなかったので止めた。その試行の資源を回収する`);
+    console.log(`実行器が ${limit}ms 以内に終わらなかったので止めた。実行器の報告と、残った資源の確認の結果を出す`);
+    console.log((r.stderr || '').trim().split('\n').at(-1));
     console.log(JSON.stringify(collect(), null, 1));
     process.exit(1);
   }

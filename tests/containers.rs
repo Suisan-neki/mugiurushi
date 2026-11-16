@@ -2451,3 +2451,216 @@ fn a_completed_service_that_fails_stops_the_start_and_leaves_its_log() {
         "{detail}"
     );
 }
+
+/// 試行のラベルを持つコンテナ・ネットワーク・ボリュームを数える。
+fn labeled_resources(trial: &str) -> Vec<String> {
+    let filter = format!("label=eel.trial={trial}");
+    let mut found = vec![];
+    for args in [
+        &["ps", "-aq", "--filter", &filter][..],
+        &["network", "ls", "-q", "--filter", &filter][..],
+        &["volume", "ls", "-q", "--filter", &filter][..],
+    ] {
+        let output = Command::new("docker").args(args).output().unwrap();
+        assert!(output.status.success());
+        found.extend(
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .map(|id| format!("{}:{id}", args[0])),
+        );
+    }
+    found
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn a_signal_during_a_container_trial_removes_the_trial_resources() {
+    if !docker_available() {
+        return;
+    }
+    for (signal, code) in [("TERM", 143), ("INT", 130)] {
+        let (directory, root, commit) = fixture();
+        // 待ち受けを始めないコンテナ。実行器は、準備ができるのを待ち続ける。
+        let name = format!("held{}", signal.to_lowercase());
+        let mut web = nginx(&name, ServiceRole::App);
+        web.command = vec!["sleep".into(), "600".into()];
+        web.ready_timeout_ms = 120_000;
+        web.volumes = vec![VolumeMount {
+            name: "data".into(),
+            path: "/data".into(),
+        }];
+        let mut recipe = recipe(
+            &commit,
+            vec![web],
+            TrialFault::Normal,
+            vec![
+                check(
+                    "status",
+                    "受付",
+                    CheckMethod::ExitCode,
+                    Expectation::Zero,
+                    "",
+                ),
+                check(
+                    "welcome",
+                    "応答",
+                    CheckMethod::Stdout,
+                    Expectation::Contains,
+                    "Welcome to nginx",
+                ),
+            ],
+        );
+        // 外部への通信を止める構成にして、中継のコンテナと内部のネットワークも作らせる。
+        recipe.containers.as_mut().unwrap().egress = Egress::Blocked;
+        let mut child = support::spawn_case_execute(&directory.join("work"), &root, &recipe);
+        // 対象のコンテナが動き始めるまで待ち、その試行のラベルを読む。
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let trial = loop {
+            let output = Command::new("docker")
+                .args([
+                    "ps",
+                    "--filter",
+                    "label=eel.managed=1",
+                    "--format",
+                    "{{.Names}}\t{{.Label \"eel.trial\"}}",
+                ])
+                .output()
+                .unwrap();
+            let found = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_once('\t'))
+                .find(|(container, _)| container.contains(&format!("-{name}")))
+                .map(|(_, trial)| trial.to_owned());
+            if let Some(trial) = found {
+                break trial;
+            }
+            // コンテナが起動する前に実行器が終わった場合は、その理由を出す。
+            if child.try_wait().unwrap().is_some() || std::time::Instant::now() >= until {
+                let (exit, stderr) = support::wait_within(child, std::time::Duration::from_secs(1));
+                panic!("{signal}: 対象のコンテナが起動しなかった（終了コード {exit:?}）: {stderr}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        };
+        assert!(!labeled_resources(&trial).is_empty());
+        support::send_signal(child.id(), signal);
+        let (exit, stderr) = support::wait_within(child, std::time::Duration::from_secs(90));
+        assert_eq!(exit, Some(code), "{signal}: {stderr}");
+        assert!(
+            stderr.contains(&format!("終了の合図（SIG{signal}）")) && stderr.contains("試行1件"),
+            "{signal}: {stderr}"
+        );
+        assert!(stderr.contains("残った資源はない"), "{signal}: {stderr}");
+        // 実行器が終わった時点で、その試行のコンテナ・ネットワーク・ボリュームは残っていない。
+        assert_eq!(labeled_resources(&trial), Vec::<String>::new(), "{signal}");
+    }
+}
+
+/// 試行のラベルが接頭辞で始まるコンテナ・ネットワーク・ボリュームを返す。
+fn resources_with_trial_prefix(prefix: &str) -> Vec<String> {
+    let mut found = vec![];
+    for (args, key) in [
+        (&["ps", "-a"][..], "ID"),
+        (&["network", "ls"][..], "ID"),
+        (&["volume", "ls"][..], "Name"),
+    ] {
+        let output = Command::new("docker")
+            .args(args)
+            .args(["--filter", "label=eel.managed=1", "--format"])
+            .arg(format!("{{{{.{key}}}}}\t{{{{.Label \"eel.trial\"}}}}"))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        found.extend(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_once('\t'))
+                .filter(|(_, trial)| trial.starts_with(prefix))
+                .map(|(id, trial)| format!("{}:{id}（{trial}）", args[0])),
+        );
+    }
+    found
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn a_signal_while_containers_are_being_created_leaves_nothing() {
+    if !docker_available() {
+        return;
+    }
+    // 起動してから合図を送るまでの時間を変えて、ネットワーク・ボリューム・コンテナを作っている途中に合図が届くようにする。
+    for delay_ms in [300u64, 600, 900, 1300, 1800, 2500] {
+        let (directory, root, commit) = fixture();
+        let mut web = nginx("creating", ServiceRole::App);
+        web.command = vec!["sleep".into(), "600".into()];
+        web.ready_timeout_ms = 120_000;
+        web.volumes = vec![VolumeMount {
+            name: "data".into(),
+            path: "/data".into(),
+        }];
+        let mut recipe = recipe(
+            &commit,
+            vec![nginx("db", ServiceRole::Database), web],
+            TrialFault::Normal,
+            vec![
+                check(
+                    "status",
+                    "受付",
+                    CheckMethod::ExitCode,
+                    Expectation::Zero,
+                    "",
+                ),
+                check(
+                    "welcome",
+                    "応答",
+                    CheckMethod::Stdout,
+                    Expectation::Contains,
+                    "Welcome to nginx",
+                ),
+            ],
+        );
+        recipe.containers.as_mut().unwrap().egress = Egress::Blocked;
+        let work = directory.join("work");
+        let child = support::spawn_case_execute(&work, &root, &recipe);
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        support::send_signal(child.id(), "TERM");
+        let (exit, stderr) = support::wait_within(child, std::time::Duration::from_secs(90));
+        assert_eq!(exit, Some(143), "{delay_ms}ms: {stderr}");
+        assert!(
+            stderr.contains("残った資源はない"),
+            "{delay_ms}ms: {stderr}"
+        );
+        // 試行のラベルは、実行のディレクトリの名前から作られる。その実行の資源が残っていないことを、Dockerに尋ねて確かめる。
+        let runs = work.join("case/runs");
+        let names: Vec<String> = fs::read_dir(&runs)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for name in names {
+            let prefix: String = name
+                .trim_start_matches("run-")
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .take(40)
+                .collect();
+            // 実行器が終わった後に、途中だった `docker` の呼び出しが資源を作ることがないかも見るため、少しの間くり返し確かめる。
+            for _ in 0..15 {
+                assert_eq!(
+                    resources_with_trial_prefix(&format!("{prefix}-")),
+                    Vec::<String>::new(),
+                    "{delay_ms}ms: {stderr}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+}

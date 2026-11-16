@@ -11,7 +11,13 @@ pub(crate) struct ChildGuard(pub(crate) Child);
 
 impl ChildGuard {
     pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
-        command.process_group(0).spawn().map(Self)
+        // 終了の合図を受けたときにも、このグループを止められるように控える。
+        // 回収が始まった後は起動しない。起動と控えを、回収と重ならないように行う。
+        crate::shutdown::creating(|| {
+            let child = command.process_group(0).spawn()?;
+            crate::shutdown::hold_group(child.id());
+            Ok(Self(child))
+        })
     }
 }
 
@@ -64,6 +70,7 @@ impl Drop for ChildGuard {
         // 親が先に正常終了していても、同じグループの子孫を止める。
         let _ = kill_group(&mut self.0);
         let _ = self.0.wait();
+        crate::shutdown::release_group(self.0.id());
     }
 }
 
