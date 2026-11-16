@@ -62,6 +62,8 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/echo') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({q: url.searchParams.get('q')})); return; }
   if (url.pathname === '/store') { stored.push(posted); res.setHeader('Content-Type', 'text/plain'); res.end('ok'); return; }
+  // 記録の上限（512文字）を超えるヘッダー。確かめたい文字は、切り捨てられる後半にある。
+  if (url.pathname === '/save') res.setHeader('Content-Security-Policy', "default-src 'self'; img-src " + 'https://img.example.invalid '.repeat(30) + "; script-src 'unsafe-inline'");
   if (url.pathname === '/save' || url.pathname === '/api/undeclared') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({message: forbidden.body})); return; }
   res.writeHead(404); res.end();
 });
@@ -181,6 +183,12 @@ try {
   assert.ok(result.exchanges.every(e => !e.path.includes('?')));
   // 宣言した応答には、判定に使うヘッダーが付く。
   assert.equal(result.responses.find(r => r.watch === 'save').headers['cache-control'], 'no-store');
+  // 上限で後半を切り捨てたヘッダーは、名前を別に残す。切り捨てていないヘッダーの名前は残さない。
+  const savedResponse = result.responses.find(r => r.watch === 'save');
+  assert.equal(savedResponse.headers['content-security-policy'].length, 512);
+  assert.ok(!savedResponse.headers['content-security-policy'].includes('unsafe-inline'));
+  assert.deepEqual(savedResponse.headers_truncated, ['content-security-policy']);
+  assert.ok(result.responses.filter(r => r.watch !== 'save').every(r => !('headers_truncated' in r)));
   checks.push('操作中のHTTPのやり取りを、宣言の有無によらず記録する');
 
   // 要素が見つからない場合、手順は未完了になり、属性なしとは記録しない。
