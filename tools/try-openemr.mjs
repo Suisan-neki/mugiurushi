@@ -125,7 +125,8 @@ async function collect() {
 try {
   const agentUrl = await started(agent, /Uvicorn running on (http:\/\/127\.0\.0\.1:\d+)/, 'mugiurushi-ai');
   const appEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(OPENAI_|MUGIURUSHI_AI_)/.test(k)));
-  const app = spawn(binary, ['app', data, '--port', String(appPort)], { env: { ...appEnv, EEL_AGENT_URL: agentUrl, EEL_AGENT_TOKEN_FILE: tokenFile }, stdio: ['ignore', 'pipe', 'pipe'] });
+  // 同梱の試験の一覧は、EEL_RECIPE_DIR で指定したディレクトリから読む。指定しないと、設定画面に同梱のOpenEMR試験が出ない。
+  const app = spawn(binary, ['app', data, '--port', String(appPort)], { env: { ...appEnv, EEL_AGENT_URL: agentUrl, EEL_AGENT_TOKEN_FILE: tokenFile, EEL_RECIPE_DIR: join(root, 'examples') }, stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(app);
   url = await started(app, /理解と試験の画面: (http:\/\/127\.0\.0\.1:\d+)/, 'mugiurushi');
   reviewToken = /name="review-token" content="([^"]+)"/.exec(await (await fetch(url + '/flow')).text())?.[1];
