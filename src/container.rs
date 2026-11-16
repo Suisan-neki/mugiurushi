@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{self, Read, Write},
-    net::{Ipv4Addr, Shutdown, TcpStream},
+    net::{Ipv4Addr, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -2154,7 +2154,8 @@ fn http_request(
     if !payload.is_empty() {
         stream.write_all(payload)?;
     }
-    let _ = stream.shutdown(Shutdown::Write);
+    // 送信側は閉じない。要求の終わりは Content-Length で分かる。応答を読む前に送信側を閉じると、
+    // 要求を別のサーバーへ転送するnginxは、利用者が中断したとみなして転送をやめる（状態499）。
     let mut buf = Vec::new();
     stream.take(MAX_BODY as u64 + 8192).read_to_end(&mut buf)?;
     parse_http(&url, method, false, &buf)
