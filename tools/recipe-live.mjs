@@ -3,6 +3,8 @@
 //   --track       入力した値を追跡し、入力の手順ごとに異なる値を使う。等値で書いた手書きの判定条件は一致しなくなる。
 //   --track-only  入力した値を追跡するが、値は手順ごとに変えない。手書きの判定条件もそのまま評価する。
 //   --command     実行する環境の都合で、サービスの起動コマンドをこの1回だけ置き換える。レシピのファイルは変えない。
+//   --adopt       追跡した試行の候補（DBの読み出し先、応答の観測先、判定条件）をレシピへ取り込み、もう一度実行する。
+//                 取り込んだレシピは evaluations/<出力先の名前>/adopted-recipe.json に残す。
 //   --limit-ms    実行器を待つ上限。省略すると、レシピ自身の待機の上限（各コンテナの準備、復旧後の準備、操作）から決める。
 //                 上限に達したら実行器を止め、その試行のコンテナ・ネットワーク・ボリュームを回収する。
 // 結果は evaluations/<出力先の名前>/summary.json に残す。ログインの値は EEL_BROWSER_SECRETS_FILE で渡す。
@@ -11,6 +13,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync, execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {count} from './recipe-count.mjs';
+import {adopt} from './recipe-adopt.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), bin = process.env.REVIEW_BINARY || path.join(root, 'target/debug/mugiurushi');
 const [recipeFile, name, ...flags] = process.argv.slice(2);
 assert(recipeFile && /^[a-z0-9][a-z0-9-]{0,63}$/.test(name || ''), '使い方: node tools/recipe-live.mjs <レシピ> <出力先の名前（英小文字・数字・ハイフン）> [--track | --track-only] [--command=<サービス名>=<JSONの配列>] [--limit-ms=<ミリ秒>]');
@@ -90,11 +94,26 @@ const summary = {
   appearances: phase?.value_trace?.appearances.map(a => ({slot: a.slot, database: a.database.map(h => `${h.schema}.${h.table}.${h.column} rows=${h.rows} exact=${h.exact_rows}${h.baseline_unknown ? ' 前の探索なし' : ''}`), requests: a.requests.map(e => `${e.method} ${e.path} -> ${e.status}`), screens: a.screens.length, logs: a.logs})),
   limits: phase?.value_trace?.limits,
   evidence_id: evidence.id,
+  count: count(recipe),
 };
 if (phase?.value_trace) {
   const draft = cli(['case', 'draft', caseDir, '--evidence', evidence.id]);
   summary.draft = {rules: draft.rules, database: draft.database.map(p => `${p.database}.${p.schema ? p.schema + '.' : ''}${p.table}.${p.match_column} = ${p.match_value}`), responses: draft.responses.map(w => `${w.method} ${w.path}`), checks: draft.checks.map(c => `${c.id}: ${c.method} ${c.expect} ${c.text}`), skipped: draft.skipped};
   fs.writeFileSync(path.join(output, 'draft.json'), JSON.stringify(draft, null, 1));
+  if (flags.includes('--adopt')) {
+    // 候補を取り込む。値の割り当て（値の追跡と、手順ごとの値）は、候補のもとになった試行のままにする。
+    const adopted = adopt(recipe, draft);
+    const adoptedFile = path.join(output, 'adopted-recipe.json'); fs.writeFileSync(adoptedFile, JSON.stringify(adopted, null, 2));
+    view = cli(['case', 'execute', caseDir, adoptedFile, '--repository-root', repository, '--mode', 'local', '--actor', '合成の試験担当', '--reason', name + '（候補を取り込んだレシピ）']);
+    const run = view.workspace.evidence.at(-1);
+    summary.adopted = {
+      count: count(adopted),
+      verdict: view.checks.find(c => c.check_id === recipe.check_id)?.verdict,
+      completed: run.execution.containers?.browser?.completed,
+      results: run.execution.trial?.results?.map(r => `${r.id}: ${r.observed} ${String(r.detail || '').slice(0, 120)}`),
+      leftovers: run.execution.containers?.leftovers,
+    };
+  }
 }
 fs.writeFileSync(path.join(output, 'summary.json'), JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));

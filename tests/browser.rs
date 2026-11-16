@@ -312,6 +312,33 @@ fn validates_the_pinned_openelis_recipe_without_running_it() {
 }
 
 #[test]
+fn validates_the_recipe_made_from_recorded_operations_on_openelis() {
+    let recipe: mugiurushi::execution::Recipe = serde_json::from_str(include_str!(
+        "../examples/openelis-browser/recorded-recipe.json"
+    ))
+    .unwrap();
+    mugiurushi::execution::validate_recipe(&recipe).unwrap();
+    let browser = recipe.browser.as_ref().unwrap();
+    let provenance = browser.provenance.as_ref().unwrap();
+    // 手で書いた手順は、結果を読む1つだけ。ほかの手順と、待つ応答の観測先には、記録の出所が付いている。
+    let steps: Vec<_> = browser.preparation.iter().chain(&browser.actions).collect();
+    let handwritten: Vec<_> = steps
+        .iter()
+        .filter(|s| !provenance.steps.contains_key(&s.id))
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(handwritten, ["search-result"]);
+    assert_eq!(steps.len(), 16);
+    assert!(
+        browser
+            .responses
+            .iter()
+            .all(|w| provenance.responses.contains_key(&w.id))
+    );
+    assert_eq!(recipe.trial.as_ref().unwrap().checks.len(), 1);
+}
+
+#[test]
 fn relation_requires_existing_distinct_probes_and_columns() {
     let mut recipe: mugiurushi::execution::Recipe =
         serde_json::from_str(include_str!("../examples/openemr-browser/soap-recipe.json")).unwrap();

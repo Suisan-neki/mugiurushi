@@ -112,13 +112,14 @@ jobs:
       - run: npm run test:screen
       - run: npm run test:recorder
       - name: Count hand-written recipe items
-        run: node tools/recipe-count.mjs examples/openemr-browser/soap-recipe.json examples/openemr-browser/recipe.json examples/openmrs-browser/register-recipe.json examples/openelis-browser/register-recipe.json
+        run: node tools/recipe-count.mjs examples/openemr-browser/soap-recipe.json examples/openemr-browser/recipe.json examples/openmrs-browser/register-recipe.json examples/openelis-browser/register-recipe.json examples/openelis-browser/recorded-recipe.json
       - run: npm run test:journey
       - run: npm run test:dialogue
       - run: npm run test:browser-handoff
       - run: npm run test:result-observations
       - run: npm run test:flow
       - run: npm run test:flow-record
+      - run: npm run test:recipe-adopt
       - run: npm run test:flow-rescan
       - run: npm run test:user-trial
       - name: Keep synthetic review screenshots
