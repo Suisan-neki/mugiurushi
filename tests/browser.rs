@@ -287,6 +287,22 @@ fn validates_the_pinned_openmrs_recipe_without_running_it() {
 }
 
 #[test]
+fn validates_the_pinned_openelis_recipe_without_running_it() {
+    let recipe: mugiurushi::execution::Recipe = serde_json::from_str(include_str!(
+        "../examples/openelis-browser/register-recipe.json"
+    ))
+    .unwrap();
+    mugiurushi::execution::validate_recipe(&recipe).unwrap();
+    let services = &recipe.containers.as_ref().unwrap().services;
+    assert_eq!(services.len(), 5);
+    // 入口は、アプリの準備ができてから起動する。表は public 以外のスキーマにある。
+    let proxy = services.iter().find(|s| s.name == "proxy").unwrap();
+    assert_eq!(proxy.start_after, ["oe"]);
+    let probe = &recipe.browser.as_ref().unwrap().database[0];
+    assert_eq!(probe.schema.as_deref(), Some("clinlims"));
+}
+
+#[test]
 fn relation_requires_existing_distinct_probes_and_columns() {
     let mut recipe: mugiurushi::execution::Recipe =
         serde_json::from_str(include_str!("../examples/openemr-browser/soap-recipe.json")).unwrap();
