@@ -68,6 +68,11 @@ pub enum Action {
         min_levels: u16,
         min_pixels: u32,
     },
+    /// 要素の属性を読む。要素が見つからなければ手順は未完了になる。
+    ReadAttribute {
+        target: Target,
+        name: String,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,6 +106,10 @@ pub struct DatabaseProbe {
     pub service: String,
     pub database: String,
     pub table: String,
+    /// PostgreSQLで、表のあるスキーマ。省略すると、接続する利用者の検索の順（search_path）で表を探す。
+    /// MariaDBでは `database` がこれにあたるので、指定を受け付けない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
     pub match_column: String,
     pub columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +138,15 @@ pub struct BrowserSpec {
     pub http_reads: Vec<crate::http_probe::Probe>,
     #[serde(default)]
     pub rejection: Option<RejectionWatch>,
+    /// 入力した試験値が、DB・HTTP・画面・ログのどこに現れたかを記録する。記録のみで、判定には使わない。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub track_values: bool,
+    /// 入力の手順ごとに異なる試験値を割り当て、どの欄の値がどこに現れたかを区別できるようにする。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub value_per_step: bool,
+    /// 観測から作った項目（手順、応答の観測先、DBの読み出し先、判定条件）の出所。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<crate::tracking::Provenance>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanvasRead {
@@ -151,6 +169,18 @@ pub struct StepRecord {
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas: Option<CanvasRead>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribute: Option<AttributeRead>,
+    /// 追跡する値のうち、この手順が完了した時点で画面に表示されていたもの。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible_slots: Vec<String>,
+}
+/// 属性の読み取り。要素はあるが属性がない場合は `present: false`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttributeRead {
+    pub present: bool,
+    pub value: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseRecord {
@@ -162,6 +192,13 @@ pub struct ResponseRecord {
     pub request_step: Option<String>,
     #[serde(default)]
     pub payload_sha256: Option<String>,
+    /// 記録の対象にしている名前の応答ヘッダー。変更前の記録にはない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
+    /// 上限で後半を切り捨てて記録した応答ヘッダーの名前。該当がなければ保存しない。
+    /// 切り捨てた部分に何があったかは分からないので、判定では「含まない」と扱わない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers_truncated: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserReport {
@@ -178,6 +215,17 @@ pub struct BrowserReport {
     #[serde(default)]
     pub response_limit: bool,
     pub detail: String,
+    /// 操作中の、対象のオリジンへのHTTPのやり取りの全件。本文とクエリ文字列は持たない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exchanges: Vec<crate::screen::ExchangeRecord>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exchange_limit: bool,
+    /// 手順ごとの画面の構造の記録（`browser/screens.json`）への参照。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screens: Vec<crate::screen::ScreenRef>,
+    /// 画面の構造を記録できたか。変更前の記録では空で、画面が空だったことは意味しない。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub screens_note: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseRead {
@@ -219,11 +267,30 @@ fn target(t: &Target) -> bool {
             Locator::Css { selector } => bounded(selector),
         }
 }
+/// 読み取る属性の名前。HTMLの属性名に使う文字だけを受け付ける。
+pub fn attribute_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b':')
+}
+/// 応答ヘッダーの判定条件の文（`<名前>: <値の一部>`）を、記録の対象の名前と値に分ける。
+pub fn header_condition(text: &str) -> Option<(&'static str, &str)> {
+    let (name, value) = text.split_once(':')?;
+    let name = name.trim().to_ascii_lowercase();
+    crate::screen::HEADER_NAMES
+        .iter()
+        .find(|known| **known == name)
+        .map(|known| (*known, value.trim()))
+}
 pub fn sql_identifier(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()> {
-    if !containers.services.iter().any(|s| s.name == spec.service)
+    if !containers
+        .services
+        .iter()
+        .any(|s| s.name == spec.service && s.ready != crate::container::ReadyCheck::Completed)
         || !path(&spec.start_path)
         || spec.expected_version.is_empty()
         || spec.expected_version.len() > 64
@@ -240,6 +307,14 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
         return Err(invalid(
             "ブラウザの操作先、固定した版、手順の上限を確認してください",
         ));
+    }
+    if spec.value_per_step && !spec.track_values {
+        return Err(invalid(
+            "手順ごとの試験値は、値の追跡を有効にした試験でだけ使えます",
+        ));
+    }
+    if let Some(provenance) = &spec.provenance {
+        crate::tracking::validate_provenance(provenance, spec)?;
     }
     let mut ids = std::collections::BTreeSet::new();
     for s in spec.preparation.iter().chain(&spec.actions) {
@@ -275,6 +350,7 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
                 contains,
             } => target(t) && contains.as_ref().is_none_or(|s| bounded(s)),
             Action::Select { target: t, value } => target(t) && bounded(value),
+            Action::ReadAttribute { target: t, name } => target(t) && attribute_name(name),
             Action::ReadCanvas {
                 target: t,
                 min_levels,
@@ -327,6 +403,7 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
             || ![&q.database, &q.table, &q.match_column]
                 .iter()
                 .all(|s| sql_identifier(s))
+            || q.schema.as_ref().is_some_and(|s| !sql_identifier(s))
             || q.columns.is_empty()
             || q.columns.len() > 16
             || !q.columns.iter().all(|c| sql_identifier(c))
@@ -338,6 +415,15 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
         {
             return Err(invalid(
                 "DBの読取先は試験用DBと英数字・下線の識別子で指定してください",
+            ));
+        }
+        if q.schema.is_some()
+            && !containers.services.iter().any(|s| {
+                s.name == q.service && s.engine == crate::database::DatabaseEngine::Postgres
+            })
+        {
+            return Err(invalid(
+                "DBの読取先のスキーマは、DBの種類がPostgreSQLの場合だけ指定できます",
             ));
         }
     }
@@ -367,25 +453,21 @@ pub fn rejection_observed(spec: &BrowserSpec, report: &BrowserReport) -> bool {
         })
 }
 /// 列名と検索値を別々に検査し、1件の試験値に一致する行だけを読む。任意のSQLは受け取らない。
-pub fn query(q: &DatabaseProbe, test_value: &str) -> String {
-    let columns = q
-        .columns
-        .iter()
-        .map(|c| format!("`{c}`"))
-        .collect::<Vec<_>>()
-        .join(",");
+pub fn query(
+    engine: crate::database::DatabaseEngine,
+    q: &DatabaseProbe,
+    test_value: &str,
+) -> String {
     let match_value = q.match_value.as_deref().map_or_else(
         || test_value.to_owned(),
         |value| crate::trial::substitute(value, test_value),
     );
-    let hex = match_value
-        .as_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    format!(
-        "SELECT {columns} FROM `{}` WHERE `{}` = CONVERT(0x{hex} USING utf8mb4) LIMIT 100",
-        q.table, q.match_column
+    engine.rows_sql(
+        q.schema.as_deref(),
+        &q.table,
+        &q.match_column,
+        &q.columns,
+        &match_value,
     )
 }
 fn unavailable(run_id: &str, detail: &str) -> BrowserReport {
@@ -401,6 +483,10 @@ fn unavailable(run_id: &str, detail: &str) -> BrowserReport {
         blocked_requests: 0,
         response_limit: false,
         detail: detail.into(),
+        exchanges: vec![],
+        exchange_limit: false,
+        screens: vec![],
+        screens_note: String::new(),
     }
 }
 pub struct Session {
@@ -445,7 +531,11 @@ impl Session {
                 ]
             })
             .collect::<Vec<_>>();
-        let config = serde_json::json!({"schema_version":1,"spec":spec,"run_id":run_id,"test_value":test_value,"origin":origin,"origins":origins,"timeout_ms":timeout_ms});
+        // 追跡する値と、手順ごとの試験値を操作器へ渡す。追跡しない試験では空で、従来と同じ動作になる。
+        let tracked = crate::tracking::values_of(spec, test_value);
+        let config = serde_json::json!({"schema_version":1,"spec":spec,"run_id":run_id,"test_value":test_value,"origin":origin,"origins":origins,"timeout_ms":timeout_ms,
+            "tracked": tracked.iter().map(|t| serde_json::json!({"slot": t.slot, "value": t.value})).collect::<Vec<_>>(),
+            "step_values": crate::tracking::step_values(spec, test_value)});
         write_json_new(&directory.join("request.json"), &config)?;
         fs::write(
             directory.join("runner.mjs"),
@@ -534,6 +624,29 @@ impl Session {
                 if report.schema_version != 1 || report.run_id != self.report.run_id {
                     return Err(invalid("ブラウザ記録の試行が一致しません"));
                 }
+                let actions = report
+                    .steps
+                    .iter()
+                    .filter(|s| s.phase == "action")
+                    .map(|s| s.id.as_str())
+                    .collect();
+                crate::screen::validate_exchanges(&report.exchanges, &actions)?;
+                for response in &report.responses {
+                    if let Some(headers) = &response.headers {
+                        crate::screen::validate_headers(headers)?;
+                    }
+                    // 切り捨てたと記録するのは、記録したヘッダーだけである。
+                    if response.headers_truncated.iter().any(|name| {
+                        !response
+                            .headers
+                            .as_ref()
+                            .is_some_and(|headers| headers.contains_key(name))
+                    }) {
+                        return Err(invalid(
+                            "切り捨てたと記録された応答ヘッダーが、記録の中にありません",
+                        ));
+                    }
+                }
                 return Ok(Some(report));
             }
             if self.child.try_wait()?.is_some() {
@@ -565,6 +678,14 @@ impl Session {
             if let Some(report) = self.wait("result.json")? {
                 self.report = report;
             }
+            let steps = self
+                .report
+                .steps
+                .iter()
+                .map(|s| (s.phase.clone(), s.id.clone()))
+                .collect();
+            (self.report.screens, self.report.screens_note) =
+                crate::screen::adopt(&self.directory, &self.report.run_id, &steps);
         }
         Ok(self.report.clone())
     }
@@ -728,6 +849,107 @@ pub fn evaluate(
                 .as_ref()
                 .map(|t| result(t.contains(text)))
                 .unwrap_or_else(missing)
+        }
+        CheckMethod::BrowserAttribute => {
+            let Some(read) = phase.browser.as_ref().and_then(|b| {
+                b.steps
+                    .iter()
+                    .find(|s| s.id == target && s.phase == "action" && s.completed)
+                    .and_then(|s| s.attribute.as_ref())
+            }) else {
+                return missing();
+            };
+            let positive = matches!(check.expect, Expectation::Contains | Expectation::Equal);
+            let matched = read
+                .value
+                .as_deref()
+                .is_some_and(|value| match check.expect {
+                    Expectation::Equal | Expectation::NotEqual => value == text,
+                    _ => value.contains(text),
+                });
+            (
+                if matched == positive {
+                    Observed::Pass
+                } else {
+                    Observed::Fail
+                },
+                match (&read.value, matched) {
+                    (None, _) => format!("手順 {target} の要素に、指定した属性がない"),
+                    (Some(_), true) => {
+                        format!("手順 {target} で読んだ属性の値は条件の文字列に合う")
+                    }
+                    (Some(_), false) => {
+                        format!("手順 {target} で読んだ属性の値は条件の文字列に合わない")
+                    }
+                },
+            )
+        }
+        CheckMethod::BrowserHeader => {
+            let (Some(browser), Some((name, part))) = (&phase.browser, header_condition(text))
+            else {
+                return missing();
+            };
+            if browser.response_limit {
+                return (
+                    Observed::NotObserved,
+                    "HTTP応答の記録上限に達し、全ての応答を照合できない".into(),
+                );
+            }
+            let responses = browser
+                .responses
+                .iter()
+                .filter(|r| {
+                    r.watch == target
+                        && r.request_step.as_ref().is_some_and(|id| {
+                            browser
+                                .steps
+                                .iter()
+                                .any(|s| &s.id == id && s.phase == "action")
+                        })
+                })
+                .collect::<Vec<_>>();
+            // ヘッダーを記録していない応答（変更前の記録）は、ヘッダーがないとは扱わない。
+            if responses.is_empty() || responses.iter().any(|r| r.headers.is_none()) {
+                return missing();
+            }
+            // 記録した部分に条件の文字があれば「含む」。なくても、後半を切り捨てたヘッダーでは、
+            // 切り捨てた部分にないとは言えないので、判定しない。
+            let outcomes = responses
+                .iter()
+                .map(|r| {
+                    let found = r
+                        .headers
+                        .as_ref()
+                        .and_then(|h| h.get(name))
+                        .is_some_and(|value| value.contains(part));
+                    (found || !r.headers_truncated.iter().any(|n| n == name)).then_some(found)
+                })
+                .collect::<Vec<_>>();
+            let Some(values) = outcomes.into_iter().collect::<Option<Vec<bool>>>() else {
+                return (
+                    Observed::NotObserved,
+                    format!(
+                        "観測 {target} の応答のヘッダー {name} は、上限で後半を切り捨てて記録した。切り捨てた部分に条件の文字があるかを判定できない"
+                    ),
+                );
+            };
+            if values.iter().any(|v| *v != values[0]) {
+                return (
+                    Observed::NotObserved,
+                    "同じ観測先の応答で、ヘッダーの条件が相反する".into(),
+                );
+            }
+            (
+                if values[0] == (check.expect == Expectation::Contains) {
+                    Observed::Pass
+                } else {
+                    Observed::Fail
+                },
+                format!(
+                    "観測 {target} の応答に、条件に合うヘッダー {name} が{}",
+                    if values[0] { "ある" } else { "ない" }
+                ),
+            )
         }
         CheckMethod::BrowserResponse => {
             let Some(browser) = &phase.browser else {

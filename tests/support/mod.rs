@@ -154,3 +154,123 @@ pub fn run_external(
         reason,
     )
 }
+
+/// 事例を作り、実行ファイルの `case execute` を起動して返す。終了は待たない。
+/// 実行ファイルへ終了の合図を送る試験で使う。
+pub fn spawn_case_execute(
+    directory: &Path,
+    repository_root: &Path,
+    recipe: &mugiurushi::execution::Recipe,
+) -> std::process::Child {
+    use std::process::{Command, Stdio};
+    let binary = env!("CARGO_BIN_EXE_mugiurushi");
+    let cli = |args: &[&str]| {
+        let output = Command::new(binary)
+            .args(args)
+            .output()
+            .expect("実行ファイル");
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("JSONの出力")
+    };
+    std::fs::create_dir_all(directory).unwrap();
+    let case = directory.join("case");
+    let write = |name: &str, value: serde_json::Value| {
+        let path = directory.join(name);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        path
+    };
+    let spec = write(
+        "case-spec.json",
+        serde_json::json!({"schema_version":1,"revision":1,"id":"signal","title":"終了の合図の試験",
+            "statements":[],"context":{},"evidence":[],"decisions":[],"history":[],
+            "checks":[{"id":recipe.check_id,"version":1,"text":"架空の条件","origin":"試験",
+                "source":recipe.source,"rule":"manual_only","dependencies":[],"questions":[]}]}),
+    );
+    let view = cli(&[
+        "case",
+        "init",
+        &case.to_string_lossy(),
+        "--file",
+        &spec.to_string_lossy(),
+    ]);
+    let configure = write(
+        "configure.json",
+        serde_json::json!({"expected_revision":view["workspace"]["revision"],"actor":"合成の試験担当",
+            "reason":"実行前に観測名と対象を保存",
+            "action":{"op":"configure_observation","check_id":recipe.check_id,"criterion":recipe.criterion}}),
+    );
+    cli(&[
+        "case",
+        "apply",
+        &case.to_string_lossy(),
+        &configure.to_string_lossy(),
+    ]);
+    let file = write("recipe.json", serde_json::to_value(recipe).unwrap());
+    Command::new(binary)
+        .args(["case", "execute"])
+        .arg(&case)
+        .arg(&file)
+        .arg("--repository-root")
+        .arg(repository_root)
+        .args([
+            "--mode",
+            "local",
+            "--actor",
+            "合成の試験担当",
+            "--reason",
+            "終了の合図の試験",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("実行ファイルの起動")
+}
+
+/// プロセスへ合図を送る。
+pub fn send_signal(pid: u32, signal: &str) {
+    let status = std::process::Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -{signal} {pid}");
+}
+
+/// プロセスが動いているか。
+pub fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// 子の終了を、上限の時間まで待つ。終了コードと、標準エラーの内容を返す。
+pub fn wait_within(
+    mut child: std::process::Child,
+    limit: std::time::Duration,
+) -> (Option<i32>, String) {
+    use std::io::Read;
+    let until = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= until {
+            let _ = child.kill();
+            panic!("実行ファイルが {limit:?} 以内に終わらなかった");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    (status.code(), stderr)
+}

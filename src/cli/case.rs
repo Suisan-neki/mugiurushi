@@ -101,6 +101,15 @@ pub(super) fn run(args: &[String]) -> io::Result<()> {
             };
             print_json(&comparison::compare(workspace, request)?)
         }
+        // 試行で追跡した値の出現から、読み出し先と判定条件の候補を出す。事例は変更しない。
+        "draft" => {
+            let opts = options(&args[2..], &["--evidence"])?;
+            let evidence = required(&opts, "--evidence")?;
+            print_json(&mugiurushi::tracking::draft_for(
+                &workspace::load(&directory)?,
+                &evidence,
+            )?)
+        }
         "apply" if args.len() == 3 => {
             let request: ChangeRequest = recording::read_json(&PathBuf::from(&args[2]))?;
             print_json(&workspace::change(&directory, request)?)

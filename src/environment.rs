@@ -297,8 +297,27 @@ fn git(root: &Path, args: &[&str]) -> io::Result<String> {
 struct Container(String);
 impl Drop for Container {
     fn drop(&mut self) {
-        let _ = small_output(command("docker", &["rm", "-f", &self.0]));
+        let _ = small_output(command("docker", &["rm", "-f", "-v", &self.0]));
+        crate::shutdown::release_container(&self.0);
     }
+}
+/// 終了の合図を受けたときに、名前で指すコンテナを消す。作ったときと同じ接続先（`command` の環境）を使う。
+/// 消えたことを確かめられたら真、残っていたら偽を返す。Dockerに尋ねられなかった場合は、エラーを返す。
+pub(crate) fn remove_held(name: &str) -> io::Result<bool> {
+    let _ = small_output(command("docker", &["rm", "-f", "-v", name]));
+    // 名前の絞り込みは部分一致なので、一覧の中に同じ名前があるかを確かめる。
+    let listed = small_output(command(
+        "docker",
+        &[
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name={name}"),
+            "--format",
+            "{{.Names}}",
+        ],
+    ))?;
+    Ok(!listed.lines().any(|line| line.trim() == name))
 }
 /// 未コミットの作業ファイルは使わず、Gitの固定コミットをアーカイブしてコンテナへ渡す。
 pub fn run(recipe_path: &Path, root: &Path, output: &Path) -> io::Result<PathBuf> {
@@ -416,32 +435,37 @@ fn execute(
         &["image", "inspect", "--format", "{{.Id}}", &recipe.image],
     ))?);
     let name = format!("eel-env-{id}");
+    // 終了の合図を受けたときにも、このコンテナを消せるように控える。
+    crate::shutdown::hold_container(&name);
     let _guard = Container(name.clone());
-    small_output(command(
-        "docker",
-        &[
-            "create",
-            "--name",
-            &name,
-            "--platform",
-            &recipe.platform,
-            "--label",
-            "eel.managed=1",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--pids-limit=512",
-            "--memory",
-            &format!("{}m", recipe.memory_mb),
-            "--cpus",
-            &recipe.cpus.to_string(),
-            "--workdir",
-            "/work",
-            "--entrypoint",
-            "python3",
-            &recipe.image,
-            "/eel/runner.py",
-        ],
-    ))?;
+    // 回収が始まった後は作らない。作っている途中なら、回収はできあがるのを待つ。
+    crate::shutdown::creating(|| {
+        small_output(command(
+            "docker",
+            &[
+                "create",
+                "--name",
+                &name,
+                "--platform",
+                &recipe.platform,
+                "--label",
+                "eel.managed=1",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--pids-limit=512",
+                "--memory",
+                &format!("{}m", recipe.memory_mb),
+                "--cpus",
+                &recipe.cpus.to_string(),
+                "--workdir",
+                "/work",
+                "--entrypoint",
+                "python3",
+                &recipe.image,
+                "/eel/runner.py",
+            ],
+        ))
+    })?;
     record.container_removed = false;
     small_output(command(
         "docker",
@@ -483,7 +507,7 @@ fn execute(
             record.report.preparation = Status::Failed;
         }
     }
-    small_output(command("docker", &["rm", "-f", &name]))?;
+    small_output(command("docker", &["rm", "-f", "-v", &name]))?;
     record.container_removed = true;
     Ok(())
 }
@@ -499,21 +523,29 @@ fn wait_logged(
         .stdout(File::create(&stdout)?)
         .stderr(File::create(&stderr)?)
         .spawn()?;
+    // 終了の合図を受けたときに止められるように、実行中のPIDを控える。
+    let pid = child.id();
+    crate::shutdown::hold_command(pid);
     let start = Instant::now();
-    loop {
-        let limited =
-            fs::metadata(&stdout)?.len() + fs::metadata(&stderr)?.len() > 32 * 1024 * 1024;
-        let timed = start.elapsed() >= Duration::from_millis(timeout_ms);
-        if limited || timed {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok((None, timed, limited));
+    let mut wait = || -> io::Result<(Option<i32>, bool, bool)> {
+        loop {
+            let limited =
+                fs::metadata(&stdout)?.len() + fs::metadata(&stderr)?.len() > 32 * 1024 * 1024;
+            let timed = start.elapsed() >= Duration::from_millis(timeout_ms);
+            if limited || timed {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok((None, timed, limited));
+            }
+            if let Some(status) = child.try_wait()? {
+                return Ok((status.code(), false, false));
+            }
+            thread::sleep(Duration::from_millis(100));
         }
-        if let Some(status) = child.try_wait()? {
-            return Ok((status.code(), false, false));
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
+    };
+    let result = wait();
+    crate::shutdown::release_command(pid);
+    result
 }
 pub fn load(directory: &Path) -> io::Result<Record> {
     serde_json::from_slice(&bounded_file(

@@ -29,3 +29,8 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.regex-syntax]
 opt-level = 3
+
+# 試行ごとに、実行ファイル自身のSHA-256を計算する。デバッグビルドの実行ファイルは大きく、
+# 最適化しないと数秒かかり、試験の待ち時間の上限に届く。
+[profile.dev.package.sha2]
+opt-level = 3
