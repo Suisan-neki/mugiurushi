@@ -64,9 +64,10 @@ try {
   // 見た目を作り込んだラジオボタン。欄そのものは隠れていて、人はラベルの文字を押す。
   await page.locator('label[for=sex-m] span').click();
   await page.frameLocator('iframe').locator('input').click(); await page.keyboard.type('メモ EEL-TEST-REC');
+  // HEADの応答が届いてから、次の操作をする。応答はクリックの直後に届くことがあるので、押す前から待ち始める。
+  const head = page.waitForResponse(r => r.request().method() === 'HEAD');
   await page.locator('#detail-2').click();
-  // HEADの応答が届いてから、次の操作をする。
-  await page.waitForResponse(r => r.request().method() === 'HEAD');
+  await head;
   // 入れた値を、別の操作が消す。人は同じ値を入れ直す。値は1回の入力で入る（貼り付けと同じ）。
   await page.locator('input[name=contact]').fill('内線 12');
   await page.locator('#clear-contact').click();
