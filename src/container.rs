@@ -1,6 +1,7 @@
 //! 試験専用のコンテナを、試行ごとに作って止めて消す。
 //! イメージはダイジェスト（`@sha256:` と64桁）付きだけを受け付ける。タグだけでは起動しない。
 //! 待ち受けは 127.0.0.1 だけに公開する。Dockerが使えないときはほかの方式へ切り替えない。
+use crate::database::DatabaseEngine;
 use crate::error::invalid;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -72,6 +73,9 @@ pub struct Service {
     pub command: Vec<String>,
     pub ready: ReadyCheck,
     pub ready_timeout_ms: u64,
+    /// DBの役割のコンテナの種類。指定のない設定はMariaDBとして読み、保存するときも省く。
+    #[serde(default, skip_serializing_if = "DatabaseEngine::is_default")]
+    pub engine: DatabaseEngine,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +85,26 @@ pub struct ContainerSpec {
     /// 対象のコンテナから外部への通信。指定しなければ遮断する。
     #[serde(default, skip_serializing_if = "Egress::is_blocked")]
     pub egress: Egress,
+    /// 対象の手前の中継を、プロトコルを解釈する中継に置き換える指定。DBへ送った文の並びを記録する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelaySetting>,
 }
+
+/// プロトコルを解釈する中継を置く対象と、その中継に行わせること。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelaySetting {
+    /// 中継を置く対象の名前。通常はDBのコンテナ。
+    pub service: String,
+    pub protocol: crate::relay::Protocol,
+    /// 指定した文の決まった時点で接続を切る。故障の種類が「中継で接続を切る」の試行で使う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<crate::relay::CutPoint>,
+}
+
+/// 中継のコンテナの土台。基盤の実行ファイルをこの中で動かすため、同じ世代のglibcを持つイメージにする。
+const RELAY_IMAGE: &str =
+    "ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852";
 
 /// 試験用ネットワークの外部通信。`Allowed`は対象が外部へ通信できることを記録に残す。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +215,22 @@ pub struct ContainerPhase {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_reads: Vec<crate::http_probe::HttpRead>,
     pub detail: String,
+    /// 追跡する値を、操作の前後にDBの文字列型の列から探した結果。記録のみで、判定には使わない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_scan_before: Option<crate::tracking::DatabaseScan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_scan: Option<crate::tracking::DatabaseScan>,
+    /// 追跡した値ごとの、DB・HTTP・画面・ログでの出現。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_trace: Option<crate::tracking::ValueTrace>,
+    /// 対象がDBへ送った文の記録。文を記録する中継を置いた試行だけにある。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statements: Vec<crate::relay::StatementEvent>,
+    /// 記録に残さない文（読み出しなど）を含めた、種類ごとの数。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub statement_totals: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub statements_note: String,
 }
 
 /// 基盤から対象への接続を表す接続元の名前。ブラウザ操作器・HTTP操作・準備確認など。
@@ -334,6 +373,8 @@ pub struct Session {
     services: Vec<Running>,
     engine: String,
     cleaned: bool,
+    /// 文を記録する中継の指定と、中継へ渡す追跡する値。
+    relay: Option<(RelaySetting, Vec<crate::relay::Tracked>)>,
 }
 
 struct Running {
@@ -453,6 +494,10 @@ pub fn validate_spec(spec: &ContainerSpec) -> io::Result<()> {
         }
         if service.role == ServiceRole::Database {
             databases += 1;
+        } else if !service.engine.is_default() {
+            return Err(invalid(
+                "DBの種類は、データベースの役割のコンテナにだけ指定してください",
+            ));
         }
     }
     if spec.egress == Egress::Blocked
@@ -465,6 +510,23 @@ pub fn validate_spec(spec: &ContainerSpec) -> io::Result<()> {
     }
     if databases > 1 {
         return Err(invalid("データベースの役割のコンテナは1件にしてください"));
+    }
+    if let Some(relay) = &spec.relay {
+        if spec.egress != Egress::Blocked || !names.contains(relay.service.as_str()) {
+            return Err(invalid(
+                "文を記録する中継は、外部通信を遮断した試験の、実在する対象にだけ置けます",
+            ));
+        }
+        if let Some(cut) = &relay.cut
+            && (relay.protocol != crate::relay::Protocol::Mysql
+                || cut.occurrence == 0
+                || cut.shape.len() != 16
+                || !cut.shape.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(invalid(
+                "接続を切る時点は、文の形のハッシュ（16桁）と1以上の回数で指定してください",
+            ));
+        }
     }
     Ok(())
 }
@@ -545,6 +607,127 @@ fn docker(args: &[&str]) -> io::Result<Output> {
     command.output()
 }
 
+/// 期限、停止の合図、出力の上限を付けて `docker` を実行した結果。
+struct Bounded {
+    ended: crate::tracking::Ended,
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// 標準エラーを受け取る上限。
+const MAX_BOUNDED_STDERR: usize = 64 * 1024;
+
+/// `docker` を実行し、期限に達するか、停止を求められるか、出力が上限を超えたら、待つのをやめて止める。
+/// 出力は上限までしかメモリに持たない。止めるのはホストの側の `docker` のプロセスだけなので、
+/// コンテナの中で始めた処理を止めるのは呼び出し側の役目である。
+fn docker_bounded(
+    args: &[&str],
+    within: Duration,
+    stop: Option<&std::sync::atomic::AtomicBool>,
+    max_stdout: usize,
+) -> io::Result<Bounded> {
+    use crate::tracking::Ended;
+    use std::{
+        io::Read,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+    let deadline = Instant::now() + within;
+    let mut command = Command::new("docker");
+    command
+        .args(args)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(host) = std::env::var_os("DOCKER_HOST") {
+        command.env("DOCKER_HOST", host);
+    }
+    let mut child = command.spawn()?;
+    let overflow = Arc::new(AtomicBool::new(false));
+    // 上限までを持ち、超えた分は捨てる。上限を超えたことは親へ知らせる。
+    let reader = |mut pipe: Box<dyn Read + Send>, limit: usize, flag: Option<Arc<AtomicBool>>| {
+        thread::spawn(move || {
+            let mut kept = Vec::new();
+            let mut buffer = [0u8; 16 * 1024];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(size) => {
+                        let room = limit.saturating_sub(kept.len());
+                        kept.extend_from_slice(&buffer[..size.min(room)]);
+                        if size > room
+                            && let Some(flag) = &flag
+                        {
+                            flag.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+            }
+            kept
+        })
+    };
+    let out = reader(
+        Box::new(child.stdout.take().expect("piped stdout")),
+        max_stdout,
+        Some(overflow.clone()),
+    );
+    let err = reader(
+        Box::new(child.stderr.take().expect("piped stderr")),
+        MAX_BOUNDED_STDERR,
+        None,
+    );
+    let (ended, status) = loop {
+        if let Some(status) = child.try_wait()? {
+            break (Ended::Exited, Some(status));
+        }
+        let ended = if overflow.load(Ordering::SeqCst) {
+            Some(Ended::OutputLimit)
+        } else if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+            Some(Ended::Stopped)
+        } else if Instant::now() >= deadline {
+            Some(Ended::Deadline)
+        } else {
+            None
+        };
+        if let Some(ended) = ended {
+            let _ = child.kill();
+            let _ = child.wait();
+            break (ended, None);
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = out.join().unwrap_or_default();
+    let stderr = err.join().unwrap_or_default();
+    // 終了と同時に上限を超えた場合も、出力が欠けているので、上限を超えたものとして扱う。
+    let ended = if ended == Ended::Exited && overflow.load(Ordering::SeqCst) {
+        Ended::OutputLimit
+    } else {
+        ended
+    };
+    Ok(Bounded {
+        ended,
+        success: ended == Ended::Exited && status.is_some_and(|s| s.success()),
+        stdout,
+        stderr,
+    })
+}
+
+/// コンテナの中でDBのクライアントを起動する `docker exec` の引数。
+fn exec_args<'a>(container: &'a str, client: &'a crate::database::Client) -> Vec<&'a str> {
+    let mut args = vec!["exec"];
+    for value in &client.env {
+        args.extend(["--env", value.as_str()]);
+    }
+    args.push(container);
+    args.extend(client.argv.iter().map(String::as_str));
+    args
+}
+
 fn docker_text(args: &[&str]) -> io::Result<String> {
     let output = docker(args)?;
     if output.status.success() {
@@ -572,6 +755,15 @@ pub fn substitute_ports(value: &str, ports: &BTreeMap<String, u16>) -> String {
 
 impl Session {
     pub fn start(trial: &str, spec: &ContainerSpec) -> io::Result<Self> {
+        Self::start_tracking(trial, spec, vec![])
+    }
+
+    /// 追跡する値を、文を記録する中継へ渡して起動する。中継を置かない設定では値を使わない。
+    pub fn start_tracking(
+        trial: &str,
+        spec: &ContainerSpec,
+        values: Vec<crate::relay::Tracked>,
+    ) -> io::Result<Self> {
         validate_spec(spec)?;
         let engine = engine().map_err(io::Error::other)?;
         let trial = format!(
@@ -590,6 +782,7 @@ impl Session {
             services: vec![],
             engine,
             cleaned: false,
+            relay: spec.relay.clone().map(|setting| (setting, values)),
         };
         let mut create = vec!["network", "create", "--label", "eel.managed=1"];
         let label = format!("eel.trial={trial}");
@@ -730,7 +923,13 @@ impl Session {
             docker_text(&arg_refs)?;
         }
         let tap = if self.egress == Egress::Blocked {
-            match self.start_tap(service, port) {
+            let started = match &self.relay {
+                Some((setting, values)) if setting.service == service.name => {
+                    self.start_relay(service, port, setting, values)
+                }
+                _ => self.start_tap(service, port),
+            };
+            match started {
                 Ok(name) => Some(name),
                 Err(error) => {
                     let _ = docker(&["rm", "-f", &container]);
@@ -829,6 +1028,171 @@ impl Session {
             return Err(error);
         }
         Ok(name)
+    }
+
+    /// プロトコルを解釈する中継を、既存の中継と同じ位置に置く。基盤の実行ファイルをコンテナへ入れて動かす。
+    fn start_relay(
+        &self,
+        service: &Service,
+        port: u16,
+        setting: &RelaySetting,
+        values: &[crate::relay::Tracked],
+    ) -> io::Result<String> {
+        pull(RELAY_IMAGE)?;
+        let binary = match std::env::var_os("EEL_RELAY_BINARY") {
+            Some(path) => PathBuf::from(path),
+            None => std::env::current_exe()?,
+        };
+        let name = format!("eel-{}-{}-tap", self.trial, service.name);
+        let config = serde_json::to_string(&crate::relay::Config {
+            listen: service.expose,
+            upstream: format!("{}:{}", self.alias(&service.name), service.expose),
+            protocol: setting.protocol,
+            values: values.to_vec(),
+            cut: setting.cut.clone(),
+        })
+        .map_err(io::Error::other)?;
+        let mut args: Vec<String> = vec![
+            "create".into(),
+            "--name".into(),
+            name.clone(),
+            "--label".into(),
+            "eel.managed=1".into(),
+            "--label".into(),
+            format!("eel.trial={}", self.trial),
+            "--label".into(),
+            "eel.role=tap".into(),
+            "--network".into(),
+            self.edge.clone(),
+            "--publish".into(),
+            format!("127.0.0.1:{port}:{}", service.expose),
+            "--restart".into(),
+            "no".into(),
+            "--env".into(),
+            format!("{}={config}", crate::relay::CONFIG_VARIABLE),
+        ];
+        harden(&mut args);
+        args.extend([
+            "--entrypoint".into(),
+            "/relay".into(),
+            RELAY_IMAGE.into(),
+            "relay".into(),
+        ]);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        docker_text(&refs)?;
+        let started = docker_text(&["cp", &binary.to_string_lossy(), &format!("{name}:/relay")])
+            .and_then(|_| {
+                docker_text(&[
+                    "network",
+                    "connect",
+                    "--alias",
+                    &service.name,
+                    &self.network,
+                    &name,
+                ])
+            })
+            .and_then(|_| docker_text(&["start", &name]));
+        // 実行ファイルがコンテナの中で動かない場合（別のOS向け、glibcの世代の違い）は、すぐに終了する。
+        let ready = started.and_then(|_| {
+            let until = Instant::now() + Duration::from_secs(10);
+            loop {
+                let logs = docker(&["logs", &name])?;
+                if String::from_utf8_lossy(&logs.stdout).contains("\"e\":\"ready\"") {
+                    return Ok(());
+                }
+                if !inspect_running(&name).unwrap_or(false) || Instant::now() >= until {
+                    return Err(io::Error::other(format!(
+                        "文を記録する中継を起動できません。基盤の実行ファイルが中継のコンテナの中で動くことを確認してください（EEL_RELAY_BINARY でLinux向けの実行ファイルを指定できます）: {}",
+                        String::from_utf8_lossy(&logs.stderr)
+                            .chars()
+                            .take(300)
+                            .collect::<String>()
+                    )));
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+        if let Err(error) = ready {
+            let _ = docker(&["rm", "-f", &name]);
+            return Err(error);
+        }
+        Ok(name)
+    }
+
+    /// 文を記録する中継の記録を読む。中継を置いていない試行では `None`。
+    fn statements(
+        &self,
+    ) -> Option<(
+        Vec<crate::relay::StatementEvent>,
+        BTreeMap<String, u64>,
+        String,
+    )> {
+        let (setting, _) = self.relay.as_ref()?;
+        let tap = self
+            .services
+            .iter()
+            .find(|s| s.spec.name == setting.service)?
+            .tap
+            .as_ref()?;
+        let output = match docker(&["logs", tap]) {
+            Ok(output) if output.status.success() => output,
+            _ => {
+                return Some((
+                    vec![],
+                    BTreeMap::new(),
+                    "中継の記録を取得できない。文がなかったことは意味しない".into(),
+                ));
+            }
+        };
+        let read = crate::relay::read_log(&String::from_utf8_lossy(&output.stdout));
+        let total: u64 = read.totals.values().sum();
+        let mut note = format!(
+            "準備と操作の間に、対象が {} へ送った文は{total}件。そのうち、書き込み・トランザクションの操作・追跡する値を含む文の{}件を記録した。SQLの本文は記録していない",
+            setting.service,
+            read.statements.len()
+        );
+        if total == 0 {
+            note.push_str("。基盤が段階を知らせる前の文は数えていない");
+        }
+        if !read.opaque.is_empty() {
+            note.push_str(&format!(
+                "。暗号化などで読めなかった接続が{}件あり、その中の文は記録していない",
+                read.opaque.len()
+            ));
+        }
+        if read.truncated {
+            note.push_str("。上限を超えた分は捨てた");
+        }
+        Some((read.statements, read.totals, note))
+    }
+
+    /// 文を記録する中継へ、試行の段階を知らせる。中継は、知らされた後の文だけを数える。
+    /// 対象の起動時の初期化を、試験の操作と混ぜないためである。中継を置いていない試行では何もしない。
+    pub fn mark_relay_phase(&self, phase: &str) -> io::Result<()> {
+        let Some((setting, _)) = &self.relay else {
+            return Ok(());
+        };
+        let Some(tap) = self
+            .services
+            .iter()
+            .find(|s| s.spec.name == setting.service)
+            .and_then(|s| s.tap.as_ref())
+        else {
+            return Ok(());
+        };
+        if !["preparation", "action"].contains(&phase) {
+            return Err(invalid("中継へ知らせる段階は preparation か action です"));
+        }
+        docker_text(&[
+            "exec",
+            tap,
+            "sh",
+            "-c",
+            &format!("printf %s {phase} > {}", crate::relay::PHASE_FILE),
+        ])?;
+        // 中継は段階を短い間隔で読み直す。読み直すまで待ってから、対象を操作する。
+        thread::sleep(Duration::from_millis(60));
+        Ok(())
     }
 
     /// 中継が記録した接続を、接続元と接続先の対象ごとに集計する。
@@ -1157,25 +1521,13 @@ impl Session {
         if !inspect_running(&service.container).ok()? {
             return Some("データベースのコンテナは動いていない".into());
         }
-        let password = service
-            .spec
-            .env
-            .get("MYSQL_ROOT_PASSWORD")
-            .or_else(|| service.spec.env.get("MARIADB_ROOT_PASSWORD"));
-        let env = format!("MYSQL_PWD={}", password.map(String::as_str).unwrap_or(""));
-        let output = docker(&[
-            "exec",
-            "--env",
-            &env,
-            &service.container,
-            "mariadb",
-            "--user=root",
-            "--connect-timeout=5",
-            "-N",
-            "-e",
-            "SELECT 1",
-        ])
-        .ok()?;
+        let Some(client) = service.spec.engine.ping(&service.spec.env) else {
+            return Some(format!(
+                "DBの種類（{}）は基盤の読み出しに対応していないため、照会していない",
+                service.spec.engine.label()
+            ));
+        };
+        let output = docker(&exec_args(&service.container, &client)).ok()?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         Some(if output.status.success() {
@@ -1188,7 +1540,64 @@ impl Session {
         })
     }
 
-    /// MariaDBの読取専用照会。対象の試験値に一致する行だけを読む。
+    /// 追跡する値を、DBの文字列型の列すべてから探す。読取専用の照会だけを行う。
+    pub fn scan_database(
+        &self,
+        values: &[crate::tracking::TrackedValue],
+    ) -> crate::tracking::DatabaseScan {
+        // 実行中の試行に停止を求める経路は、基盤にまだない。探索は期限だけで止まる。
+        self.scan_database_within(
+            values,
+            crate::tracking::SCAN_BUDGET,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    }
+
+    /// 探索の全体に許す時間と、停止の合図を指定して探す。
+    /// 時間に達するか、`stop` が真になると、実行中の照会をDBの側で止めてから戻る。
+    pub fn scan_database_within(
+        &self,
+        values: &[crate::tracking::TrackedValue],
+        budget: Duration,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> crate::tracking::DatabaseScan {
+        use crate::tracking::{DatabaseScan, Executed};
+        let Some(service) = self
+            .services
+            .iter()
+            .find(|s| s.spec.role == ServiceRole::Database)
+        else {
+            return DatabaseScan::not_performed("データベースの役割のコンテナがない");
+        };
+        if !inspect_running(&service.container).unwrap_or(false) {
+            return DatabaseScan::not_performed("DBが停止しており、探索できない");
+        }
+        let mut scan = crate::tracking::scan(
+            service.spec.engine,
+            &service.spec.env,
+            values,
+            budget,
+            stop,
+            |request| {
+                let output = docker_bounded(
+                    &exec_args(&service.container, request.client),
+                    request.within,
+                    (!request.ignore_stop).then_some(stop),
+                    crate::tracking::MAX_OUTPUT,
+                )?;
+                Ok(Executed {
+                    ended: output.ended,
+                    success: output.success,
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                })
+            },
+        );
+        scan.service = service.spec.name.clone();
+        scan
+    }
+
+    /// 試験値に一致する行だけを、読取専用の照会で読む。
     pub fn read_database(
         &self,
         probe: &crate::browser::DatabaseProbe,
@@ -1224,28 +1633,19 @@ impl Session {
             read.detail = "DBの識別子が不正".into();
             return read;
         }
-        let password = service
+        let sql = crate::browser::query(service.spec.engine, probe, test_value);
+        let Some(client) = service
             .spec
-            .env
-            .get("MYSQL_ROOT_PASSWORD")
-            .or_else(|| service.spec.env.get("MARIADB_ROOT_PASSWORD"));
-        let env = format!("MYSQL_PWD={}", password.map(String::as_str).unwrap_or(""));
-        let sql = crate::browser::query(probe, test_value);
-        match docker(&[
-            "exec",
-            "--env",
-            &env,
-            &service.container,
-            "mariadb",
-            "--user=root",
-            "--connect-timeout=5",
-            "--batch",
-            "--skip-column-names",
-            "--database",
-            &probe.database,
-            "--execute",
-            &sql,
-        ]) {
+            .engine
+            .run(&service.spec.env, &probe.database, &sql)
+        else {
+            read.detail = format!(
+                "DBの種類（{}）は基盤の読み出しに対応していないため、行を読んでいない。行の不存在とは扱わない",
+                service.spec.engine.label()
+            );
+            return read;
+        };
+        match docker(&exec_args(&service.container, &client)) {
             Ok(output) => {
                 read.performed = true;
                 read.exit_code = output.status.code();
@@ -1298,6 +1698,7 @@ impl Session {
             }
         }
         let (traffic, traffic_note) = self.traffic(&addresses);
+        let (statements, statement_totals, statements_note) = self.statements().unwrap_or_default();
         for service in &self.services {
             let _ = docker(&["stop", "-t", "2", &service.container]);
         }
@@ -1349,6 +1750,12 @@ impl Session {
             database_reads: vec![],
             database_reads_before: vec![],
             http_reads: vec![],
+            database_scan_before: None,
+            database_scan: None,
+            value_trace: None,
+            statements,
+            statement_totals,
+            statements_note,
             detail: if leftovers.is_empty() {
                 "試行用のコンテナ・ネットワーク・ボリュームをこの試行だけで使っている".into()
             } else {
@@ -1844,6 +2251,115 @@ mod tests {
     }
 
     #[test]
+    fn engine_is_only_for_the_database_role_and_is_omitted_when_default() {
+        let recipe: serde_json::Value =
+            serde_json::from_str(include_str!("../examples/openemr-browser/soap-recipe.json"))
+                .unwrap();
+        // 種類を書いていない既存の設定は、保存し直しても種類の項目を持たない。
+        // 判定条件の指紋はこの保存形から計算するため、既存の指紋が変わらない。
+        let spec: ContainerSpec = serde_json::from_value(recipe["containers"].clone()).unwrap();
+        assert!(spec.services.iter().all(|s| s.engine.is_default()));
+        assert!(
+            serde_json::to_value(&spec).unwrap()["services"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s.get("engine").is_none())
+        );
+        validate_spec(&spec).unwrap();
+
+        let mut declared = spec.clone();
+        declared.services[0].engine = DatabaseEngine::Postgres;
+        validate_spec(&declared).unwrap();
+        assert_eq!(
+            serde_json::to_value(&declared).unwrap()["services"][0]["engine"],
+            "postgres"
+        );
+        // DBではないコンテナへの指定と、未知の種類は拒否する。
+        let mut misplaced = spec.clone();
+        misplaced.services[1].engine = DatabaseEngine::Postgres;
+        assert!(validate_spec(&misplaced).is_err());
+        let mut unknown = recipe["containers"].clone();
+        unknown["services"][0]["engine"] = "oracle".into();
+        assert!(serde_json::from_value::<ContainerSpec>(unknown).is_err());
+    }
+
+    #[test]
+    fn a_statement_relay_needs_a_blocked_network_a_known_service_and_a_well_formed_cut() {
+        let recipe: serde_json::Value =
+            serde_json::from_str(include_str!("../examples/openemr-browser/soap-recipe.json"))
+                .unwrap();
+        let base: ContainerSpec = serde_json::from_value(recipe["containers"].clone()).unwrap();
+        // 中継を指定しない既存の設定は、保存し直しても項目を持たない。
+        assert!(serde_json::to_value(&base).unwrap().get("relay").is_none());
+        let with = |relay: serde_json::Value, egress: Egress| {
+            let mut spec = base.clone();
+            spec.egress = egress;
+            spec.relay = Some(serde_json::from_value(relay).unwrap());
+            validate_spec(&spec)
+        };
+        let shape = "0123456789abcdef";
+        with(
+            serde_json::json!({"service": "mysql", "protocol": "mysql"}),
+            Egress::Blocked,
+        )
+        .unwrap();
+        with(
+            serde_json::json!({"service": "mysql", "protocol": "mysql",
+                "cut": {"shape": shape, "occurrence": 2, "phase": "after_forward_before_reply"}}),
+            Egress::Blocked,
+        )
+        .unwrap();
+        // 外部通信を許可した試験には中継がないので、置けない。
+        assert!(
+            with(
+                serde_json::json!({"service": "mysql", "protocol": "mysql"}),
+                Egress::Allowed
+            )
+            .is_err()
+        );
+        assert!(
+            with(
+                serde_json::json!({"service": "no-such", "protocol": "mysql"}),
+                Egress::Blocked
+            )
+            .is_err()
+        );
+        for cut in [
+            serde_json::json!({"shape": "short", "occurrence": 1, "phase": "after_reply"}),
+            serde_json::json!({"shape": "zzzzzzzzzzzzzzzz", "occurrence": 1, "phase": "after_reply"}),
+            serde_json::json!({"shape": shape, "occurrence": 0, "phase": "after_reply"}),
+        ] {
+            assert!(
+                with(
+                    serde_json::json!({"service": "mysql", "protocol": "mysql", "cut": cut}),
+                    Egress::Blocked
+                )
+                .is_err(),
+                "{cut}"
+            );
+        }
+        // 解釈しない中継では、文を数えられないので、切る時点を指定できない。
+        assert!(
+            with(
+                serde_json::json!({"service": "mysql", "protocol": "tcp",
+                    "cut": {"shape": shape, "occurrence": 1, "phase": "after_reply"}}),
+                Egress::Blocked
+            )
+            .is_err()
+        );
+        // 未知の時点と未知の項目は、読み込みの段階で拒否する。
+        for relay in [
+            serde_json::json!({"service": "mysql", "protocol": "mysql",
+                "cut": {"shape": shape, "occurrence": 1, "phase": "during_reply"}}),
+            serde_json::json!({"service": "mysql", "protocol": "mysql", "sql": "DROP"}),
+            serde_json::json!({"service": "mysql", "protocol": "oracle"}),
+        ] {
+            assert!(serde_json::from_value::<RelaySetting>(relay).is_err());
+        }
+    }
+
+    #[test]
     fn digest_is_required() {
         assert!(image_digest("nginx:1.27.4-alpine").is_none());
         assert!(image_digest(
@@ -1859,11 +2375,13 @@ mod tests {
                 env: BTreeMap::new(),
                 volumes: vec![],
                 web_build: None,
+                engine: DatabaseEngine::default(),
                 command: vec![],
                 ready: ReadyCheck::Tcp,
                 ready_timeout_ms: 5000,
             }],
             egress: Egress::default(),
+            relay: None,
         };
         assert!(validate_spec(&spec).is_err());
     }
@@ -1897,11 +2415,13 @@ mod tests {
                 env: BTreeMap::new(),
                 volumes: vec![],
             web_build: None,
+            engine: DatabaseEngine::default(),
                 command: vec![],
                 ready: ReadyCheck::Http { path: "/".into(), tls: false },
                 ready_timeout_ms: 5000,
             }],
             egress: Egress::default(),
+            relay: None,
         };
         assert!(validate_spec(&spec).is_ok());
         assert!(

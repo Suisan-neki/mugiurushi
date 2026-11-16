@@ -17,6 +17,7 @@ const HELP: &str = "mugiurushi
   case backup CASE_DIR --output NEW_JSON
   case restore NEW_CASE_DIR BACKUP_JSON
   case compare CASE_DIR --before EVIDENCE_ID --after EVIDENCE_ID --condition CHECK_ID
+  case draft CASE_DIR --evidence EVIDENCE_ID
   repo prepare NEW_DIR RECIPE_JSON
   environment inspect|run|show|compare ...
 
@@ -92,6 +93,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
             }
         }
         "case" => case::run(&args[1..])?,
+        // 試験用のネットワークの中で、対象とDBの間の中継として動く。設定は環境変数で受け取る。
+        "relay" if args.len() == 1 => {
+            let config = std::env::var(mugiurushi::relay::CONFIG_VARIABLE)
+                .map_err(|_| invalid("中継の設定がありません"))?;
+            mugiurushi::relay::serve(serde_json::from_str(&config).map_err(io::Error::other)?)?
+        }
         "environment" => environment::run(&args[1..])?,
         "api" if args.len() >= 2 => {
             let opts = options(

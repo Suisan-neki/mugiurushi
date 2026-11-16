@@ -1,0 +1,12 @@
+{
+  "system": {
+    "summary": "説明は書かれていない。コードの抜粋から読み取れる範囲で照合する。",
+    "excerpts": [
+      {
+        "ref": "app/auth.py",
+        "text": "def login(user, password):\n    return True\n"
+      }
+    ]
+  },
+  "answers": []
+}

@@ -48,7 +48,11 @@ fn validates_declarative_steps_and_rejects_remote_navigation_and_sql_identifiers
     invalid = original.clone();
     invalid.database[0].table = "patient`; DROP TABLE patient;--".into();
     assert!(validate(&invalid, &containers).is_err());
-    let sql = query(&original.database[0], "x'; DELETE FROM patient; --");
+    let sql = query(
+        Default::default(),
+        &original.database[0],
+        "x'; DELETE FROM patient; --",
+    );
     assert!(!sql.contains("DELETE"));
     assert!(sql.contains("CONVERT(0x"));
 }
@@ -166,6 +170,8 @@ fn display_does_not_establish_database_success_and_mixed_http_responses_are_unkn
     browser.responses = vec![
         ResponseRecord {
             payload_sha256: None,
+            headers: None,
+            headers_truncated: vec![],
             watch: "save".into(),
             method: "POST".into(),
             path: "/save".into(),
@@ -175,6 +181,8 @@ fn display_does_not_establish_database_success_and_mixed_http_responses_are_unkn
         },
         ResponseRecord {
             payload_sha256: None,
+            headers: None,
+            headers_truncated: vec![],
             watch: "save".into(),
             method: "POST".into(),
             path: "/save".into(),
@@ -308,6 +316,8 @@ fn unknown_response_body_never_passes_negative_body_check_and_expressions_are_va
     let mut p = phase();
     p.browser.as_mut().unwrap().responses.push(ResponseRecord {
         payload_sha256: None,
+        headers: None,
+        headers_truncated: vec![],
         watch: "save".into(),
         method: "POST".into(),
         path: "/save".into(),
@@ -387,6 +397,8 @@ fn missing_pixels_or_payload_hashes_do_not_satisfy_negative_expectations() {
         body_match: None,
         request_step: Some("message".into()),
         payload_sha256: None,
+        headers: None,
+        headers_truncated: vec![],
     });
     assert_eq!(
         evaluate(
@@ -422,6 +434,8 @@ fn rejection_requires_the_declared_action_response_and_a_complete_record() {
         body_match: None,
         request_step: Some("message".into()),
         payload_sha256: None,
+        headers: None,
+        headers_truncated: vec![],
     });
     assert!(rejection_observed(&s, report));
     report.responses[0].request_step = Some("username".into());
@@ -429,4 +443,337 @@ fn rejection_requires_the_declared_action_response_and_a_complete_record() {
     report.responses[0].request_step = Some("message".into());
     report.response_limit = true;
     assert!(!rejection_observed(&s, report));
+}
+
+fn with_browser(edit: impl FnOnce(&mut serde_json::Value)) -> ContainerPhase {
+    let mut value = serde_json::to_value(phase()).unwrap();
+    edit(&mut value["browser"]);
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn an_attribute_is_judged_only_when_the_element_was_read() {
+    use CheckMethod::BrowserAttribute as Attribute;
+    let observe = |p: &ContainerPhase, expect, text: &str| {
+        evaluate(&check(Attribute, expect, "kind"), Some(p), text).0
+    };
+    let read = |attribute: serde_json::Value| {
+        with_browser(|b| {
+            b["steps"] = json!([{"id":"kind","phase":"action","completed":true,"text":null,
+                "screenshot":null,"detail":"合成","attribute":attribute}]);
+        })
+    };
+    let password = read(json!({"present":true,"value":"password"}));
+    assert_eq!(
+        observe(&password, Expectation::Equal, "password"),
+        Observed::Pass
+    );
+    assert_eq!(
+        observe(&password, Expectation::Equal, "pass"),
+        Observed::Fail
+    );
+    assert_eq!(
+        observe(&password, Expectation::Contains, "pass"),
+        Observed::Pass
+    );
+    assert_eq!(
+        observe(&password, Expectation::NotEqual, "text"),
+        Observed::Pass
+    );
+    assert_eq!(
+        observe(&password, Expectation::NotContains, "word"),
+        Observed::Fail
+    );
+
+    // 要素はあるが属性がない場合は、観測した結果として扱う。
+    let absent = read(json!({"present":false,"value":null}));
+    assert_eq!(observe(&absent, Expectation::Equal, "off"), Observed::Fail);
+    assert_eq!(
+        observe(&absent, Expectation::Contains, "off"),
+        Observed::Fail
+    );
+    assert_eq!(
+        observe(&absent, Expectation::NotEqual, "on"),
+        Observed::Pass
+    );
+    assert_eq!(
+        observe(&absent, Expectation::NotContains, "on"),
+        Observed::Pass
+    );
+
+    // 手順が未完了、準備の段階の手順、属性を読んでいない手順は、否定の条件も満たさない。
+    let incomplete = with_browser(|b| {
+        b["steps"] = json!([{"id":"kind","phase":"action","completed":false,"text":null,
+            "screenshot":null,"detail":"合成"}]);
+    });
+    let preparation = with_browser(|b| {
+        b["steps"] = json!([{"id":"kind","phase":"preparation","completed":true,"text":null,
+            "screenshot":null,"detail":"合成","attribute":{"present":true,"value":"password"}}]);
+    });
+    let unread = with_browser(|b| {
+        b["steps"] = json!([{"id":"kind","phase":"action","completed":true,"text":"x",
+            "screenshot":null,"detail":"合成"}]);
+    });
+    for p in [&incomplete, &preparation, &unread] {
+        assert_eq!(
+            observe(p, Expectation::NotEqual, "on"),
+            Observed::NotObserved
+        );
+        assert_eq!(
+            observe(p, Expectation::Equal, "password"),
+            Observed::NotObserved
+        );
+    }
+    assert_eq!(
+        evaluate(
+            &check(Attribute, Expectation::Equal, "kind"),
+            None,
+            "password"
+        )
+        .0,
+        Observed::NotObserved
+    );
+}
+
+#[test]
+fn a_header_is_judged_only_from_recorded_action_responses() {
+    use CheckMethod::BrowserHeader as Header;
+    let observe = |p: &ContainerPhase, expect, text: &str| {
+        evaluate(&check(Header, expect, "save"), Some(p), text).0
+    };
+    let response = |headers: serde_json::Value| {
+        json!({"watch":"save","method":"POST","path":"/save","status":200,"body_match":null,
+            "request_step":"message","payload_sha256":null,"headers":headers})
+    };
+    let stored = with_browser(|b| {
+        b["responses"] = json!([response(json!({"cache-control":"no-store, private"}))]);
+    });
+    assert_eq!(
+        observe(&stored, Expectation::Contains, "Cache-Control: no-store"),
+        Observed::Pass
+    );
+    assert_eq!(
+        observe(&stored, Expectation::Contains, "cache-control: public"),
+        Observed::Fail
+    );
+    assert_eq!(
+        observe(&stored, Expectation::NotContains, "cache-control: public"),
+        Observed::Pass
+    );
+    // 値を書かない条件は、ヘッダーの有無を確かめる。
+    assert_eq!(
+        observe(&stored, Expectation::Contains, "cache-control:"),
+        Observed::Pass
+    );
+    assert_eq!(
+        observe(&stored, Expectation::Contains, "x-frame-options:"),
+        Observed::Fail
+    );
+    assert_eq!(
+        observe(&stored, Expectation::NotContains, "x-frame-options:"),
+        Observed::Pass
+    );
+
+    // 上限で後半を切り捨てたヘッダーは、記録した部分に条件の文字がなくても「含まない」と判定しない。
+    // 切り捨てた部分に、禁止したい文字があるかもしれない。記録した部分にあれば「含む」と判定できる。
+    let cut = with_browser(|b| {
+        let mut r = response(json!({
+            "content-security-policy":"default-src 'self'; script-src 'self'",
+            "cache-control":"no-store"
+        }));
+        r["headers_truncated"] = json!(["content-security-policy"]);
+        b["responses"] = json!([r]);
+    });
+    for expect in [Expectation::NotContains, Expectation::Contains] {
+        assert_eq!(
+            observe(&cut, expect, "content-security-policy: unsafe-inline"),
+            Observed::NotObserved
+        );
+    }
+    assert_eq!(
+        observe(
+            &cut,
+            Expectation::Contains,
+            "content-security-policy: script-src"
+        ),
+        Observed::Pass
+    );
+    assert_eq!(
+        observe(
+            &cut,
+            Expectation::NotContains,
+            "content-security-policy: script-src"
+        ),
+        Observed::Fail
+    );
+    // 切り捨てていない別のヘッダーの判定は変わらない。
+    assert_eq!(
+        observe(&cut, Expectation::NotContains, "cache-control: public"),
+        Observed::Pass
+    );
+    // 切り捨ての印がない記録の保存形は変わらない。
+    let plain: ResponseRecord =
+        serde_json::from_value(response(json!({"cache-control":"no-store"}))).unwrap();
+    assert!(
+        !serde_json::to_string(&plain)
+            .unwrap()
+            .contains("headers_truncated")
+    );
+
+    // ヘッダーを記録していない変更前の記録、応答のない記録、上限に達した記録は判定しない。
+    let old = with_browser(|b| {
+        let mut r = response(json!({}));
+        r.as_object_mut().unwrap().remove("headers");
+        b["responses"] = json!([r]);
+    });
+    let none = phase();
+    let limited = with_browser(|b| {
+        b["responses"] = json!([response(json!({"cache-control":"no-store"}))]);
+        b["response_limit"] = json!(true);
+    });
+    let preparation = with_browser(|b| {
+        let mut r = response(json!({"cache-control":"no-store"}));
+        r["request_step"] = json!("username");
+        b["responses"] = json!([r]);
+    });
+    for p in [&old, &none, &limited, &preparation] {
+        assert_eq!(
+            observe(p, Expectation::NotContains, "x-frame-options:"),
+            Observed::NotObserved
+        );
+        assert_eq!(
+            observe(p, Expectation::Contains, "cache-control: no-store"),
+            Observed::NotObserved
+        );
+    }
+    // 同じ観測先の応答で結果が分かれる場合と、記録の対象にしていない名前は判定しない。
+    let mixed = with_browser(|b| {
+        b["responses"] = json!([
+            response(json!({"cache-control":"no-store"})),
+            response(json!({"cache-control":"public"}))
+        ]);
+    });
+    assert_eq!(
+        observe(&mixed, Expectation::Contains, "cache-control: no-store"),
+        Observed::NotObserved
+    );
+    assert_eq!(
+        observe(&stored, Expectation::NotContains, "authorization: x"),
+        Observed::NotObserved
+    );
+}
+
+#[test]
+fn attribute_and_header_checks_must_name_a_matching_step_or_watch() {
+    let recipe = |actions: serde_json::Value, check: serde_json::Value| {
+        let mut browser = serde_json::to_value(spec()).unwrap();
+        browser["actions"] = actions;
+        let value = json!({
+            "schema_version":1,"check_id":"c",
+            "source":{"repository":"example/app","commit":"a".repeat(40),"path":"app.py","line":1,"end_line":1},
+            "runtime":"browser","entrypoint":"/","args":[],"input":{},
+            "criterion":{"assertion":"eel.trial","subject":"c"},"timeout_ms":5000,
+            "trial":{"schema_version":1,"fault":"normal","storage":null,"readback":null,"checks":[check]},
+            "containers":serde_json::to_value(containers()).unwrap(),
+            "browser":browser
+        });
+        serde_json::from_value::<mugiurushi::execution::Recipe>(value)
+            .map_err(std::io::Error::other)
+            .and_then(|r| mugiurushi::execution::validate_recipe(&r))
+    };
+    let read = json!([{"id":"kind","action":"read_attribute","name":"type",
+        "target":{"locator":{"by":"label","text":"暗証"}}}]);
+    let attribute = |expect: &str, target: &str, text: serde_json::Value| json!({"id":"k","scope":"入力欄","method":"browser_attribute","expect":expect,"target":target,"text":text});
+    recipe(read.clone(), attribute("equal", "kind", json!("password"))).unwrap();
+    recipe(
+        read.clone(),
+        attribute("not_contains", "kind", json!("text")),
+    )
+    .unwrap();
+    // 読む手順がない、文がない、属性の名前が不正。
+    assert!(recipe(read.clone(), attribute("equal", "other", json!("password"))).is_err());
+    assert!(recipe(read.clone(), attribute("equal", "kind", json!(null))).is_err());
+    assert!(recipe(read.clone(), attribute("zero", "kind", json!("password"))).is_err());
+    let bad_name = json!([{"id":"kind","action":"read_attribute","name":"on click",
+        "target":{"locator":{"by":"label","text":"暗証"}}}]);
+    assert!(recipe(bad_name, attribute("equal", "kind", json!("password"))).is_err());
+
+    let header = |target: &str, text: &str, expect: &str| json!({"id":"h","scope":"応答","method":"browser_header","expect":expect,"target":target,"text":text});
+    recipe(
+        read.clone(),
+        header("save", "Cache-Control: no-store", "contains"),
+    )
+    .unwrap();
+    recipe(
+        read.clone(),
+        header("save", "x-frame-options:", "not_contains"),
+    )
+    .unwrap();
+    // 宣言していない観測先、記録の対象にしていない名前、名前のない文、等値の指定。
+    assert!(
+        recipe(
+            read.clone(),
+            header("other", "cache-control: no-store", "contains")
+        )
+        .is_err()
+    );
+    assert!(recipe(read.clone(), header("save", "authorization: x", "contains")).is_err());
+    assert!(recipe(read.clone(), header("save", "no-store", "contains")).is_err());
+    assert!(recipe(read, header("save", "cache-control: no-store", "equal")).is_err());
+}
+
+#[test]
+fn records_saved_before_screens_and_exchanges_still_load_and_keep_their_shape() {
+    // 変更前の形の記録。新しい項目を持たない。
+    let before = json!({"schema_version":1,"run_id":"test","version":"151.0.7922.34","prepared":true,
+        "completed":true,"steps":[{"id":"message","phase":"action","completed":true,"text":"完了",
+        "screenshot":null,"detail":"合成"}],
+        "responses":[{"watch":"save","method":"POST","path":"/save","status":200,"body_match":true,
+        "request_step":"message","payload_sha256":null}],
+        "blocked_requests":0,"response_limit":false,"detail":"合成"});
+    let report: mugiurushi::browser::BrowserReport = serde_json::from_value(before).unwrap();
+    assert!(report.screens.is_empty() && report.screens_note.is_empty());
+    assert!(report.exchanges.is_empty() && !report.exchange_limit);
+    assert!(report.responses[0].headers.is_none() && report.steps[0].attribute.is_none());
+    let saved = serde_json::to_value(&report).unwrap();
+    for key in ["screens", "screens_note", "exchanges", "exchange_limit"] {
+        assert!(saved.get(key).is_none(), "{key}");
+    }
+    assert!(saved["responses"][0].get("headers").is_none());
+    assert!(saved["steps"][0].get("attribute").is_none());
+    // 新しい操作を使わないレシピの保存形も変わらない。
+    let browser = serde_json::to_string(&spec()).unwrap();
+    assert!(!browser.contains("read_attribute"));
+}
+
+#[test]
+fn the_relay_cut_fault_and_the_cut_point_must_be_declared_together() {
+    let recipe = |fault: &str, relay: serde_json::Value| {
+        let mut containers = serde_json::to_value(containers()).unwrap();
+        containers["relay"] = relay;
+        let value = json!({
+            "schema_version":1,"check_id":"c",
+            "source":{"repository":"example/app","commit":"a".repeat(40),"path":"app.py","line":1,"end_line":1},
+            "runtime":"browser","entrypoint":"/","args":[],"input":{},
+            "criterion":{"assertion":"eel.trial","subject":"c"},"timeout_ms":5000,
+            "trial":{"schema_version":1,"fault":fault,"storage":null,"readback":null,"checks":[
+                {"id":"shown","scope":"表示","method":"browser_text","expect":"contains","target":"message","text":"完了"}]},
+            "containers":containers,
+            "browser":serde_json::to_value(spec()).unwrap()
+        });
+        serde_json::from_value::<mugiurushi::execution::Recipe>(value)
+            .map_err(std::io::Error::other)
+            .and_then(|r| mugiurushi::execution::validate_recipe(&r))
+    };
+    let record_only = json!({"service":"db","protocol":"mysql"});
+    let with_cut = json!({"service":"db","protocol":"mysql",
+        "cut":{"shape":"0123456789abcdef","occurrence":1,"phase":"before_forward"}});
+    // 記録だけの中継は、どの故障とも組み合わせられる。
+    recipe("normal", record_only.clone()).unwrap();
+    recipe("database_stopped", record_only.clone()).unwrap();
+    recipe("relay_cut", with_cut.clone()).unwrap();
+    // 切る時点のない切断の故障と、切断の故障ではない試験での切る時点は、どちらも拒否する。
+    assert!(recipe("relay_cut", record_only).is_err());
+    assert!(recipe("normal", with_cut.clone()).is_err());
+    assert!(recipe("database_stopped", with_cut).is_err());
 }
