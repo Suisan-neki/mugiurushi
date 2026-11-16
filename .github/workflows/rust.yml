@@ -121,6 +121,7 @@ jobs:
       - run: npm run test:flow-record
       - run: npm run test:recipe-adopt
       - run: npm run test:flow-rescan
+      - run: npm run test:flow-plan
       - run: npm run test:user-trial
       - name: Keep synthetic review screenshots
         if: always()

@@ -869,13 +869,80 @@ pub fn plan(
             "observation_label": observation.label(),
         }));
     }
+    let (not_planned, unclassified) = account_for_findings(&request.findings, &used, &answer)?;
     Ok(json!({
         "stage": "sent",
         "status": "draft",
         "tests": tests,
-        "not_planned": answer["not_planned"].as_array().cloned().unwrap_or_default(),
+        "not_planned": not_planned,
+        "unclassified": unclassified,
         "model_call": answer["model_call"],
     }))
+}
+
+/// 送った候補を、試験・試験にしなかった候補・未分類（AIの案に含まれなかった）のちょうど一つに入れる。
+/// 試験にしなかった候補は、AIが書いた理由といっしょに受け取る。どこにも入らなかった候補は理由を補わずに未分類とする。
+/// 渡していない候補・重複・試験との重複を含む応答は受け取らない。AIが未分類を返したときは、ここで求めたものと一致することを確かめる。
+fn account_for_findings(
+    findings: &[PlanFinding],
+    used: &std::collections::BTreeSet<String>,
+    answer: &Value,
+) -> io::Result<(Vec<Value>, Vec<String>)> {
+    let known: std::collections::BTreeSet<&str> = findings.iter().map(|f| f.id.as_str()).collect();
+    let mut held = std::collections::BTreeSet::new();
+    let mut not_planned = vec![];
+    let items = match &answer["not_planned"] {
+        Value::Null => vec![],
+        Value::Array(items) => items.clone(),
+        _ => {
+            return Err(invalid(
+                "AIエージェントの試験にしなかった候補の形が不正です",
+            ));
+        }
+    };
+    for item in items {
+        let id = item["finding_id"]
+            .as_str()
+            .ok_or_else(|| invalid("AIエージェントの試験にしなかった候補の形が不正です"))?;
+        if !known.contains(id) {
+            return Err(invalid(
+                "渡していない候補を、試験にしなかった候補として返す案は受け取りません",
+            ));
+        }
+        if used.contains(id) {
+            return Err(invalid(
+                "同じ候補を試験と、試験にしなかった候補の両方に入れた案は受け取りません",
+            ));
+        }
+        if !held.insert(id.to_owned()) {
+            return Err(invalid(
+                "試験にしなかった候補に、同じ候補を重ねて入れた案は受け取りません",
+            ));
+        }
+        let reason = item["reason"].as_str().unwrap_or("").trim();
+        not_planned.push(json!({"finding_id": id, "reason": reason}));
+    }
+    let unclassified: Vec<String> = findings
+        .iter()
+        .map(|f| f.id.clone())
+        .filter(|id| !used.contains(id) && !held.contains(id))
+        .collect();
+    if let Some(reported) = answer.get("unclassified").filter(|v| !v.is_null()) {
+        let reported = reported
+            .as_array()
+            .ok_or_else(|| invalid("AIエージェントの未分類の候補の形が不正です"))?;
+        let reported: Vec<&str> = reported.iter().filter_map(Value::as_str).collect();
+        let expected: Vec<&str> = unclassified.iter().map(String::as_str).collect();
+        if reported.len() != expected.len()
+            || reported.iter().collect::<std::collections::BTreeSet<_>>()
+                != expected.iter().collect::<std::collections::BTreeSet<_>>()
+        {
+            return Err(invalid(
+                "AIエージェントの未分類の候補が、試験と試験にしなかった候補の残りと一致しません",
+            ));
+        }
+    }
+    Ok((not_planned, unclassified))
 }
 
 const FLOW_FILE: &str = "flow.json";

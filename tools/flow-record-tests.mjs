@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, StaleResponse,
-  approve, approvedCheck, approvedTests, planForCheck, checkIdOf, startStep, migrate, fingerprint,
+  approve, approvedCheck, approvedTests, planForCheck, checkIdOf, startStep, migrate, fingerprint, untestedFindings,
 } from '../ui/flow-record.js';
 
 const scan = (reqs, questions = []) => ({ findings: reqs.map(requirement => ({ requirement, verification: { executable_check: true } })), questions });
@@ -113,4 +113,21 @@ test('以前の形式の記録は、照合だけを残して了承・回答・�
   assert.deepEqual(answersOf(r), [], '以前の形式の回答は、どの質問への回答か確かめられないので送らない');
   assert.equal(migrate(r), r); assert.equal(r.history.length, 1, '2回読み込んでも重ねて移さない');
   assert.equal(migrate(null), null);
+});
+
+test('試験にしていない候補を、AIが試験にしなかった・未分類・了承していないに分け、理由を補わない', () => {
+  const r = scanned(scan(['a', 'b', 'c', 'd']));
+  const f = r.scan.findings;
+  assert.deepEqual(untestedFindings(r, f), [], '案を作る前は出さない');
+  const two = { tests: [
+    { id: 't-1', name: '1', kind: 'cli', finding_ids: ['f-1'], steps: ['s'], pass: ['p'], observation: 'readback_output' },
+    { id: 't-2', name: '2', kind: 'cli', finding_ids: ['f-2'], steps: ['s'], pass: ['p'], observation: 'readback_output' },
+  ], not_planned: [{ finding_id: 'f-3', reason: '' }], unclassified: ['f-4'] };
+  applyPlan(r, two, planGeneration(r));
+  approve(r, r.plan.tests[0], 'chk-1');
+  assert.deepEqual(untestedFindings(r, f).map(u => [u.finding.id, u.kind, u.reason]),
+    [['f-2', 'not_approved', ''], ['f-3', 'not_planned', '（理由の記載なし）'], ['f-4', 'unclassified', '']]);
+  // 以前の形式の案（未分類の欄が無い）で、どこにも入っていない候補は、理由が記録されていないものとして出す。
+  delete r.plan.unclassified;
+  assert.deepEqual(untestedFindings(r, f).at(-1).kind, 'unknown');
 });

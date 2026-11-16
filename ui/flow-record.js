@@ -152,3 +152,28 @@ export function migrate(/** @type {any} */ record) {
   }
   return record;
 }
+
+/** 試験にしていない候補の分け方。合否や適合は付けない。 */
+export const UNTESTED = {
+  not_planned: 'AIが試験にしなかった',
+  unclassified: 'AIの試験の案に含まれなかった（未分類）',
+  not_approved: '試験の案を了承していない',
+  unknown: '試験の案に含まれていない（以前の形式の案のため、理由は記録されていない）',
+};
+
+/** 今の照合の候補のうち、今の案で了承した試験に入っていないもの。理由はAIが書いたものだけを使い、補わない。
+ * 案をまだ作っていなければ空（「2 照合とヒアリング」の段階）。 */
+export function untestedFindings(/** @type {any} */ record, /** @type {any[]} */ findings) {
+  if (!planIsCurrent(record)) return [];
+  const plan = record.plan;
+  const approved = new Set(approvedTests(record).flatMap((/** @type {any} */ t) => t.finding_ids));
+  const held = new Map((plan.not_planned || []).map((/** @type {any} */ n) => [n.finding_id, n.reason || '']));
+  const unclassified = new Set(plan.unclassified || []);
+  const inTests = new Set(plan.tests.flatMap((/** @type {any} */ t) => t.finding_ids));
+  return findings.filter(f => !approved.has(f.id)).map(f => {
+    if (held.has(f.id)) return { finding: f, kind: 'not_planned', reason: held.get(f.id) || '（理由の記載なし）' };
+    if (unclassified.has(f.id)) return { finding: f, kind: 'unclassified', reason: '' };
+    if (inTests.has(f.id)) return { finding: f, kind: 'not_approved', reason: '' };
+    return { finding: f, kind: plan.unclassified ? 'unclassified' : 'unknown', reason: '' };
+  });
+}

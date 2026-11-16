@@ -1922,3 +1922,106 @@ fn screens_join_the_scan_input_only_when_chosen_and_unsent_screen_references_are
     .unwrap();
     assert_eq!(scanned["findings"][0]["basis"], serde_json::json!(["code"]));
 }
+
+/// 試験の案：送った候補は、試験・試験にしなかった候補・未分類（AIの案に含まれなかった）のちょうど一つに入る。
+/// どこにも入らなかった候補は理由を補わずに未分類として残し、渡していない候補や重複を含む案は受け取らない。
+#[test]
+fn plan_accounts_for_every_candidate_without_guessing_reasons() {
+    use mugiurushi::agent::{Confirm, PlanFinding, PlanRequest, plan};
+    let f = Fixture::new("試験の案の候補の行き先");
+    let commit = "a".repeat(40);
+    let snapshots = f.directory.join("snapshots");
+    fs::create_dir_all(snapshots.join("example/clinic")).unwrap();
+    fs::write(
+        snapshots.join(format!("example/clinic/{commit}.json")),
+        serde_json::json!({"schema": 1, "fullName": "example/clinic", "reference": commit, "commit": commit,
+            "inventory": [{"path": "app/tasks.py", "mode": "100644"}],
+            "files": {"app/tasks.py": "def list_tasks(user):\n    return ALL\n"}, "omitted": []})
+        .to_string(),
+    )
+    .unwrap();
+    let store = mugiurushi::understanding::Store::new(snapshots).unwrap();
+    let test = |ids: &[&str]| serde_json::json!({"id": "t-1", "name": "一覧", "kind": "cli", "finding_ids": ids, "steps": ["職員Bで一覧を読む"], "pass": ["出ない"], "observation": "readback_output"});
+    let held = |id: &str| serde_json::json!({"finding_id": id, "reason": "本番の構成による"});
+    let run = |answer: serde_json::Value| {
+        let agent = FakeAgent::start(&f.directory, vec![("/v1/plan", 200, answer)]);
+        let config = agent.config();
+        let request = |confirm| PlanRequest {
+            repository: "example/clinic".into(),
+            commit: commit.clone(),
+            files: vec!["app/tasks.py".into()],
+            summary: String::new(),
+            answers: vec![],
+            findings: ["f-1", "f-2", "f-3"]
+                .into_iter()
+                .map(|id| PlanFinding {
+                    id: id.into(),
+                    requirement: format!("要求{id}"),
+                    how: String::new(),
+                })
+                .collect(),
+            screen_evidence: None,
+            confirm,
+        };
+        let preview = plan(Some(&config), &store, request(None), None).unwrap();
+        let sha = preview["payload_sha256"].as_str().unwrap().to_owned();
+        plan(
+            Some(&config),
+            &store,
+            request(Some(Confirm {
+                payload_sha256: sha,
+                synthetic_only: true,
+            })),
+            None,
+        )
+    };
+    // 正常：全候補がどこかに入る。
+    let full = run(serde_json::json!({"tests": [test(&["f-1", "f-2"])], "not_planned": [held("f-3")], "unclassified": [], "model_call": {}})).unwrap();
+    assert_eq!(full["not_planned"], serde_json::json!([held("f-3")]));
+    assert_eq!(full["unclassified"], serde_json::json!([]));
+    // 欠落：AIが未分類を返さない（以前のAIエージェント）ときも、残りを未分類として残す。理由は補わない。
+    let missing =
+        run(serde_json::json!({"tests": [test(&["f-1"])], "not_planned": [], "model_call": {}}))
+            .unwrap();
+    assert_eq!(missing["unclassified"], serde_json::json!(["f-2", "f-3"]));
+    assert_eq!(missing["not_planned"], serde_json::json!([]));
+    // 空の案：すべて未分類。
+    let empty = run(serde_json::json!({"tests": [], "not_planned": [], "unclassified": ["f-1", "f-2", "f-3"], "model_call": {}})).unwrap();
+    assert_eq!(empty["tests"], serde_json::json!([]));
+    assert_eq!(
+        empty["unclassified"],
+        serde_json::json!(["f-1", "f-2", "f-3"])
+    );
+    for (bad, why) in [
+        (
+            serde_json::json!({"tests": [], "not_planned": [held("f-9")]}),
+            "渡していない候補を試験にしなかった候補にした",
+        ),
+        (
+            serde_json::json!({"tests": [test(&["f-1"])], "not_planned": [held("f-1")]}),
+            "試験と試験にしなかった候補の両方",
+        ),
+        (
+            serde_json::json!({"tests": [], "not_planned": [held("f-2"), held("f-2")]}),
+            "試験にしなかった候補の中で重複",
+        ),
+        (
+            serde_json::json!({"tests": [test(&["f-1", "f-1"])], "not_planned": []}),
+            "一つの試験の中で重複",
+        ),
+        (
+            serde_json::json!({"tests": [test(&["f-1"]), test(&["f-1"])], "not_planned": []}),
+            "二つの試験で重複",
+        ),
+        (
+            serde_json::json!({"tests": [test(&["f-9"])], "not_planned": []}),
+            "渡していない候補の試験",
+        ),
+        (
+            serde_json::json!({"tests": [test(&["f-1"])], "not_planned": [], "unclassified": ["f-2"]}),
+            "AIの未分類が残りと一致しない",
+        ),
+    ] {
+        assert!(run(bad).is_err(), "{why}");
+    }
+}
