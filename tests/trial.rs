@@ -547,6 +547,23 @@ fn recovery_is_only_allowed_for_faults_that_can_be_undone() {
         ready_timeout_ms: 1000,
     });
     assert!(mugiurushi::trial::validate(&database, false, true, true, |_| Ok(())).is_ok());
+    // 復旧後の待機上限は、初回の起動を待つ上限とは別に、300秒のままにしている。
+    database.recovery = Some(Recovery {
+        ready_timeout_ms: 300_000,
+    });
+    assert!(mugiurushi::trial::validate(&database, false, true, true, |_| Ok(())).is_ok());
+    database.recovery = Some(Recovery {
+        ready_timeout_ms: 300_001,
+    });
+    assert!(
+        mugiurushi::trial::validate(&database, false, true, true, |_| Ok(()))
+            .unwrap_err()
+            .to_string()
+            .contains("1〜300000ミリ秒")
+    );
+    database.recovery = Some(Recovery {
+        ready_timeout_ms: 1000,
+    });
     // 復旧を指定しない設定の保存形式は変わらない。
     assert!(
         !serde_json::to_string(&saved(TrialFault::Normal, false))

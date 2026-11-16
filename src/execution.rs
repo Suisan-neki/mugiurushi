@@ -293,6 +293,17 @@ pub fn validate_recipe(recipe: &Recipe) -> io::Result<()> {
         ));
     }
     if let Some(trial) = &recipe.trial {
+        if (trial.fault == crate::trial::TrialFault::RelayCut)
+            != recipe
+                .containers
+                .as_ref()
+                .and_then(|c| c.relay.as_ref())
+                .is_some_and(|r| r.cut.is_some())
+        {
+            return Err(invalid(
+                "中継で接続を切る故障には、コンテナの設定の relay.cut を指定してください。それ以外の故障では指定しません",
+            ));
+        }
         if (trial.fault == crate::trial::TrialFault::HttpRejected)
             != recipe
                 .browser
@@ -310,6 +321,16 @@ pub fn validate_recipe(recipe: &Recipe) -> io::Result<()> {
             recipe.containers.is_some(),
             relative,
         )?;
+        if let Some(provenance) = recipe.browser.as_ref().and_then(|b| b.provenance.as_ref())
+            && let Some(id) = provenance
+                .checks
+                .keys()
+                .find(|id| !trial.checks.iter().any(|c| &c.id == *id))
+        {
+            return Err(invalid(format!(
+                "出所の記録が、レシピにない判定条件 {id} を指しています"
+            )));
+        }
         for check in &trial.checks {
             use crate::trial::CheckMethod;
             let valid = match check.method {
@@ -340,6 +361,19 @@ pub fn validate_recipe(recipe: &Recipe) -> io::Result<()> {
                         Some(s.id.as_str()) == check.target.as_deref()
                             && matches!(s.action, crate::browser::Action::ReadText { .. })
                     })
+                }),
+                CheckMethod::BrowserAttribute => recipe.browser.as_ref().is_some_and(|b| {
+                    b.actions.iter().any(|s| {
+                        Some(s.id.as_str()) == check.target.as_deref()
+                            && matches!(s.action, crate::browser::Action::ReadAttribute { .. })
+                    })
+                }),
+                // 記録の対象にしていない名前のヘッダーは観測できないので、条件として受け付けない。
+                CheckMethod::BrowserHeader => recipe.browser.as_ref().is_some_and(|b| {
+                    crate::browser::header_condition(check.text.as_deref().unwrap_or("")).is_some()
+                        && b.responses
+                            .iter()
+                            .any(|w| Some(w.id.as_str()) == check.target.as_deref())
                 }),
                 CheckMethod::BrowserResponse => recipe.browser.as_ref().is_some_and(|b| {
                     let text = check.text.as_deref().unwrap_or("");
@@ -464,6 +498,7 @@ fn inventory(
     repository: &str,
     commit: &str,
     prefix: Option<&str>,
+    also: &[&str],
 ) -> io::Result<(String, Vec<SnapshotFile>)> {
     let found = git_text(
         root,
@@ -488,7 +523,9 @@ fn inventory(
         let (header, path) = entry
             .split_once('\t')
             .ok_or_else(|| invalid("Gitのファイル情報が不正です"))?;
-        if prefix.is_some_and(|p| path != p && !path.starts_with(&format!("{p}/"))) {
+        if prefix.is_some_and(|p| path != p && !path.starts_with(&format!("{p}/")))
+            && !also.contains(&path)
+        {
             continue;
         }
         relative(path)?;
@@ -944,13 +981,27 @@ pub fn execute_with_dependencies(
         ));
     }
     let root = fs::canonicalize(repository_root)?;
+    // コンテナへ置くファイルは、固定版に含めて、同じコミットの内容を渡す。
+    let placed: Vec<&str> = recipe
+        .containers
+        .iter()
+        .flat_map(|c| &c.services)
+        .flat_map(|s| &s.files)
+        .map(|f| f.from.as_str())
+        .collect();
     let (tree, files) = inventory(
         &root,
         &recipe.source.repository,
         &recipe.source.commit,
         (recipe.runtime == Runtime::Browser).then_some(recipe.source.path.as_str()),
+        &placed,
     )?;
     check_target_files(&recipe, &files)?;
+    if let Some(missing) = placed.iter().find(|p| !files.iter().any(|f| &f.path == *p)) {
+        return Err(invalid(format!(
+            "コンテナへ置くファイル {missing} が固定コミットにありません"
+        )));
+    }
     let (program, runtime_version) = runtime_available(&recipe.runtime).map_err(invalid)?;
     let mut dependencies: Vec<FetchedDependency> = vec![];
     if let Some(setup) = &recipe.python {
@@ -975,6 +1026,7 @@ pub fn execute_with_dependencies(
                 &dependency.repository,
                 &dependency.commit,
                 dependency.root.as_deref(),
+                &[],
             )?;
             if dependency_files.is_empty() {
                 return Err(invalid(format!(
@@ -1025,7 +1077,23 @@ pub fn execute_with_dependencies(
         None => None,
     };
     let mut session = match &recipe.containers {
-        Some(spec) => Some(crate::container::Session::start(&correlation.run_id, spec)?),
+        // 文を記録する中継には、追跡する値を渡す。値を含む文に目印が付く。
+        Some(spec) => Some(crate::container::Session::start_tracking(
+            &correlation.run_id,
+            spec,
+            recipe
+                .browser
+                .as_ref()
+                .map(|b| crate::tracking::values_of(b, &test_value))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|v| crate::relay::Tracked {
+                    slot: v.slot,
+                    value: v.value,
+                })
+                .collect(),
+            Some(&snapshot),
+        )?),
         None => None,
     };
     let container_ports = session.as_ref().map(|s| s.ports()).unwrap_or_default();
@@ -1051,6 +1119,12 @@ pub fn execute_with_dependencies(
         &work.join("input.json"),
         &crate::trial::substitute_json(&recipe.input, &test_value),
     )?;
+    // 文を記録する中継は、ここから数え始める。対象の起動時の初期化は数えない。
+    if let Some(session) = session.as_ref()
+        && session.all_ready()
+    {
+        session.mark_relay_phase("preparation")?;
+    }
     // 認証などの準備は正常なDBで行い、その後に保存操作の故障を注入する。
     let mut browser = match (&recipe.browser, session.as_ref()) {
         (Some(spec), Some(session)) if session.all_ready() => {
@@ -1074,6 +1148,18 @@ pub fn execute_with_dependencies(
             .map(|q| session.read_database(q, &test_value))
             .collect(),
         _ => vec![],
+    };
+    // 値の追跡。操作の前のDBの状態を調べておき、前からあった行を後で除く。
+    let tracked = recipe
+        .browser
+        .as_ref()
+        .map(|spec| crate::tracking::values_of(spec, &test_value))
+        .unwrap_or_default();
+    let scan_before = match (session.as_ref(), browser.as_ref()) {
+        (Some(session), Some(browser)) if !tracked.is_empty() && browser.prepared() => {
+            Some(session.scan_database(&tracked))
+        }
+        _ => None,
     };
     let mut fault = match &recipe.trial {
         Some(spec) => Some(crate::trial::apply_fault(spec, &work)?),
@@ -1191,6 +1277,9 @@ pub fn execute_with_dependencies(
         && (recipe.runtime != Runtime::Browser || browser.as_ref().is_some_and(|b| b.prepared()));
     let mut http_result = None;
     let mut http_exit = None;
+    if proceed && let Some(session) = session.as_ref() {
+        session.mark_relay_phase("action")?;
+    }
     let (status, timed_out, output_limit) = if proceed {
         if let Some(browser) = browser.as_mut() {
             let report = browser.run()?;
@@ -1319,6 +1408,18 @@ pub fn execute_with_dependencies(
         _ => vec![],
     };
     let database_query = session.as_ref().and_then(|s| s.query_database());
+    // 操作した試行だけ、操作の後のDBを調べる。操作していない試行の探索は意味を持たない。
+    let scan_after = match session.as_ref() {
+        Some(session)
+            if !tracked.is_empty()
+                && browser_report
+                    .as_ref()
+                    .is_some_and(|r| r.prepared && r.steps.iter().any(|s| s.phase == "action")) =>
+        {
+            Some(session.scan_database(&tracked))
+        }
+        _ => None,
+    };
     let acted = browser_report
         .as_ref()
         .is_some_and(|r| r.prepared && r.steps.iter().any(|s| s.phase == "action"));
@@ -1338,6 +1439,39 @@ pub fn execute_with_dependencies(
         phase.database_reads = database_reads;
         phase.database_reads_before = database_reads_before;
         phase.http_reads = http_reads;
+        if !tracked.is_empty() {
+            phase.value_trace = Some(crate::tracking::trace(
+                &tracked,
+                scan_before.as_ref(),
+                scan_after.as_ref(),
+                phase.browser.as_ref(),
+                &phase.services,
+            ));
+            phase.database_scan_before = scan_before;
+            phase.database_scan = scan_after;
+        }
+    }
+    // 中継で接続を切る故障は、中継が実際に切ったことを記録で確かめる。
+    if recipe
+        .trial
+        .as_ref()
+        .is_some_and(|t| t.fault == crate::trial::TrialFault::RelayCut)
+        && let Some((applied, effective)) = fault.as_mut()
+    {
+        let cut = container_phase
+            .as_ref()
+            .and_then(|p| p.statements.iter().find(|s| s.cut.is_some()));
+        *effective = cut.is_some();
+        *applied = match cut {
+            Some(statement) => format!(
+                "中継が、対象からDBへの{}番目の文（{}）で接続を切った",
+                statement.ordinal,
+                serde_json::to_string(&statement.class)
+                    .unwrap_or_default()
+                    .trim_matches('"')
+            ),
+            None => "中継は指定した文に到達せず、接続を切っていない".into(),
+        };
     }
     let leftovers = match session.as_mut() {
         Some(session) => match session.cleanup() {

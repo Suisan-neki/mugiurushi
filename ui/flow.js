@@ -118,6 +118,11 @@ async function step1() {
   name.addEventListener('input', () => sessionStorage.setItem('eel-person', JSON.stringify({ name: /** @type {HTMLInputElement} */ (name).value.trim(), role: 'developer' })));
   const desc = h('textarea', { rows: 6, id: 'desc' }); /** @type {HTMLTextAreaElement} */ (desc).value = state.record?.summary || '';
   const out = h('div', {});
+  // 画面の構造を記録した試行。選んだ場合だけ、その記録を照合の入力に添える。
+  if (!state.view) await loadCase().catch(() => {});
+  const recorded = (state.view?.workspace?.evidence || []).filter((/** @type {any} */ e) => e.execution?.containers?.browser?.screens?.length);
+  const screenChoice = h('select', { id: 'screen-evidence' }, h('option', { value: '' }, '使わない（コードの抜粋と説明だけで照合する）'),
+    recorded.map((/** @type {any} */ e) => h('option', { value: e.id, selected: state.record?.screen_evidence === e.id }, `${e.id}（画面${e.execution.containers.browser.screens.length}件、試験のコミット ${short(e.execution.recipe?.source?.commit || '')}）`)));
   fill($('main'), h('div', { class: 'cols' },
     h('section', { class: 'main' }, h('h2', {}, '照合に使うコード'),
       h('p', {}, `コミット ${short(state.source.commit)} から読むファイルを選びます。読んだコードは照合のためにAIエージェントへ送ります。送る前に内容を表示します。`),
@@ -129,16 +134,22 @@ async function step1() {
     h('section', { class: 'side' }, h('h2', {}, '記録者'), h('label', { for: 'person-name' }, '名前（記録に残します。本人確認はしません）'), h('div', {}, name),
       h('h2', { style: 'margin-top:16px' }, 'システムの説明（任意）'),
       h('p', {}, 'コードから分からないこと（使う人、扱う情報、提供の形）を書くと、照合が具体的になります。'), h('label', { for: 'desc' }, '説明'), desc,
+      h('h2', { style: 'margin-top:16px' }, '画面の記録（任意）'),
+      h('p', {}, recorded.length ? '試験で記録した画面の構造（入力欄の属性、ボタン、リンク、応答のヘッダー）を照合に添えられます。入力欄の値は含みません。記録した試験のコミットやイメージが、いま読んでいるコミットと同じコードかは確認していません。' : 'この事例には、画面の構造を記録した試験がありません。ブラウザの試験を実行すると選べるようになります。'),
+      recorded.length ? h('div', {}, h('label', { for: 'screen-evidence' }, '添える試行'), screenChoice) : null,
       h('div', { class: 'actions' }, btn('照合を始める（送る内容を先に確認）', () => {
         if (!person()) return showError('記録者の名前を入力してください。');
         const files = [...chosen];
-        state.record = { ...(state.record || {}), files, summary: /** @type {HTMLTextAreaElement} */ (desc).value.trim() };
+        const screen_evidence = recorded.length ? /** @type {HTMLSelectElement} */ (screenChoice).value : '';
+        state.record = { ...(state.record || {}), files, summary: /** @type {HTMLTextAreaElement} */ (desc).value.trim(), screen_evidence };
         const answers = answersOf(state.record), at = scanGeneration(state.record);
-        return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files, summary: state.record.summary, answers }, async (/** @type {any} */ r) => {
+        return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files, summary: state.record.summary, answers, ...screenOf(state.record) }, async (/** @type {any} */ r) => {
           applyScan(state.record, r, answers, at); await saveRecord(); go(2);
         });
       }, 'primary')), out)));
 }
+// 画面の記録を添えた照合は、照合し直しと試験の案でも同じ試行を添える。
+function screenOf(/** @type {any} */ r) { return r?.screen_evidence ? { screen_evidence: r.screen_evidence } : {}; }
 function testable() { return (state.record?.scan?.findings || []).filter((/** @type {any} */ f) => f.verification?.executable_check); }
 function sectionOf(/** @type {any} */ f) {
   const ids = (f.citations || []).map((/** @type {any} */ c) => SECTION_OF[c.source_id] || 'other');
@@ -161,7 +172,8 @@ async function step2() {
       testable().length ? bySection(testable()).map(s => h('div', { 'data-section': s.key }, h('h3', {}, s.name),
         h('table', {}, h('tbody', {}, s.rows.map((/** @type {any} */ f) => h('tr', { 'data-finding': f.id },
           h('td', { style: 'width:48px;text-align:center' }, prio(f.priority)),
-          h('td', {}, f.requirement, f.system_refs?.length ? h('div', { class: 'note', style: 'font-size:12px' }, `関係するコード：${f.system_refs.join('、')}`) : null))))))) : h('p', { class: 'note' }, '試験で確かめられる項目は見つかりませんでした。'),
+          h('td', {}, f.requirement, f.system_refs?.length ? h('div', { class: 'note', style: 'font-size:12px' }, `関係するコード：${f.system_refs.filter((/** @type {string} */ x) => !x.startsWith('screen:')).join('、') || 'なし'}`) : null,
+            f.basis?.includes('screen') ? h('div', { class: 'note', style: 'font-size:12px', 'data-basis-screen': '' }, '根拠に、試験で記録した画面の構造を含みます。') : null))))))) : h('p', { class: 'note' }, '試験で確かめられる項目は見つかりませんでした。'),
       h('p', { class: 'note', style: 'font-size:12px' }, r.scan.priority_rule || '')),
     h('section', { class: 'side' }, h('h2', {}, 'ヒアリング'),
       r.scan.questions?.length ? [h('p', {}, 'コードだけでは決められないことを確認します。回答は照合と試験の案に使います。'),
@@ -179,12 +191,12 @@ async function step2() {
       (r.asks || []).slice().reverse().map((/** @type {any} */ a) => h('div', { class: 'box', 'data-asked': '' }, h('div', { class: 'pad' }, h('strong', {}, `質問：${a.question}`), h('div', {}, a.answer),
         a.citations?.map((/** @type {any} */ c) => h('div', { class: 'note', style: 'font-size:12px' }, `出典：${c.document} ${c.page}ページ（SHA-256 ${c.sha256.slice(0, 12)}…）`))))),
       h('div', { class: 'actions' },
-        btn('回答して照合し直す', () => { const answers = answersOf(r), at = scanGeneration(r); return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers }, async (/** @type {any} */ s) => { applyScan(r, s, answers, at); await saveRecord(); render(); }); }),
+        btn('回答して照合し直す', () => { const answers = answersOf(r), at = scanGeneration(r); return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers, ...screenOf(r) }, async (/** @type {any} */ s) => { applyScan(r, s, answers, at); await saveRecord(); render(); }); }),
         btn('試験の案を作る', () => {
           const findings = testable().map((/** @type {any} */ f) => ({ id: f.id, requirement: f.requirement, how: f.verification.how || '' }));
           if (!findings.length) return showError('試験で確かめられる項目がありません。');
           const at = planGeneration(r);
-          return confirmAndSend(out, '/api/v1/agent/plan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers: answersOf(r), findings }, async (/** @type {any} */ p) => { applyPlan(r, p, at); await saveRecord(); go(3); });
+          return confirmAndSend(out, '/api/v1/agent/plan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers: answersOf(r), findings, ...screenOf(r) }, async (/** @type {any} */ p) => { applyPlan(r, p, at); await saveRecord(); go(3); });
         }, 'primary')),
       r.plan ? h('p', { class: 'note', 'data-rescan-note': '' }, '照合し直すと、今の試験の案・了承・結果は履歴に移し、新しい照合では使いません。了承した確認項目と試験の記録は残ります。') : null,
       r.history?.length ? h('p', { class: 'note', style: 'font-size:12px' }, `前の照合・試験の案 ${r.history.length}件を履歴に残しています。`) : null, out)));

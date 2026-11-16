@@ -93,10 +93,14 @@ try {
   assert.match(await page.locator('[data-files-shown]').innerText(), /全3件中、選んだ1件と、「readme」を含む1件を表示/);
   await page.locator('#file-filter').fill('');
   await page.locator('#desc').fill('合成の診療所のタスク管理');
+  // 画面の構造を記録した試験がない事例では、選択欄を出さず、画面の記録の項目を送らない。
+  assert.match(await page.locator('main').innerText(), /画面の構造を記録した試験がありません/);
+  assert.equal(await page.locator('#screen-evidence').count(), 0);
   await page.getByRole('button', { name: /照合を始める/ }).click();
   await page.locator('[data-preview]').waitFor();
   assert.equal(requests.scan.length, 1); assert.equal(requests.scan[0].confirm, undefined, '確認の段階では送らない');
   assert.deepEqual(requests.scan[0].files, ['app/auth.py']);
+  assert.equal('screen_evidence' in requests.scan[0], false);
   assert.equal(await page.getByRole('button', { name: 'この内容を送る' }).isDisabled(), true);
   await page.locator('#agree').check(); await page.getByRole('button', { name: 'この内容を送る' }).click();
 

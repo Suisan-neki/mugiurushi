@@ -34,6 +34,12 @@ pub enum ObservationKind {
     ServerHttp,
     DatabaseRows,
     DatabaseRelation,
+    BrowserAttribute,
+    BrowserHeader,
+    /// 手順ごとの画面の構造（入力欄の属性、ボタン、リンク、iframe）。記録は残るが、判定条件には使えない。
+    ScreenStructure,
+    /// 操作中のHTTPのやり取りの全件（メソッド、パス、状態、一部のヘッダー）。本文は含まない。
+    HttpExchanges,
     /// 対象プログラムが出力した観測（observations.jsonl）。試験案を使わない試行。
     ProgramObservation,
     /// 外部の報告元から取り込んだ観測。基盤は実行していない。
@@ -75,7 +81,7 @@ pub struct KindInfo {
 }
 
 impl ObservationKind {
-    pub const ALL: [ObservationKind; 22] = [
+    pub const ALL: [ObservationKind; 26] = [
         Self::ExitCode,
         Self::Stdout,
         Self::Stderr,
@@ -90,6 +96,10 @@ impl ObservationKind {
         Self::ServerHttp,
         Self::DatabaseRows,
         Self::DatabaseRelation,
+        Self::BrowserAttribute,
+        Self::BrowserHeader,
+        Self::ScreenStructure,
+        Self::HttpExchanges,
         Self::ProgramObservation,
         Self::ReportedObservation,
         Self::TrafficSummary,
@@ -115,6 +125,8 @@ impl ObservationKind {
             CheckMethod::ServerHttp => Self::ServerHttp,
             CheckMethod::DatabaseRows => Self::DatabaseRows,
             CheckMethod::DatabaseRelation => Self::DatabaseRelation,
+            CheckMethod::BrowserAttribute => Self::BrowserAttribute,
+            CheckMethod::BrowserHeader => Self::BrowserHeader,
         }
     }
     pub fn support(self) -> Support {
@@ -133,9 +145,13 @@ impl ObservationKind {
             | Self::ServerHttp
             | Self::DatabaseRows
             | Self::DatabaseRelation
+            | Self::BrowserAttribute
+            | Self::BrowserHeader
             | Self::ProgramObservation
             | Self::ReportedObservation => Support::Judged,
-            Self::TrafficSummary => Support::RecordedOnly,
+            Self::TrafficSummary | Self::ScreenStructure | Self::HttpExchanges => {
+                Support::RecordedOnly
+            }
             Self::CodeInspection => Support::Inference,
             Self::NetworkPayload
             | Self::DistributedTrace
@@ -159,6 +175,12 @@ impl ObservationKind {
             Self::ServerHttp => "基盤が試験用サーバーへ直接要求した応答",
             Self::DatabaseRows => "基盤が試験値に一致する試験用DBの行を直接読み出した結果",
             Self::DatabaseRelation => "基盤が読み出した試験用DBの行どうしの対応",
+            Self::BrowserAttribute => "試験用ブラウザで読み出した画面の要素の属性",
+            Self::BrowserHeader => "試験操作中にブラウザが受け取ったHTTP応答のヘッダー",
+            Self::ScreenStructure => "手順ごとの画面の構造（入力欄の属性・ボタン・リンク・iframe）",
+            Self::HttpExchanges => {
+                "操作中のHTTPのやり取りの全件（メソッド・パス・状態・一部のヘッダー）"
+            }
             Self::ProgramObservation => "対象プログラムが出力した観測記録",
             Self::ReportedObservation => "外部の報告元から取り込んだ観測",
             Self::TrafficSummary => "中継が記録した接続の集計（接続元・接続先・件数・バイト数）",
@@ -170,7 +192,15 @@ impl ObservationKind {
         }
     }
     pub fn note(self) -> &'static str {
-        match self.support() {
+        match (self, self.support()) {
+            (Self::ScreenStructure, _) => {
+                "試行の記録に残るが、判定条件にはできない。入力欄の値は含まない"
+            }
+            (_, support) => Self::support_note(support),
+        }
+    }
+    fn support_note(support: Support) -> &'static str {
+        match support {
             Support::Judged => "試験の判定条件として観測し、期待と照合できる",
             Support::RecordedOnly => {
                 "試行の記録に残るが、判定条件にはできない。通信の中身は含まない"
@@ -1573,7 +1603,7 @@ mod tests {
     }
 
     fn bundled(n: usize) -> Recipe {
-        let catalog = crate::browser_recipes::catalog().unwrap();
+        let catalog = crate::browser_recipes::load(&crate::browser_recipes::examples()).unwrap();
         serde_json::from_value(catalog["recipes"][n]["recipe"].clone()).unwrap()
     }
     fn link_to(recipe: &Recipe, id: &str) -> (Vec<Aspect>, Vec<SettingsRecord>) {

@@ -1,0 +1,366 @@
+{
+  "schema_version": 1,
+  "check_id": "openmrs",
+  "source": {
+    "repository": "openmrs/openmrs-distro-referenceapplication",
+    "commit": "299b0cbcd78123cfa38741dbd8161e8b29dd13be",
+    "path": "docker-compose.yml",
+    "line": 1,
+    "end_line": 1
+  },
+  "runtime": "browser",
+  "entrypoint": "/",
+  "args": [],
+  "input": {
+    "workflow": "synthetic patient registration",
+    "scope": "not clinical data or clinical validation"
+  },
+  "criterion": {
+    "assertion": "eel.trial",
+    "subject": "openmrs"
+  },
+  "timeout_ms": 300000,
+  "trial": {
+    "schema_version": 1,
+    "fault": "normal",
+    "storage": null,
+    "readback": null,
+    "checks": [
+      {
+        "id": "patient-display",
+        "scope": "登録した患者の表示",
+        "method": "browser_text",
+        "target": "patient-banner",
+        "expect": "contains",
+        "text": "{{test_value}}"
+      },
+      {
+        "id": "patient-http",
+        "scope": "患者登録のHTTP応答",
+        "method": "browser_response",
+        "target": "patient-save",
+        "expect": "contains",
+        "text": "status=201"
+      },
+      {
+        "id": "patient-row",
+        "scope": "患者の氏名の保存",
+        "method": "database_rows",
+        "target": "name",
+        "expect": "contains",
+        "text": "{{test_value}}"
+      }
+    ]
+  },
+  "containers": {
+    "services": [
+      {
+        "name": "db",
+        "image": "mariadb:10.11.7@sha256:27292753bb759cd22be72e3c8192f1259ef47010c8634b5da0bc886845efe9fd",
+        "role": "database",
+        "expose": 3306,
+        "env": {
+          "MYSQL_DATABASE": "openmrs",
+          "MYSQL_USER": "openmrs",
+          "MYSQL_PASSWORD": "openmrs",
+          "MYSQL_ROOT_PASSWORD": "openmrs"
+        },
+        "volumes": [
+          {
+            "name": "db",
+            "path": "/var/lib/mysql"
+          }
+        ],
+        "command": [
+          "mariadbd",
+          "--character-set-server=utf8mb4",
+          "--collation-server=utf8mb4_general_ci"
+        ],
+        "ready": {
+          "exec": {
+            "args": [
+              "/usr/local/bin/healthcheck.sh",
+              "--su-mysql",
+              "--connect",
+              "--innodb_initialized"
+            ]
+          }
+        },
+        "ready_timeout_ms": 120000
+      },
+      {
+        "name": "backend",
+        "image": "openmrs/openmrs-reference-application-3-backend:3.8.0@sha256:a065687b9086c0249ca1eaca10c3a8c82b124acca7eebd61364b16b26a30dc76",
+        "role": "app",
+        "expose": 8080,
+        "env": {
+          "OMRS_CONFIG_MODULE_WEB_ADMIN": "true",
+          "OMRS_CONFIG_AUTO_UPDATE_DATABASE": "true",
+          "OMRS_CONFIG_CREATE_TABLES": "true",
+          "OMRS_CONFIG_CONNECTION_SERVER": "db",
+          "OMRS_CONFIG_CONNECTION_DATABASE": "openmrs",
+          "OMRS_CONFIG_CONNECTION_USERNAME": "openmrs",
+          "OMRS_CONFIG_CONNECTION_PASSWORD": "openmrs"
+        },
+        "volumes": [
+          {
+            "name": "data",
+            "path": "/openmrs/data"
+          }
+        ],
+        "ready": {
+          "http": {
+            "path": "/openmrs/health/started",
+            "tls": false
+          }
+        },
+        "ready_timeout_ms": 1500000
+      },
+      {
+        "name": "frontend",
+        "image": "openmrs/openmrs-reference-application-3-frontend:3.8.0@sha256:248bf9bb307b737f04bb78ee0ef5d0a51e5e3c621a3064c7a88ff8c37b898aeb",
+        "role": "other",
+        "expose": 80,
+        "env": {
+          "SPA_PATH": "/openmrs/spa",
+          "API_URL": "/openmrs",
+          "SPA_CONFIG_URLS": "/openmrs/spa/config-core_demo.json",
+          "SPA_DEFAULT_LOCALE": ""
+        },
+        "ready": {
+          "http": {
+            "path": "/",
+            "tls": false
+          }
+        },
+        "ready_timeout_ms": 60000
+      },
+      {
+        "name": "gateway",
+        "image": "openmrs/openmrs-reference-application-3-gateway:3.8.0@sha256:d3d74a4ac174c9c1af03126ab947dbeeb71773e68bb0140231b6e4a43952673d",
+        "role": "other",
+        "expose": 80,
+        "ready": {
+          "http": {
+            "path": "/openmrs/spa/",
+            "tls": false
+          }
+        },
+        "ready_timeout_ms": 60000
+      }
+    ]
+  },
+  "browser": {
+    "service": "gateway",
+    "tls": false,
+    "start_path": "/openmrs/spa/login",
+    "expected_version": "151.0.7922.34",
+    "preparation": [
+      {
+        "id": "username",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#username"
+          }
+        },
+        "value": {
+          "source": "secret",
+          "key": "username"
+        }
+      },
+      {
+        "id": "continue",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "button[type=submit]"
+          }
+        }
+      },
+      {
+        "id": "password",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#password"
+          }
+        },
+        "value": {
+          "source": "secret",
+          "key": "password"
+        }
+      },
+      {
+        "id": "login",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "button[type=submit]"
+          }
+        }
+      },
+      {
+        "id": "location",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "label:has-text(\"Outpatient Clinic\")"
+          }
+        }
+      },
+      {
+        "id": "confirm-location",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "button[type=submit]"
+          }
+        }
+      },
+      {
+        "id": "home",
+        "action": "read_text",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "button[aria-label=\"Add patient\"]"
+          }
+        },
+        "contains": null
+      }
+    ],
+    "actions": [
+      {
+        "id": "open-registration",
+        "action": "goto",
+        "path": "/openmrs/spa/patient-registration"
+      },
+      {
+        "id": "given-name",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#givenName"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "Taro"
+        }
+      },
+      {
+        "id": "family-name",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#familyName"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "{{test_value}}"
+        }
+      },
+      {
+        "id": "sex",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "label[for=gender-option-male]"
+          }
+        }
+      },
+      {
+        "id": "birthdate-unknown",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "text=Date of Birth Known? >> xpath=following::button[normalize-space()=\"No\"][1]"
+          }
+        }
+      },
+      {
+        "id": "estimated-age",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#yearsEstimated"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "40"
+        }
+      },
+      {
+        "id": "register",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "button[type=submit]:has-text(\"Register patient\")"
+          }
+        },
+        "wait_response": "patient-save"
+      },
+      {
+        "id": "patient-banner",
+        "action": "read_text",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "header[aria-label=\"patient banner\"]"
+          }
+        },
+        "contains": "{{test_value}}"
+      }
+    ],
+    "responses": [
+      {
+        "id": "patient-save",
+        "method": "POST",
+        "path": "/openmrs/ws/rest/v1/patient/"
+      }
+    ],
+    "database": [
+      {
+        "id": "name",
+        "service": "db",
+        "database": "openmrs",
+        "table": "person_name",
+        "match_column": "family_name",
+        "columns": [
+          "given_name",
+          "family_name",
+          "person_id"
+        ]
+      }
+    ]
+  }
+}

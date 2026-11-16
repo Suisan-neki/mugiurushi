@@ -1,0 +1,557 @@
+{
+  "schema_version": 1,
+  "check_id": "openelis",
+  "source": {
+    "repository": "DIGI-UW/openelis-docker",
+    "commit": "6fb4a9e9223f9e04cafbb916d6d5260801ba819e",
+    "path": "docker-compose.yml",
+    "line": 1,
+    "end_line": 1
+  },
+  "runtime": "browser",
+  "entrypoint": "/",
+  "args": [],
+  "input": {
+    "workflow": "synthetic patient registration",
+    "scope": "not clinical data or clinical validation"
+  },
+  "criterion": {
+    "assertion": "eel.trial",
+    "subject": "openelis"
+  },
+  "timeout_ms": 300000,
+  "trial": {
+    "schema_version": 1,
+    "fault": "normal",
+    "storage": null,
+    "readback": null,
+    "checks": [
+      {
+        "id": "patient-display",
+        "scope": "登録した患者の検索結果の表示",
+        "method": "browser_text",
+        "target": "search-result",
+        "expect": "contains",
+        "text": "{{test_value}}"
+      }
+    ]
+  },
+  "containers": {
+    "services": [
+      {
+        "name": "db",
+        "image": "itechuw/openelis-global-2-database:3.3.0@sha256:4a85cb299cfaa769657b91b7a629f49e9987f65f7ffd702582e28bdcfbdc906e",
+        "role": "database",
+        "expose": 5432,
+        "env": {
+          "POSTGRES_USER": "postgres",
+          "POSTGRES_PASSWORD": "admin",
+          "POSTGRES_DB": "clinlims",
+          "POSTGRES_INITDB_ARGS": "--auth-host=md5",
+          "DB_PASSWORD": "clinlims",
+          "DB_SUPERUSER_PASSWORD": "superuser"
+        },
+        "volumes": [
+          {
+            "name": "dbdata",
+            "path": "/var/lib/postgresql/data"
+          }
+        ],
+        "command": [],
+        "ready": {
+          "exec": {
+            "args": [
+              "pg_isready",
+              "-q",
+              "-h",
+              "127.0.0.1",
+              "-d",
+              "clinlims",
+              "-U",
+              "clinlims"
+            ]
+          }
+        },
+        "ready_timeout_ms": 180000,
+        "engine": "postgres",
+        "aliases": [
+          "db.openelis.org"
+        ]
+      },
+      {
+        "name": "certs",
+        "image": "itechuw/certgen:main@sha256:cadf558ddafefd58db076abb21c753a421bc9f7910f1dc20e5c44bdf904987e7",
+        "role": "other",
+        "env": {
+          "KEYSTORE_PW": "kspass",
+          "TRUSTSTORE_PW": "tspass"
+        },
+        "volumes": [
+          {
+            "name": "kts",
+            "path": "/etc/openelis-global"
+          },
+          {
+            "name": "keys",
+            "path": "/etc/ssl/private"
+          },
+          {
+            "name": "certs",
+            "path": "/etc/ssl/certs"
+          }
+        ],
+        "command": [
+          "/bin/bash",
+          "/opt/openelis/ensure-stores.sh"
+        ],
+        "ready": "completed",
+        "ready_timeout_ms": 60000,
+        "files": [
+          {
+            "from": "configs/certs/ensure-stores.sh",
+            "to": "/opt/openelis/ensure-stores.sh"
+          }
+        ]
+      },
+      {
+        "name": "frontend",
+        "image": "itechuw/openelis-global-2-frontend:3.3.0@sha256:2e9a288a493788d7de1437153c760f6321217325dbe44e4fdd49a69b4de48c20",
+        "role": "other",
+        "expose": 80,
+        "env": {},
+        "volumes": [],
+        "command": [],
+        "ready": {
+          "http": {
+            "path": "/",
+            "tls": false
+          }
+        },
+        "ready_timeout_ms": 60000,
+        "aliases": [
+          "frontend.openelis.org"
+        ]
+      },
+      {
+        "name": "oe",
+        "image": "itechuw/openelis-global-2:3.3.0@sha256:b69b2cb7f75642f6be97896ad368767ac5c6383d718a3189be0580eeb2b5171e",
+        "role": "app",
+        "expose": 8443,
+        "env": {
+          "SSL_KEYSTORE_PATH": "/etc/openelis-global/keystore",
+          "SSL_KEYSTORE_PASSWORD": "kspass",
+          "SSL_TRUSTSTORE_PATH": "/etc/openelis-global/truststore",
+          "SSL_TRUSTSTORE_PASSWORD": "tspass",
+          "DEFAULT_PW": "adminADMIN!",
+          "TZ": "America/New_York",
+          "OE_ENCRYPTION_PASSWORD": "kspass",
+          "ANALYZER_BRIDGE_PAIRING_CODE": "",
+          "ORG_OPENELISGLOBAL_FHIRSTORE_URI": "",
+          "ANALYZER_BRIDGE_URL": "",
+          "CATALINA_OPTS": " -Ddatasource.url=jdbc:postgresql://db.openelis.org:5432/clinlims -Ddatasource.username=clinlims -Ddatasource.password=clinlims -Doe.ssl.truststorepath=/etc/openelis-global/truststore -Doe.ssl.truststorepassword=tspass -Doe.ssl.keystorepath=/etc/openelis-global/keystore -Doe.ssl.keystorepassword=kspass"
+        },
+        "volumes": [
+          {
+            "name": "kts",
+            "path": "/etc/openelis-global"
+          },
+          {
+            "name": "lucene",
+            "path": "/var/lib/lucene_index"
+          }
+        ],
+        "command": [],
+        "ready": {
+          "http": {
+            "path": "/api/OpenELIS-Global/health",
+            "tls": true
+          }
+        },
+        "ready_timeout_ms": 600000,
+        "aliases": [
+          "oe.openelis.org"
+        ],
+        "start_after": [
+          "certs"
+        ],
+        "files": [
+          {
+            "from": "configs/properties/common.properties",
+            "to": "/run/secrets/common.properties"
+          }
+        ]
+      },
+      {
+        "name": "proxy",
+        "image": "itechuw/openelis-global-2-proxy:3.3.0@sha256:1cdb0a5aa8529c6ddb88ff5fe634c3ca206c9599deb7a0a4decb8d1d6d33185a",
+        "role": "other",
+        "expose": 443,
+        "env": {
+          "OE_NGINX_CERT": "apache-selfsigned.crt",
+          "OE_NGINX_KEY": "apache-selfsigned.key",
+          "OE_HTTPS_PORT": "443"
+        },
+        "volumes": [
+          {
+            "name": "certs",
+            "path": "/etc/nginx/certs"
+          },
+          {
+            "name": "keys",
+            "path": "/etc/nginx/keys"
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-c",
+          "envsubst '$OE_NGINX_CERT $OE_NGINX_KEY $OE_HTTPS_PORT' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"
+        ],
+        "ready": {
+          "http": {
+            "path": "/",
+            "tls": true
+          }
+        },
+        "ready_timeout_ms": 60000,
+        "start_after": [
+          "certs",
+          "frontend",
+          "oe"
+        ],
+        "files": [
+          {
+            "from": "configs/nginx/nginx.conf",
+            "to": "/etc/nginx/nginx.conf.template"
+          }
+        ]
+      }
+    ]
+  },
+  "browser": {
+    "service": "proxy",
+    "tls": true,
+    "start_path": "/",
+    "expected_version": "151.0.7922.34",
+    "preparation": [
+      {
+        "id": "r01-fill-loginname",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "label",
+            "text": "Username"
+          }
+        },
+        "value": {
+          "source": "secret",
+          "key": "username"
+        }
+      },
+      {
+        "id": "r02-fill-password",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "label",
+            "text": "Password"
+          }
+        },
+        "value": {
+          "source": "secret",
+          "key": "password"
+        }
+      },
+      {
+        "id": "r03-click-login",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "role",
+            "role": "button",
+            "name": "Login"
+          }
+        },
+        "wait_response": "w-r03-click-login"
+      }
+    ],
+    "actions": [
+      {
+        "id": "r04-click-menu-patient",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "role",
+            "role": "button",
+            "name": "Patient"
+          }
+        }
+      },
+      {
+        "id": "r05-click-menu-patient-add-or-edit",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "role",
+            "role": "link",
+            "name": "Add/Edit Patient"
+          }
+        }
+      },
+      {
+        "id": "r06-click-newpatient",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "role",
+            "role": "button",
+            "name": "New Patient"
+          }
+        }
+      },
+      {
+        "id": "r07-fill-nationalid",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "label",
+            "text": "National ID *"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "{{test_value}}"
+        }
+      },
+      {
+        "id": "r08-fill-lastname",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "label",
+            "text": "Last Name"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "Yamada"
+        }
+      },
+      {
+        "id": "r09-fill-firstname",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "label",
+            "text": "First Name"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "Taro"
+        }
+      },
+      {
+        "id": "r10-click-male",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "label[for=\"radio-1\"]"
+          }
+        }
+      },
+      {
+        "id": "r11-fill-years",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "label",
+            "text": "Age/Years"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "40"
+        }
+      },
+      {
+        "id": "r12-click-submit",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "role",
+            "role": "button",
+            "name": "Save"
+          }
+        },
+        "wait_response": "w-r12-click-submit"
+      },
+      {
+        "id": "r13-click-searchpatient",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "role",
+            "role": "button",
+            "name": "Search for Patient"
+          }
+        }
+      },
+      {
+        "id": "r14-fill-patientid",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "label",
+            "text": "Patient Id"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "{{test_value}}"
+        }
+      },
+      {
+        "id": "r15-click-local-search",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#local_search"
+          }
+        }
+      },
+      {
+        "id": "search-result",
+        "action": "read_text",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "main table"
+          }
+        },
+        "contains": "{{test_value}}"
+      }
+    ],
+    "responses": [
+      {
+        "id": "w-r03-click-login",
+        "method": "POST",
+        "path": "/api/OpenELIS-Global/ValidateLogin"
+      },
+      {
+        "id": "w-r12-click-submit",
+        "method": "POST",
+        "path": "/api/OpenELIS-Global/rest/PatientManagement"
+      }
+    ],
+    "database": [],
+    "provenance": {
+      "steps": {
+        "r01-fill-loginname": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r02-fill-password": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r03-click-login": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r04-click-menu-patient": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r05-click-menu-patient-add-or-edit": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r06-click-newpatient": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r07-fill-nationalid": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r08-fill-lastname": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r09-fill-firstname": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r10-click-male": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r11-fill-years": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r12-click-submit": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r13-click-searchpatient": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r14-fill-patientid": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "r15-click-local-search": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        }
+      },
+      "responses": {
+        "w-r03-click-login": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        },
+        "w-r12-click-submit": {
+          "run_id": "recording-openelis",
+          "rules": 2,
+          "source": "operation_recording"
+        }
+      }
+    }
+  }
+}
