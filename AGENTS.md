@@ -22,7 +22,11 @@ README.mdと対象機能の仕様・テストを読み、ブランチ、未コ�
 
 観測した内容、解析による推定、人の申告、未確認事項を区別する。記録がないことだけで処理の失敗を断定しない。未回答の業務条件や許容時間を実装で補わない。
 
-テストには架空のデータを用いる。修正した境界の不正入力と正常な操作の両方を確認する。Rustの変更ではcargo fmt --check、cargo check --locked、cargo test --locked、cargo clippy --locked --all-targets -- -D warningsを実行する。外部サービスやDockerを使う試験は、決定的なテストと分ける。
+テストには架空のデータを用いる。修正した境界の不正入力と正常な操作の両方を確認する。Rustの変更ではcargo fmt --check、cargo check --locked、cargo test --locked、cargo clippy --locked --all-targets -- -D warningsを実行する。画面（`ui/`）の変更ではnpm run typecheck、npm run lintと、変更した画面の試験を実行する。PRで必須の確認の一覧は`.github/workflows/rust.yml`を正とし、手元での実行手順は[開発・実行の手引き](docs/development-guide.md)の「確認」に書く。外部サービスやDockerを使う試験は、決定的なテストと分ける。
+
+## AIへ送る内容
+
+AIエージェント（mugiurushi-ai）へ送る内容は、送る前に内容とSHA-256を画面に示し、人が確かめて同じSHA-256を添えたときだけ送る（`src/agent.rs`）。実在の患者の情報・生のログ・画面写真・認証情報（`.env`など）は送らない。非公開のリポジトリのコードは、利用者が送ることを選んだ場合だけ送る（本人の判断、2026-11-16：「非公開のリポジトリもユーザーがリクエストしてきてるならできたほうがいい」）。2026-11-16時点では、非公開のリポジトリの読み取り自体に対応していない（`src/reader/github.rs`）。
 
 ## PR
 

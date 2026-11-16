@@ -17,6 +17,8 @@ cargo run
 
 表示されたlocalhostのURLを開きます。既定の保存先は`data/app`、ポートは8765です。設定ファイルはGitの管理対象外で、既存の設定は上書きしません。利用者向け画面にはキーの入力欄を設けません。
 
+ガイドラインとの照合・試験の案などを使う場合は、運営者が起動時に、AIエージェント（[mugiurushi-ai](https://github.com/Suisan-neki/mugiurushi-ai)）の接続先`EEL_AGENT_URL`と、共有トークンを書いたファイル`EEL_AGENT_TOKEN_FILE`を指定します（[構成図とAI接続](repository-architecture.md)）。未設定・失敗のときは、AIを使う欄を出さないか失敗を示し、確認項目・試験・判定はAIなしで使えます。GitHubのAPIの利用上限を広げる場合は、トークンを書いたファイルを`EEL_GITHUB_TOKEN_FILE`に指定します。読み取りは公開リポジトリだけで、非公開のリポジトリは拒否します。
+
 ```bash
 cargo run -- app data/app --port 8765 --execution-mode local
 cargo run -- --help
@@ -38,6 +40,7 @@ Cargoパッケージ名とバイナリ名は`mugiurushi`です。旧名称はexe
 | `src/cli/` | アプリ・AI設定・ケース管理・固定環境のCLI |
 | `src/review.rs` | 現在の画面と操作トークン付きAPI |
 | `src/reader/`・`src/understanding.rs` | 固定版の読取・静的解析・読取記録 |
+| `src/agent.rs` | AIエージェント（mugiurushi-ai）の呼び出し、送る前の確認、応答の検査 |
 | `src/system_diagram/` | 構成図、部分ごとの会話、期待と結果への対応づけ |
 | `src/execution.rs`・`src/trial.rs` | 固定版の実行、故障条件、観測と判定 |
 | `src/recording.rs`・`src/run_record.rs` | 出来事・試行情報・完了記録の保存 |
@@ -46,6 +49,7 @@ Cargoパッケージ名とバイナリ名は`mugiurushi`です。旧名称はexe
 | `src/backup.rs`・`src/review_report.rs` | 全版のバックアップ・復元と確認資料 |
 | `ui/app.*`・`ui/repository-diagram.js` | 構成の調査と検証課題の画面 |
 | `ui/workbench.*` | コード確認、検証設定、実行、結果と比較 |
+| `ui/flow.*`・`ui/flow-record.js` | ガイドラインとの照合・ヒアリング・試験の案の画面（`/flow`） |
 
 ケース操作とAPI起動は`--help`を参照してください。`case init`は条件や回答を含まない空のケースを作ります。過去の試作の廃止と保存済みデータの扱いは[整理と確認範囲](current-workflow-cleanup.md)に記録しています。
 
@@ -59,13 +63,20 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked
 python3 tools/check-yomiyasu.py
 npm ci --ignore-scripts
+npm run typecheck
+npm run lint
+npm run test:api
 npx playwright install --with-deps chromium
 npm run test:ui
 npm run test:reader-native
-npm run test:app
+npm run test:flow
+npm run test:flow-record
+npm run test:flow-rescan
 ```
 
-`test:ui`は構成図と対話を実Rustサーバー・合成AIで操作します。`test:app`は公開リポジトリsjl/tを使って、検証・故障・改修・再試験・比較を操作します。合成AIでの成功は実モデルの品質や利用者の理解を証明しません。
+PRのCI（`.github/workflows/rust.yml`）は、このほかにも固定フィクスチャの試験を実行します。必須の一覧はワークフローを正とします。`test:ui`は構成図と対話を実Rustサーバー・合成AIで操作します。`test:flow`系は照合の画面（`/flow`）を合成AIで操作します。
+
+`test:app`は公開リポジトリsjl/tを使って、検証・故障・改修・再試験・比較を操作します。公開GitHubに依存するため、PRでは実行せず、手動・週次のワークフロー（`.github/workflows/live-integration.yml`）で実行します。合成AIでの成功は実モデルの品質や利用者の理解を証明しません。
 
 ブラウザを使わずに対話のAPIを確認する場合は、`EEL_DIALOGUE_API_ONLY=1 npm run test:dialogue`を使います。現在の実行経路については`tools/queue-demo.mjs`と`tools/pinned-demo.mjs`でも検証できます。ここでの番号表示は実際にコードを起動する参照アプリであり、廃止した名前・年齢デモとは別です。
 
