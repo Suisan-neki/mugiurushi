@@ -47,7 +47,8 @@ const agent = createServer((req, res) => {
   });
 }).listen(0, '127.0.0.1');
 await new Promise(ok => agent.once('listening', ok));
-const env = { ...process.env, EEL_AGENT_URL: `http://127.0.0.1:${agent.address().port}`, EEL_AGENT_TOKEN_FILE: tokenFile };
+// 同梱の試験の一覧は、運営者が EEL_RECIPE_DIR で指定したディレクトリから読む。指定しないと一覧は空になる。
+const env = { ...process.env, EEL_AGENT_URL: `http://127.0.0.1:${agent.address().port}`, EEL_AGENT_TOKEN_FILE: tokenFile, EEL_RECIPE_DIR: join(root, 'examples') };
 if (!live) { const secrets = join(temp, 'secrets.json'); await writeFile(secrets, JSON.stringify({ username: 'eel-operator', password: 'eel-pass-trial' }), { mode: 0o600 }); env.EEL_BROWSER_SECRETS_FILE = secrets; }
 const child = spawn(process.env.REVIEW_BINARY || join(root, 'target/debug/mugiurushi'), ['app', data, '--port', '0'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env });
 let browser;
