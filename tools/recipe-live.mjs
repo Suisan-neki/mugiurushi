@@ -61,8 +61,8 @@ function collect() {
 function cli(args) {
   const r = spawnSync(bin, args, {encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: limit});
   if (r.error?.code === 'ETIMEDOUT') {
-    console.log(`実行器が ${limit}ms 以内に終わらなかったので止めた。実行器の報告と、残った資源の確認の結果を出す`);
-    console.log((r.stderr || '').trim().split('\n').at(-1));
+    // 実行器は、止められると資源を回収してから終わる。上限で止めた場合、実行器が標準エラーへ書いた報告はここへ届かない。
+    console.log(`実行器が ${limit}ms 以内に終わらなかったので止めた。残った資源がないことを確かめる`);
     console.log(JSON.stringify(collect(), null, 1));
     process.exit(1);
   }
