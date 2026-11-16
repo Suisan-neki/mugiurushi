@@ -16,7 +16,7 @@
       "truncated": false,
       "records": [
         {
-          "ref": "screen:bd9c3123dca46cd2b30c6164cf4b76d9eed4828b6411258e814541030378405a",
+          "ref": "screen:21a21ee25092d52b01012b71d9661c25458b8fb97e7b68cc7cba27b6f2f4a588",
           "step": "open",
           "phase": "action",
           "path": "/login",
@@ -51,8 +51,12 @@
           "document": {
             "status": 200,
             "headers": {
-              "cache-control": "no-store"
+              "cache-control": "no-store",
+              "content-security-policy": "img-src 'self'"
             },
+            "headers_truncated": [
+              "content-security-policy"
+            ],
             "cookies": []
           },
           "truncated": false

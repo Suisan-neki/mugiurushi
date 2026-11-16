@@ -49,6 +49,9 @@ pub struct CookieAttributes {
 pub struct DocumentResponse {
     pub status: u16,
     pub headers: BTreeMap<String, String>,
+    /// 値が上限（`MAX_HEADER` 文字）を超え、後半を切り捨てたヘッダーの名前。記録した値は全文ではない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers_truncated: Vec<String>,
     pub cookies: Vec<CookieAttributes>,
 }
 
@@ -143,6 +146,9 @@ pub struct ExchangeRecord {
     pub status: u16,
     pub resource: String,
     pub headers: BTreeMap<String, String>,
+    /// 値が上限（`MAX_HEADER` 文字）を超え、後半を切り捨てたヘッダーの名前。記録した値は全文ではない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers_truncated: Vec<String>,
     pub cookies: Vec<CookieAttributes>,
     /// 追跡する値のうち、要求（本文とクエリ文字列）に含まれていたもの。値そのものは持たない。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -178,6 +184,20 @@ pub fn validate_headers(headers: &BTreeMap<String, String>) -> io::Result<()> {
     Ok(())
 }
 
+/// 切り捨てたヘッダーの名前は、記録したヘッダーの中に1回ずつだけある。
+/// 記録していないヘッダーを指す名前を受け取ると、何が欠けているのかを読み手が誤るためである。
+fn validate_truncated(headers: &BTreeMap<String, String>, truncated: &[String]) -> io::Result<()> {
+    let mut seen = BTreeSet::new();
+    for name in truncated {
+        if !headers.contains_key(name) || !seen.insert(name.as_str()) {
+            return Err(invalid(format!(
+                "切り捨てたヘッダーの名前 {name} が、記録したヘッダーと合いません"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_cookies(cookies: &[CookieAttributes]) -> io::Result<()> {
     if cookies.len() > 32 {
         return Err(invalid("Cookieの記録が上限を超えています"));
@@ -198,6 +218,7 @@ fn validate_content(content: &ScreenContent) -> io::Result<()> {
     }
     if let Some(document) = &content.document {
         validate_headers(&document.headers)?;
+        validate_truncated(&document.headers, &document.headers_truncated)?;
         validate_cookies(&document.cookies)?;
     }
     for frame in &content.frames {
@@ -258,6 +279,7 @@ pub fn validate_exchanges(
         short(&exchange.path, 2048)?;
         short(&exchange.resource, 32)?;
         validate_headers(&exchange.headers)?;
+        validate_truncated(&exchange.headers, &exchange.headers_truncated)?;
         validate_cookies(&exchange.cookies)?;
         if exchange.request_slots.len() + exchange.response_slots.len() > 128 {
             return Err(invalid(
@@ -426,6 +448,7 @@ mod tests {
             document: Some(DocumentResponse {
                 status: 200,
                 headers: [("cache-control".to_owned(), "no-store".to_owned())].into(),
+                headers_truncated: vec![],
                 cookies: vec![CookieAttributes {
                     name: "session".into(),
                     secure: true,
@@ -517,6 +540,20 @@ mod tests {
             )
             .is_err()
         );
+        // 切り捨てたヘッダーの名前は、記録したヘッダーを指す。
+        let truncated = |names: &[&str]| {
+            let mut c = content(1);
+            c.document.as_mut().unwrap().headers_truncated =
+                names.iter().map(|n| (*n).to_owned()).collect();
+            validate(
+                file(vec![record("open", Some(c), None)]),
+                "run-1",
+                &steps(&["open"]),
+            )
+        };
+        assert!(truncated(&["cache-control"]).is_ok());
+        assert!(truncated(&["content-security-policy"]).is_err());
+        assert!(truncated(&["cache-control", "cache-control"]).is_err());
         let mut long = content(1);
         long.title = "あ".repeat(MAX_TEXT);
         assert!(
@@ -581,6 +618,7 @@ mod tests {
             status: 200,
             resource: "document".into(),
             headers: [(header.to_owned(), "x".to_owned())].into(),
+            headers_truncated: vec![],
             cookies: vec![],
             request_slots: vec![],
             response_slots: vec![],
@@ -592,5 +630,15 @@ mod tests {
         assert!(validate_exchanges(&[exchange("save", "set-cookie")], &actions).is_err());
         let many = vec![exchange("save", "content-type"); MAX_EXCHANGES + 1];
         assert!(validate_exchanges(&many, &actions).is_err());
+        // 切り捨てたヘッダーの名前は、記録したヘッダーを1回ずつだけ指す。
+        let truncated = |names: &[&str]| ExchangeRecord {
+            headers_truncated: names.iter().map(|n| (*n).to_owned()).collect(),
+            ..exchange("save", "content-type")
+        };
+        assert!(validate_exchanges(&[truncated(&["content-type"])], &actions).is_ok());
+        assert!(validate_exchanges(&[truncated(&["cache-control"])], &actions).is_err());
+        assert!(
+            validate_exchanges(&[truncated(&["content-type", "content-type"])], &actions).is_err()
+        );
     }
 }

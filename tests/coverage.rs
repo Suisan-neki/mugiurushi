@@ -1744,7 +1744,9 @@ fn screens_join_the_scan_input_only_when_chosen_and_unsent_screen_references_are
     let store = mugiurushi::understanding::Store::new(snapshots).unwrap();
     // 架空の画面の記録。ハッシュは基盤が計算する。
     let content = serde_json::json!({"path": "/login", "title": "架空のログイン", "truncated": false,
-        "document": {"status": 200, "headers": {"cache-control": "no-store"}, "cookies": []},
+        // 上限で後半を切り捨てたヘッダーは、名前を別に送る。受け渡しの固定ファイルにも、この形を残す。
+        "document": {"status": 200, "headers": {"cache-control": "no-store", "content-security-policy": "img-src 'self'"},
+            "headers_truncated": ["content-security-policy"], "cookies": []},
         "frames": [{"chain": [], "path": "/login", "headings": ["ログイン"], "controls": [], "links": [],
             "fields": [{"tag": "input", "input_type": "password", "name": "pin", "id": null, "label": "暗証",
                 "required": true, "readonly": false, "disabled": false, "autocomplete": null, "maxlength": null,
