@@ -917,7 +917,7 @@ function trialFormView(check, form, plan, exec) {
         field({ label: '依存先', control: dependencies, support: '1行に1つ、「所有者/リポジトリ 40桁のコミット 読み込み先（任意）」。例: pydicom/pydicom 20aa4b73aef76bffb6fbc46a8827588dfa9bb89d src' }))),
     h('fieldset', {}, h('legend', {}, '試験専用のコンテナ（任意）'),
       h('p', { class: 'note' }, 'イメージはタグだけではなく @sha256: と64桁のダイジェストを付けます。試行ごとに新しいコンテナ・ネットワーク・ボリュームを作り、待ち受けは 127.0.0.1 だけに公開し、終わったら消します。Dockerが使えないときはほかの方式へ切り替えません。対象リポジトリの compose をそのまま実行はしません。'),
-      field({ label: 'コンテナ（JSONの配列）', control: containers, support: '各要素は name, image, role（app / database / other）, expose, ready（tcp または {"http":{"path":"/","tls":false}}）, ready_timeout_ms。任意で env, volumes, command, start_after（先に準備を待つコンテナの名前の配列）。例のポートは {{port:名前}} で引数に使えます。' }),
+      field({ label: 'コンテナ（JSONの配列）', control: containers, support: '各要素は name, image, role（app / database / other）, expose, ready（tcp または {"http":{"path":"/","tls":false}}）, ready_timeout_ms。任意で env, volumes, command, start_after（先に準備を待つコンテナの名前の配列）, files（固定したコミットのファイルを置く指定。from と to）, aliases（別のホスト名の配列）。1回動いて終わるコンテナは ready を "completed" にし、expose を書きません。例のポートは {{port:名前}} で引数に使えます。' }),
       h('div', { class: 'inline-fields' }, field({ label: 'HTTPの操作先', control: httpService }), field({ label: 'HTTPの方法', control: httpMethod }), field({ label: 'HTTPのパス', control: httpPath })),
       h('div', { class: 'inline-fields' }, field({ label: 'HTTPの本文ファイル', control: httpBody, support: '固定コミットの中の相対パス。空なら本文なし。' }), field({ label: 'Content-Type', control: httpType }))),
     h('fieldset', {}, h('legend', {}, '先に起動するプロセス（任意）'),

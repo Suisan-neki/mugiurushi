@@ -89,15 +89,18 @@
           }
         },
         "ready_timeout_ms": 180000,
-        "engine": "postgres"
+        "engine": "postgres",
+        "aliases": [
+          "db.openelis.org"
+        ]
       },
       {
         "name": "certs",
         "image": "itechuw/certgen:main@sha256:cadf558ddafefd58db076abb21c753a421bc9f7910f1dc20e5c44bdf904987e7",
         "role": "other",
-        "expose": 9,
         "env": {
-          "COMMON_PROPERTIES": "server.ssl.key-store = file:${SSL_KEYSTORE_PATH}\nserver.ssl.key-store-password = ${SSL_KEYSTORE_PASSWORD}\nserver.ssl.key-password = ${SSL_KEYSTORE_PASSWORD}\nserver.ssl.trust-store= file:${SSL_TRUSTSTORE_PATH}\nserver.ssl.trust-store-password=${SSL_TRUSTSTORE_PASSWORD}\nencryption.general.password=${OE_ENCRYPTION_PASSWORD}\norg.openelisglobal.fhirstore.uri=https://fhir.openelis.org:8443/fhir/\norg.openelisglobal.fhirstore.username=admin\norg.openelisglobal.fhirstore.password=adminADMIN!\norg.openelisglobal.fhir.subscriber.allowHTTP=true\norg.openelisglobal.fhir.subscriber.backup.interval=5\norg.openelisglobal.fhir.transformOnStartup=false\norg.openelisglobal.crserver.uri=\norg.openelisglobal.crserver.username=\norg.openelisglobal.crserver.password=\norg.openelisglobal.remote.source.uri=\norg.openelisglobal.remote.source.updateStatus=false\norg.openelisglobal.remote.source.identifier=\norg.openelisglobal.remote.poll.frequency=120000\norg.openelisglobal.task.useBasedOn=true\norg.openelisglobal.fhir.subscriber=\norg.openelisglobal.fhir.subscriber.resources=Task,Patient,ServiceRequest,DiagnosticReport,Observation,Specimen,Practitioner,Encounter\norg.openelisglobal.facilitylist.fhirstore =  \norg.openelisglobal.facilitylist.authurl=\norg.openelisglobal.facilitylist.username=\norg.openelisglobal.facilitylist.password=\norg.openelisglobal.facilitylist.auth= \nfacilitylist.schedule.fixedRate=864000000\norg.openelisglobal.providerlist.fhirstore=\norg.openelisglobal.requester.identifier=Practitioner/f9badd80-ab76-11e2-9e96-0800200c9a66\norg.openelisglobal.providerlist.poll.frequency=3600000\norg.openelisglobal.requester.lastName=\norg.openelisglobal.requester.firstName=\norg.openelisglobal.requester.phone=\norg.openelisglobal.paging.patients.pageSize=99\norg.openelisglobal.paging.results.pageSize=99\norg.openelisglobal.paging.validation.pageSize=99\norg.openelisglobal.paging.displaylist.pageSize=99\norg.openelisglobal.paging.orderprograms.pageSize=99\norg.openelisglobal.odoo.enabled=false\norg.openelisglobal.odoo.map.testname.locale=en\norg.openelisglobal.odoo.baseUrl=\norg.openelisglobal.odoo.database=\norg.openelisglobal.odoo.username=\norg.openelisglobal.odoo.password=\norg.openelisglobal.program.autocreate = true\norg.openelisglobal.help.manual.url=https://uwdigi.atlassian.net/wiki/spaces/OG/folder/261455874\norg.openelisglobal.help.tutorials.url=https://video.openelis-global.org\norg.openelisglobal.help.release-notes.url=https://roadmap.openelis-global.org\norg.openelisglobal.configuration.autocreate=false\norg.openelisglobal.configuration.dir=/var/lib/openelis-global/configuration/backend\norg.itech.login.saml=false\norg.itech.login.saml.registrationId=keycloak\norg.itech.login.saml.loginpage=true\norg.itech.login.saml.entityId=OpenELIS-Global_saml\norg.itech.login.saml.metadatalocation=http://keycloak.openelis.org:8080/realms/OpenELIS/protocol/saml/descriptor\norg.openelisglobal.ocl.import.default.testsection=Hematology\norg.openelisglobal.ocl.import.default.sampletype=Whole Blood\norg.openelisglobal.freezermonitoring.enabled=true\norg.openelisglobal.freezermonitoring.modbus.poll-interval=PT5M\norg.openelisglobal.freezermonitoring.modbus.initial-delay=PT15S\norg.openelisglobal.freezermonitoring.modbus.timeout-millis=2000\norg.openelisglobal.freezermonitoring.modbus.retries=1\norg.openelisglobal.menu.configuration.autocreate=false\norg.openelisglobal.facility.country=\norg.openelisglobal.facility.state=\norg.openelisglobal.facility.district=\norg.openelisglobal.facility.city=\norg.openelisglobal.facility.postalcode=\norg.openelisglobal.facility.id=OpenELIS Facility ID\norg.openelisglobal.mail.bcc=openelis@gmail.com\norg.openelisglobal.mail.from=openelis@gmail.com\norg.openelisglobal.notification.bmp.provider=TWILIO\norg.openelisglobal.notification.twilio.from=+12605477525\n"
+          "KEYSTORE_PW": "kspass",
+          "TRUSTSTORE_PW": "tspass"
         },
         "volumes": [
           {
@@ -111,27 +114,20 @@
           {
             "name": "certs",
             "path": "/etc/ssl/certs"
-          },
-          {
-            "name": "secrets",
-            "path": "/run/secrets"
           }
         ],
         "command": [
-          "bash",
-          "-c",
-          "printf '%s' \"$COMMON_PROPERTIES\" > /run/secrets/common.properties && exec sleep infinity"
+          "/bin/bash",
+          "/opt/openelis/ensure-stores.sh"
         ],
-        "ready": {
-          "exec": {
-            "args": [
-              "test",
-              "-s",
-              "/run/secrets/common.properties"
-            ]
+        "ready": "completed",
+        "ready_timeout_ms": 60000,
+        "files": [
+          {
+            "from": "configs/certs/ensure-stores.sh",
+            "to": "/opt/openelis/ensure-stores.sh"
           }
-        },
-        "ready_timeout_ms": 60000
+        ]
       },
       {
         "name": "frontend",
@@ -147,7 +143,10 @@
             "tls": false
           }
         },
-        "ready_timeout_ms": 60000
+        "ready_timeout_ms": 60000,
+        "aliases": [
+          "frontend.openelis.org"
+        ]
       },
       {
         "name": "oe",
@@ -162,18 +161,15 @@
           "DEFAULT_PW": "adminADMIN!",
           "TZ": "America/New_York",
           "OE_ENCRYPTION_PASSWORD": "kspass",
+          "ANALYZER_BRIDGE_PAIRING_CODE": "",
           "ORG_OPENELISGLOBAL_FHIRSTORE_URI": "",
           "ANALYZER_BRIDGE_URL": "",
-          "CATALINA_OPTS": "-Ddatasource.url=jdbc:postgresql://db:5432/clinlims -Ddatasource.username=clinlims -Ddatasource.password=clinlims -Doe.ssl.truststorepath=/etc/openelis-global/truststore -Doe.ssl.truststorepassword=tspass -Doe.ssl.keystorepath=/etc/openelis-global/keystore -Doe.ssl.keystorepassword=kspass"
+          "CATALINA_OPTS": " -Ddatasource.url=jdbc:postgresql://db.openelis.org:5432/clinlims -Ddatasource.username=clinlims -Ddatasource.password=clinlims -Doe.ssl.truststorepath=/etc/openelis-global/truststore -Doe.ssl.truststorepassword=tspass -Doe.ssl.keystorepath=/etc/openelis-global/keystore -Doe.ssl.keystorepassword=kspass"
         },
         "volumes": [
           {
             "name": "kts",
             "path": "/etc/openelis-global"
-          },
-          {
-            "name": "secrets",
-            "path": "/run/secrets"
           },
           {
             "name": "lucene",
@@ -187,7 +183,19 @@
             "tls": true
           }
         },
-        "ready_timeout_ms": 600000
+        "ready_timeout_ms": 600000,
+        "aliases": [
+          "oe.openelis.org"
+        ],
+        "start_after": [
+          "certs"
+        ],
+        "files": [
+          {
+            "from": "configs/properties/common.properties",
+            "to": "/run/secrets/common.properties"
+          }
+        ]
       },
       {
         "name": "proxy",
@@ -195,7 +203,9 @@
         "role": "other",
         "expose": 443,
         "env": {
-          "NGINX_CONF": "worker_processes 1;\nevents { worker_connections 1024; }\nhttp {\n    map $http_x_forwarded_host $oe_forwarded_host { default $http_x_forwarded_host; '' $http_host; }\n    map $http_x_forwarded_proto $oe_forwarded_proto { default $http_x_forwarded_proto; '' $scheme; }\n    server {\n        listen 443 ssl default;\n        server_name __;\n        ssl_certificate /etc/nginx/certs/apache-selfsigned.crt;\n        ssl_certificate_key /etc/nginx/keys/apache-selfsigned.key;\n        proxy_set_header Host $http_host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $oe_forwarded_proto;\n        proxy_set_header X-Forwarded-Host $oe_forwarded_host;\n        absolute_redirect off;\n        location / { proxy_pass http://frontend; proxy_redirect off; }\n        location /api/ { proxy_pass https://oe:8443/api/; proxy_redirect off; }\n    }\n}\n"
+          "OE_NGINX_CERT": "apache-selfsigned.crt",
+          "OE_NGINX_KEY": "apache-selfsigned.key",
+          "OE_HTTPS_PORT": "443"
         },
         "volumes": [
           {
@@ -210,7 +220,7 @@
         "command": [
           "/bin/sh",
           "-c",
-          "printf '%s' \"$NGINX_CONF\" > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"
+          "envsubst '$OE_NGINX_CERT $OE_NGINX_KEY $OE_HTTPS_PORT' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"
         ],
         "ready": {
           "http": {
@@ -220,7 +230,15 @@
         },
         "ready_timeout_ms": 60000,
         "start_after": [
+          "certs",
+          "frontend",
           "oe"
+        ],
+        "files": [
+          {
+            "from": "configs/nginx/nginx.conf",
+            "to": "/etc/nginx/nginx.conf.template"
+          }
         ]
       }
     ]

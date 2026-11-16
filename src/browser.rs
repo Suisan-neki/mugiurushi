@@ -287,7 +287,10 @@ pub fn sql_identifier(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()> {
-    if !containers.services.iter().any(|s| s.name == spec.service)
+    if !containers
+        .services
+        .iter()
+        .any(|s| s.name == spec.service && s.ready != crate::container::ReadyCheck::Completed)
         || !path(&spec.start_path)
         || spec.expected_version.is_empty()
         || spec.expected_version.len() > 64

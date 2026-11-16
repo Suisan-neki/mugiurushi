@@ -299,7 +299,14 @@ fn validates_the_pinned_openelis_recipe_without_running_it() {
     assert_eq!(services.len(), 5);
     // 入口は、アプリの準備ができてから起動する。表は public 以外のスキーマにある。
     let proxy = services.iter().find(|s| s.name == "proxy").unwrap();
-    assert_eq!(proxy.start_after, ["oe"]);
+    assert!(proxy.start_after.iter().any(|name| name == "oe"));
+    // 配布物の設定ファイル、ホスト名、1回動いて終わるコンテナを、そのまま使う。
+    assert_eq!(proxy.files[0].from, "configs/nginx/nginx.conf");
+    let oe = services.iter().find(|s| s.name == "oe").unwrap();
+    assert_eq!(oe.aliases, ["oe.openelis.org"]);
+    assert_eq!(oe.files[0].to, "/run/secrets/common.properties");
+    let certs = services.iter().find(|s| s.name == "certs").unwrap();
+    assert_eq!(certs.ready, mugiurushi::container::ReadyCheck::Completed);
     let probe = &recipe.browser.as_ref().unwrap().database[0];
     assert_eq!(probe.schema.as_deref(), Some("clinlims"));
 }

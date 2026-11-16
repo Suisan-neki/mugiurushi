@@ -15,19 +15,24 @@ EEL_BROWSER_SECRETS_FILE=/tmp/eel-openelis-secrets.json node tools/recipe-live.m
 
 Dockerのエンジンが必要。試行ごとに新しいDBとコンテナを作り、終了後に消す。既存のOpenELISや実患者のデータには接続しない。ログインの値は、配布物の構成に書かれている既定の管理者で、公開されている。試行の中のコンテナだけで使い、実環境には流用しない。結果は `evaluations/openelis-register/summary.json` に残る。
 
-## 配布物の構成と違うところ
+## 配布物の構成との対応
 
-このレシピは、配布物の構成をそのまま使えていない。基盤のコンテナの設定で表せないことが3つあり、レシピの側で回り道をしている。
+レシピは、配布物の `docker-compose.yml` と軽い構成（`docker-compose.light.yml`）を、基盤のコンテナの設定に書き写したものである。配布物の設定ファイルは書き換えず、固定したコミットからコンテナの中へ置く。
 
-| 配布物の構成 | 基盤で表せないこと | レシピでの回り道 |
-| --- | --- | --- |
-| アプリは、ホストから差し込む `/run/secrets/common.properties` を読む。入口のnginxも、ホストから差し込む設定を使う | 設定ファイルをコンテナへ渡す手段がない | 内容を環境変数に入れ、起動コマンドでファイルに書く。アプリのイメージは起動コマンドを差し替えられないので、証明書のコンテナに共有ボリュームへ書かせる。環境変数の上限（4096バイト）に収めるため、`common.properties` の注釈と空行を削った |
-| サービスは `db.openelis.org`、`oe.openelis.org`、`frontend.openelis.org` の名前で互いを呼ぶ | コンテナの名前にドットを使えない | 名前を `db`、`oe`、`frontend` に変え、アプリのDBの接続先と入口のnginxの転送先を書き直した |
-| `certs` は証明書を用意して終了し、ほかのサービスはその終了を待つ | 1回動いて終わるコンテナを表せない | 終了しないコマンドに置き換えた。証明書は、イメージに入っている既定のものが共有ボリュームへ写る。配布物の `ensure-stores.sh`（パスワードを変えた場合の作り直し）は実行していない |
+| 配布物の構成 | レシピでの書き方 |
+| --- | --- |
+| アプリは、ホストから差し込む `configs/properties/common.properties` を `/run/secrets/common.properties` で読む | `files` で、同じファイルを同じ場所へ置く |
+| 入口は、ホストから差し込む `configs/nginx/nginx.conf` をひな形にして設定を作る | `files` で同じファイルを置き、配布物と同じ起動コマンドを書く |
+| サービスは `db.openelis.org`、`oe.openelis.org`、`frontend.openelis.org` の名前で互いを呼ぶ | コンテナの名前は `db`、`oe`、`frontend` にし、`aliases` に配布物の名前を書く |
+| `certs` は `configs/certs/ensure-stores.sh` で証明書を用意して終了し、アプリと入口はその終了を待つ | `files` でスクリプトを置き、`ready` を `completed` にする。アプリと入口の `start_after` に `certs` を書く |
+| 入口は、アプリより先に起動すると終了し、再起動の設定で立ち直る | 入口の `start_after` に `oe` を書く。再起動はしない |
 
-入口のnginxの設定は、配布物の `configs/nginx/nginx.conf` から、HTTPSの `server` の部分を書き写したものである。転送先の名前を変え、証明書のファイル名を直接書き、80番の `server`（HTTPSへの転送）とIPv6の待ち受けを外した。
+配布物と違うのは、次の点である。
 
-この3つを基盤の側で表せるようにする変更は、まだ行っていない。
+- 起動しないサービスがある。FHIRサーバーと分析装置の中継（軽い構成で外れるもの）、コンテナを自動で再起動する `autoheal`。
+- DBのデータとログは、ホストのディレクトリではなく、試行ごとに作って消すボリュームに置く。
+- 配布物が差し込む任意の設定（翻訳、メニュー、検査項目の一覧、`SystemConfiguration.properties` など）は置いていない。置かなくてもアプリは起動し、患者登録は通った。
+- アプリの固定のIPアドレスは指定していない。
 
 ## 画面の操作と判定条件
 
@@ -43,14 +48,15 @@ Dockerのエンジンが必要。試行ごとに新しいDBとコンテナを作
 
 ## 実行した結果
 
-4コアの作業環境で実行した。基盤は、スキーマの指定と起動の順番の指定を足した版である。
+4コアの作業環境で実行した。基盤は、ファイルを置く指定・別名・終了を待つコンテナを足した版である。作業環境のカーネルにIPv6がないので、下の「IPv6を持たないホストで動かす場合」の置き換えを使った。
 
 | 実行 | 結果 |
 | --- | --- |
-| `--track-only` で1回 | 判定は「満たした」。準備4手順と操作13手順がすべて完了し、遮断した要求は0件。判定条件3件はすべて期待どおり。全体で152秒 |
-| 起動 | DB 2.2秒、証明書・画面・入口は1秒未満、アプリ 99.3秒。入口はアプリの後に起動した |
-| 値の追跡 | 文字列型の列1622件（表361件）を約3.3秒で調べ終え、打ち切りはなかった。試験値は `clinlims.patient.national_id` の1行、保存の要求（`POST /api/OpenELIS-Global/rest/PatientManagement`、応答200）、検索の要求（`GET /api/OpenELIS-Global/rest/patient-search-results`、応答200）、画面の2か所、入口のコンテナのログに現れた |
-| 候補（`case draft`） | 読み出し先 `clinlims` スキーマの `patient.national_id`、応答の観測先2件、判定条件8件（DBの行1、HTTPの状態2、5つのコンテナのログに値が出ないこと5） |
+| `--track-only` で1回 | 判定は「満たした」。準備4手順と操作13手順がすべて完了し、遮断した要求は0件。判定条件3件はすべて期待どおり。全体で148秒 |
+| 起動 | DB 1.4秒、`certs` は1.0秒で終了コード0、画面と入口は1秒未満、アプリ 99.4秒。入口はアプリの後に起動した |
+| 置いたファイル | `ensure-stores.sh`（2557バイト）、`common.properties`（5653バイト）、`nginx.conf`（2467バイト）。出所・置き場所・SHA-256が実行記録に残った |
+| 値の追跡 | 文字列型の列1622件（表361件）を約3.1秒で調べ終え、打ち切りはなかった。試験値は `clinlims.patient.national_id` の1行、保存の要求（`POST /api/OpenELIS-Global/rest/PatientManagement`、応答200）、検索の要求（`GET /api/OpenELIS-Global/rest/patient-search-results`、応答200）、画面の2か所、入口のコンテナのログに現れた |
+| 候補（`case draft`） | 読み出し先 `clinlims` スキーマの `patient.national_id`、応答の観測先2件、判定条件（DBの行1、HTTPの状態2、コンテナごとのログに値が出ないこと） |
 | 後始末 | コンテナ、ネットワーク、ボリュームの残りは0 |
 
 追跡が見つけた読み出し先と保存の応答の観測先は、レシピに手で書いたものと同じだった。表と列の名前は、追跡には渡していない。
@@ -59,12 +65,24 @@ Dockerのエンジンが必要。試行ごとに新しいDBとコンテナを作
 
 `node tools/recipe-count.mjs examples/openelis-browser/register-recipe.json` で数えた手書きの項目は、セレクタ15、通信のURL 1、DBの読み出し先1、判定条件3の計20件。候補で置き換えられるのは、通信のURL、DBの読み出し先、判定条件のうちDBの行とHTTPの状態の計4件である。
 
-スキーマの指定と起動の順番の指定を足す前の基盤では、次の結果だった。
+ここに至るまでの基盤では、次の結果だった。
 
-| 実行 | 結果 |
+| 基盤 | 結果 |
 | --- | --- |
-| 入口の役割を「アプリ」、アプリ本体の役割を「その他」と書いて順番を合わせたレシピ | 17手順は完了。表示と応答の条件は期待どおり。DBの行は読み出しが失敗して「観測できていない」。判定は「判定できない」 |
-| 役割を実態どおりに書いたレシピ | 入口が `host not found in upstream "oe"` で準備の前に終了。操作は始まらず、判定は「判定できない」 |
+| スキーマの指定と起動の順番の指定がない版。役割で順番を合わせたレシピ | 17手順は完了。DBの行は読み出しが失敗して「観測できていない」。判定は「判定できない」 |
+| 同じ版。役割を実態どおりに書いたレシピ | 入口が `host not found in upstream "oe"` で準備の前に終了。判定は「判定できない」 |
+| スキーマの指定と起動の順番の指定を足した版。設定を環境変数に入れ、名前を書き直し、`certs` を終了しないコマンドに置き換えたレシピ | 判定は「満たした」。全体で152秒 |
+
+## IPv6を持たないホストで動かす場合
+
+配布物の `nginx.conf` は、IPv6でも待ち受ける（`listen [::]:443 ssl`）。カーネルにIPv6がないホストでは、入口がこの行で起動に失敗する。レシピは配布物のファイルのままにしてある。そのホストで試す場合は、`--command` で、その実行に限って、置いたひな形からその行を外す起動コマンドに置き換える。
+
+```sh
+EEL_BROWSER_SECRETS_FILE=/tmp/eel-openelis-secrets.json node tools/recipe-live.mjs examples/openelis-browser/register-recipe.json openelis-register --track-only \
+  '--command=proxy=["/bin/sh","-c","sed -i '"'"'/\\[::\\]/d'"'"' /etc/nginx/nginx.conf.template && envsubst '"'"'$OE_NGINX_CERT $OE_NGINX_KEY $OE_HTTPS_PORT'"'"' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && exec nginx -g '"'"'daemon off;'"'"'"]'
+```
+
+IPv6のあるホストで、置き換えなしの実行は確かめていない。
 
 ## 確かめていないこと
 
