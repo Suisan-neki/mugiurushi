@@ -106,6 +106,10 @@ pub struct DatabaseProbe {
     pub service: String,
     pub database: String,
     pub table: String,
+    /// PostgreSQLで、表のあるスキーマ。省略すると、接続する利用者の検索の順（search_path）で表を探す。
+    /// MariaDBでは `database` がこれにあたるので、指定を受け付けない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
     pub match_column: String,
     pub columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -392,6 +396,7 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
             || ![&q.database, &q.table, &q.match_column]
                 .iter()
                 .all(|s| sql_identifier(s))
+            || q.schema.as_ref().is_some_and(|s| !sql_identifier(s))
             || q.columns.is_empty()
             || q.columns.len() > 16
             || !q.columns.iter().all(|c| sql_identifier(c))
@@ -403,6 +408,15 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
         {
             return Err(invalid(
                 "DBの読取先は試験用DBと英数字・下線の識別子で指定してください",
+            ));
+        }
+        if q.schema.is_some()
+            && !containers.services.iter().any(|s| {
+                s.name == q.service && s.engine == crate::database::DatabaseEngine::Postgres
+            })
+        {
+            return Err(invalid(
+                "DBの読取先のスキーマは、DBの種類がPostgreSQLの場合だけ指定できます",
             ));
         }
     }
@@ -441,7 +455,13 @@ pub fn query(
         || test_value.to_owned(),
         |value| crate::trial::substitute(value, test_value),
     );
-    engine.rows_sql(&q.table, &q.match_column, &q.columns, &match_value)
+    engine.rows_sql(
+        q.schema.as_deref(),
+        &q.table,
+        &q.match_column,
+        &q.columns,
+        &match_value,
+    )
 }
 fn unavailable(run_id: &str, detail: &str) -> BrowserReport {
     BrowserReport {

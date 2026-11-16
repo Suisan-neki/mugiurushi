@@ -57,6 +57,38 @@ fn validates_declarative_steps_and_rejects_remote_navigation_and_sql_identifiers
     assert!(sql.contains("CONVERT(0x"));
 }
 #[test]
+fn schema_is_accepted_only_for_postgres_and_keeps_the_saved_form_without_it() {
+    let original = spec();
+    let mut mariadb = containers();
+    // 指定しない設定の保存形は変わらない。
+    assert!(
+        !serde_json::to_string(&original.database[0])
+            .unwrap()
+            .contains("schema")
+    );
+    let mut with_schema = original.clone();
+    with_schema.database[0].schema = Some("clinic".into());
+    // MariaDBでは `database` がスキーマにあたるので、指定を拒否する。
+    let error = validate(&with_schema, &mariadb).unwrap_err().to_string();
+    assert!(error.contains("PostgreSQL"), "{error}");
+    mariadb.services[1].engine = mugiurushi::database::DatabaseEngine::Postgres;
+    let postgres = mariadb;
+    validate(&with_schema, &postgres).unwrap();
+    let sql = query(
+        mugiurushi::database::DatabaseEngine::Postgres,
+        &with_schema.database[0],
+        "x",
+    );
+    assert!(sql.contains("FROM \"clinic\".\"patient\""), "{sql}");
+    with_schema.database[0].schema = Some("clinic\".\"x".into());
+    assert!(validate(&with_schema, &postgres).is_err());
+    // 保存した形から読み直せる。
+    with_schema.database[0].schema = Some("clinic".into());
+    let saved = serde_json::to_string(&with_schema).unwrap();
+    let read: BrowserSpec = serde_json::from_str(&saved).unwrap();
+    assert_eq!(read.database[0].schema.as_deref(), Some("clinic"));
+}
+#[test]
 fn response_wait_requires_a_click_and_registered_watch() {
     let mut value = serde_json::to_value(spec()).unwrap();
     value["actions"][0] = json!({"id":"send","action":"click","target":{"locator":{"by":"css","selector":"#send"}},"wait_response":"save"});
