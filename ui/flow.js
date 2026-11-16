@@ -394,7 +394,8 @@ async function step6() {
   const ref = h('input', { type: 'text', id: 'ref', placeholder: 'ブランチ名・タグ・コミット', style: 'width:280px;padding:6px;border:1px solid #8A9199' });
   const current = state.record?.results || {};
   const prev = others[others.length - 1];
-  const label = { ok: '期待どおり', ng: '不足を確認', pending: '未実行', unconfirmed: '未確認' };
+  // 別の版の試験は、結果がない場合（—）と区別して示す。このコミットを試験していない理由が、比較表でも分かるようにする。
+  const label = { ok: '期待どおり', ng: '不足を確認', pending: '未実行', unconfirmed: '未確認', other_version: '別の版の試験' };
   const rows = prev ? [...new Set([...Object.values(prev.record.results), ...Object.values(current)].map((/** @type {any} */ x) => x.requirement))].map(req => {
     const b = Object.values(prev.record.results).find((/** @type {any} */ x) => x.requirement === req);
     const a = Object.values(current).find((/** @type {any} */ x) => x.requirement === req);

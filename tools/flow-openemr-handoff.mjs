@@ -138,10 +138,13 @@ try {
   }
   // /flow の結果：ログの候補は判定条件に対応づけ済み。保存の候補はまだ対応づけていない。
   await page.goto(flowUrl(pinned)); await page.locator('[data-result]').first().waitFor();
-  const logState = await row('ログに患者の情報を出さない').getAttribute('data-result');
+  // 期待どおりだった項目は、結果の表には出ず、表の下の要約に項目名が出る。行がない場合は、要約で確かめる。
+  const logRow = row('ログに患者の情報を出さない');
+  const logState = await logRow.count() ? await logRow.getAttribute('data-result') : 'ok';
   if (live) {
     assert(['ng', 'ok', 'unconfirmed'].includes(logState), `実行後のログの候補の状態: ${logState}`);
-    liveSummary.flow_state = logState; liveSummary.flow_label = await row('ログに患者の情報を出さない').locator('[data-state-label]').innerText();
+    if (logState === 'ok') assert.match(await page.locator('main').innerText(), /試験で期待どおりだった項目：[^\n]*ログに患者の情報を出さない/);
+    liveSummary.flow_state = logState; liveSummary.flow_label = logState === 'ok' ? '期待どおり' : await logRow.locator('[data-state-label]').innerText();
   } else {
     assert.equal(logState, 'pending');
     assert.equal(await row('ログに患者の情報を出さない').locator('[data-state-label]').innerText(), '未実行');
@@ -159,6 +162,10 @@ try {
   assert.equal(await row('ログに患者の情報を出さない').getAttribute('data-result'), 'other_version');
   assert.match(await row('ログに患者の情報を出さない').locator('[data-state-label]').innerText(), new RegExp(`別の版の試験：確認項目の参照先が ${pinned.slice(0, 7)} に変わっている（照合したのは ${other.slice(0, 7)}）`));
   assert.equal(await page.locator('[data-ng-count]').count(), 0, '別の版の結果を、このコミットの不足として数えない');
+  // 6 再試験：前のコミットとの比較表でも、別の版の試験を、結果がない場合（—）と区別して示す。
+  await page.getByRole('button', { name: /6 再試験/ }).click();
+  const compare = page.locator('[data-compare-table]'); await compare.waitFor();
+  assert.match(await compare.innerText(), /ログに患者の情報を出さない\s+\S+\s+別の版の試験/);
   assert.deepEqual(errors, []);
   if (live) { await mkdir(output, { recursive: true }); await writeFile(join(output, 'flow-openemr-live.json'), JSON.stringify({ recipe: { repository, commit: pinned, path: composePath }, ...liveSummary }, null, 2)); }
   console.log(live ? JSON.stringify(liveSummary) : 'flow openemr handoff smoke: ok');
