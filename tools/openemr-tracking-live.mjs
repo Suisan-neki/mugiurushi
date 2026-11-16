@@ -69,6 +69,9 @@ const summary = {
 // 操作の待ち合わせに使っている応答の観測先（手順が参照するもの）は、操作の一部なので残す。
 if (process.argv.includes('--adopt')) {
   const adopted = structuredClone(recipe);
+  // 候補は、最初の試行の値の割り当てで作られる。手順ごとの値で作った候補は、読み出しと判定条件に手順ごとの値を持つ。
+  // 取り込んだレシピも同じ割り当てで実行しないと、入力した値と条件が一致しない。
+  if (perStep) { adopted.browser.track_values = true; adopted.browser.value_per_step = true; }
   const waited = new Set([...adopted.browser.preparation, ...adopted.browser.actions].map(s => s.wait_response).filter(Boolean));
   const kept = adopted.browser.responses.filter(w => waited.has(w.id));
   const same = w => kept.find(k => k.method === w.method && k.path === w.path);

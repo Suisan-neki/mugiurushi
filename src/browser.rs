@@ -195,6 +195,10 @@ pub struct ResponseRecord {
     /// 記録の対象にしている名前の応答ヘッダー。変更前の記録にはない。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::BTreeMap<String, String>>,
+    /// 上限で後半を切り捨てて記録した応答ヘッダーの名前。該当がなければ保存しない。
+    /// 切り捨てた部分に何があったかは分からないので、判定では「含まない」と扱わない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers_truncated: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserReport {
@@ -631,6 +635,17 @@ impl Session {
                     if let Some(headers) = &response.headers {
                         crate::screen::validate_headers(headers)?;
                     }
+                    // 切り捨てたと記録するのは、記録したヘッダーだけである。
+                    if response.headers_truncated.iter().any(|name| {
+                        !response
+                            .headers
+                            .as_ref()
+                            .is_some_and(|headers| headers.contains_key(name))
+                    }) {
+                        return Err(invalid(
+                            "切り捨てたと記録された応答ヘッダーが、記録の中にありません",
+                        ));
+                    }
                 }
                 return Ok(Some(report));
             }
@@ -897,15 +912,27 @@ pub fn evaluate(
             if responses.is_empty() || responses.iter().any(|r| r.headers.is_none()) {
                 return missing();
             }
-            let values = responses
+            // 記録した部分に条件の文字があれば「含む」。なくても、後半を切り捨てたヘッダーでは、
+            // 切り捨てた部分にないとは言えないので、判定しない。
+            let outcomes = responses
                 .iter()
                 .map(|r| {
-                    r.headers
+                    let found = r
+                        .headers
                         .as_ref()
                         .and_then(|h| h.get(name))
-                        .is_some_and(|value| value.contains(part))
+                        .is_some_and(|value| value.contains(part));
+                    (found || !r.headers_truncated.iter().any(|n| n == name)).then_some(found)
                 })
                 .collect::<Vec<_>>();
+            let Some(values) = outcomes.into_iter().collect::<Option<Vec<bool>>>() else {
+                return (
+                    Observed::NotObserved,
+                    format!(
+                        "観測 {target} の応答のヘッダー {name} は、上限で後半を切り捨てて記録した。切り捨てた部分に条件の文字があるかを判定できない"
+                    ),
+                );
+            };
             if values.iter().any(|v| *v != values[0]) {
                 return (
                     Observed::NotObserved,
