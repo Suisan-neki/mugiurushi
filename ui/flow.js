@@ -93,6 +93,25 @@ async function step1() {
   const inv = (state.source.inventory || []).filter((/** @type {any} */ f) => f.path);
   const chosen = new Set(state.record?.files || inv.filter((/** @type {any} */ f) => CODE.test(f.path) && !/(^|\/)(tests?|docs?|node_modules|vendor|dist|build)\//.test(f.path)).slice(0, 20).map((/** @type {any} */ f) => f.path));
   const count = h('span', {});
+  // 大きなリポジトリでは一覧が長いので、パスの一部で絞り込む。選んだファイルは絞り込みに関係なく先頭に出す。
+  const LIMIT = 400;
+  const tbody = h('tbody', {});
+  const shown = h('span', { class: 'note', 'data-files-shown': '' });
+  const filter = h('input', { type: 'search', id: 'file-filter', placeholder: '例：interface/forms/soap', style: 'width:320px;padding:6px;border:1px solid #8A9199' });
+  const rowOf = (/** @type {any} */ f) => {
+    const box = h('input', { type: 'checkbox', checked: chosen.has(f.path), 'aria-label': `${f.path}を読む` });
+    box.addEventListener('change', () => { /** @type {HTMLInputElement} */ (box).checked ? chosen.add(f.path) : chosen.delete(f.path); update(); });
+    return h('tr', {}, h('td', { style: 'text-align:center' }, box), h('td', { class: 'code' }, f.path), h('td', { style: 'text-align:right' }, f.size ?? ''));
+  };
+  const list = () => {
+    const q = /** @type {HTMLInputElement} */ (filter).value.trim().toLowerCase();
+    const picked = inv.filter((/** @type {any} */ f) => chosen.has(f.path));
+    const matched = inv.filter((/** @type {any} */ f) => !chosen.has(f.path) && (!q || f.path.toLowerCase().includes(q)));
+    fill(tbody, [...picked, ...matched.slice(0, LIMIT)].map(rowOf));
+    shown.textContent = `全${inv.length}件中、選んだ${picked.length}件と、${q ? `「${q}」を含む` : ''}${Math.min(matched.length, LIMIT)}件を表示${matched.length > LIMIT ? `（残り${matched.length - LIMIT}件は絞り込んでください）` : ''}`;
+  };
+  filter.addEventListener('input', list);
+  list();
   const update = () => { count.textContent = `読むファイル ${chosen.size}件（上限40件）`; };
   update();
   const name = h('input', { type: 'text', value: person(), style: 'width:240px;padding:6px;border:1px solid #8A9199', id: 'person-name' });
@@ -107,13 +126,10 @@ async function step1() {
   fill($('main'), h('div', { class: 'cols' },
     h('section', { class: 'main' }, h('h2', {}, '照合に使うコード'),
       h('p', {}, `コミット ${short(state.source.commit)} から読むファイルを選びます。読んだコードは照合のためにAIエージェントへ送ります。送る前に内容を表示します。`),
+      h('label', { for: 'file-filter', style: 'font-weight:700' }, 'ファイルの絞り込み（パスの一部）'), ' ', filter, ' ', shown,
       h('div', { class: 'scroll' }, h('table', { 'data-files': '' },
         h('thead', {}, h('tr', {}, h('th', { scope: 'col', style: 'width:48px;text-align:center' }, '読む'), h('th', { scope: 'col' }, 'ファイル'), h('th', { scope: 'col', style: 'width:100px;text-align:right' }, 'バイト'))),
-        h('tbody', {}, inv.slice(0, 400).map((/** @type {any} */ f) => {
-          const box = h('input', { type: 'checkbox', checked: chosen.has(f.path), 'aria-label': `${f.path}を読む` });
-          box.addEventListener('change', () => { /** @type {HTMLInputElement} */ (box).checked ? chosen.add(f.path) : chosen.delete(f.path); update(); });
-          return h('tr', {}, h('td', { style: 'text-align:center' }, box), h('td', { class: 'code' }, f.path), h('td', { style: 'text-align:right' }, f.size ?? ''));
-        })))),
+        tbody)),
       h('p', { class: 'note' }, count)),
     h('section', { class: 'side' }, h('h2', {}, '記録者'), h('label', { for: 'person-name' }, '名前（記録に残します。本人確認はしません）'), h('div', {}, name),
       h('h2', { style: 'margin-top:16px' }, 'システムの説明（任意）'),

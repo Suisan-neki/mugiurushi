@@ -87,6 +87,11 @@ try {
   // 1 照合の準備：コードのファイルを選び、テストのファイルは既定で外す。
   const files = page.locator('[data-files]'); await files.waitFor();
   assert.deepEqual(await files.locator('tbody tr').evaluateAll(rows => rows.filter(r => r.querySelector('input').checked).map(r => r.children[1].textContent)), ['app/auth.py']);
+  // 絞り込み：パスの一部で一覧を絞る。選んだファイルは絞り込みに関係なく出す。
+  await page.locator('#file-filter').fill('readme');
+  assert.deepEqual(await files.locator('tbody tr').evaluateAll(rows => rows.map(r => [r.children[1].textContent, r.querySelector('input').checked])), [['app/auth.py', true], ['README.md', false]]);
+  assert.match(await page.locator('[data-files-shown]').innerText(), /全3件中、選んだ1件と、「readme」を含む1件を表示/);
+  await page.locator('#file-filter').fill('');
   await page.locator('#desc').fill('合成の診療所のタスク管理');
   // 画面の構造を記録した試験がない事例では、選択欄を出さず、画面の記録の項目を送らない。
   assert.match(await page.locator('main').innerText(), /画面の構造を記録した試験がありません/);
