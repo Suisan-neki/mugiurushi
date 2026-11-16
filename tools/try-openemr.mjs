@@ -78,6 +78,11 @@ if (fromGit) {
   console.log(`読取記録を git から作りました: ${snapshotMethod}`);
 }
 const children = [];
+// 端末で Ctrl+C を押すと、SIGINT は同じプロセスグループの子にも届く。子が先に終わると、終了時に要約を取得できない。
+// 子は別のプロセスグループで起動し、要約を書いた後で、このスクリプトがグループごと止める。
+const stopChildren = () => { for (const c of children) { try { process.kill(-c.pid, 'SIGTERM'); } catch { /* すでに終わっている */ } } };
+// 想定していない経路でこのスクリプトが終わる場合も、別のグループにした子を残さない。
+process.on('exit', stopChildren);
 const started = (child, pattern, label) => new Promise((ok, no) => {
   let out = '', err = ''; const timer = setTimeout(() => no(Error(`${label} の起動待ちが上限に達した: ${err.slice(-1500)}`)), 120000);
   const look = () => { const m = pattern.exec(out + err); if (m) { clearTimeout(timer); ok(m[1]); } };
@@ -87,13 +92,13 @@ const started = (child, pattern, label) => new Promise((ok, no) => {
 const token = randomBytes(24).toString('hex'), tokenFile = join(output, '.agent-token');
 await writeFile(tokenFile, token, { mode: 0o600 });
 const port = await new Promise(ok => { const s = createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => ok(p)); }); });
-const agent = spawn('uv', ['run', '--directory', agentDir, 'mugiurushi-ai', 'serve', '--port', String(port)], { env: { ...process.env, MUGIURUSHI_AI_TOKEN: token }, stdio: ['ignore', 'pipe', 'pipe'] });
+const agent = spawn('uv', ['run', '--directory', agentDir, 'mugiurushi-ai', 'serve', '--port', String(port)], { env: { ...process.env, MUGIURUSHI_AI_TOKEN: token }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 children.push(agent);
 let url, reviewToken, stopping = false;
 const stop = async code => {
   if (stopping) return; stopping = true;
   try { if (url && reviewToken) await collect(); } catch (e) { console.error(`記録の書き出しに失敗しました: ${e.message}`); code = code || 1; }
-  for (const c of children) c.kill('SIGTERM');
+  stopChildren();
   process.exit(code);
 };
 process.on('SIGINT', () => stop(0)); process.on('SIGTERM', () => stop(0));
@@ -126,7 +131,7 @@ try {
   const agentUrl = await started(agent, /Uvicorn running on (http:\/\/127\.0\.0\.1:\d+)/, 'mugiurushi-ai');
   const appEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(OPENAI_|MUGIURUSHI_AI_)/.test(k)));
   // 同梱の試験の一覧は、EEL_RECIPE_DIR で指定したディレクトリから読む。指定しないと、設定画面に同梱のOpenEMR試験が出ない。
-  const app = spawn(binary, ['app', data, '--port', String(appPort)], { env: { ...appEnv, EEL_AGENT_URL: agentUrl, EEL_AGENT_TOKEN_FILE: tokenFile, EEL_RECIPE_DIR: join(root, 'examples') }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const app = spawn(binary, ['app', data, '--port', String(appPort)], { env: { ...appEnv, EEL_AGENT_URL: agentUrl, EEL_AGENT_TOKEN_FILE: tokenFile, EEL_RECIPE_DIR: join(root, 'examples') }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   children.push(app);
   url = await started(app, /理解と試験の画面: (http:\/\/127\.0\.0\.1:\d+)/, 'mugiurushi');
   reviewToken = /name="review-token" content="([^"]+)"/.exec(await (await fetch(url + '/flow')).text())?.[1];
