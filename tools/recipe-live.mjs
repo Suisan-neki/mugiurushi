@@ -93,7 +93,7 @@ const summary = {
 };
 if (phase?.value_trace) {
   const draft = cli(['case', 'draft', caseDir, '--evidence', evidence.id]);
-  summary.draft = {rules: draft.rules, database: draft.database.map(p => `${p.database}.${p.table}.${p.match_column} = ${p.match_value}`), responses: draft.responses.map(w => `${w.method} ${w.path}`), checks: draft.checks.map(c => `${c.id}: ${c.method} ${c.expect} ${c.text}`), skipped: draft.skipped};
+  summary.draft = {rules: draft.rules, database: draft.database.map(p => `${p.database}.${p.schema ? p.schema + '.' : ''}${p.table}.${p.match_column} = ${p.match_value}`), responses: draft.responses.map(w => `${w.method} ${w.path}`), checks: draft.checks.map(c => `${c.id}: ${c.method} ${c.expect} ${c.text}`), skipped: draft.skipped};
   fs.writeFileSync(path.join(output, 'draft.json'), JSON.stringify(draft, null, 1));
 }
 fs.writeFileSync(path.join(output, 'summary.json'), JSON.stringify(summary, null, 1));

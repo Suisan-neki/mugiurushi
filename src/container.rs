@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{self, Read, Write},
-    net::{Ipv4Addr, Shutdown, TcpStream},
+    net::{Ipv4Addr, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -80,6 +80,10 @@ pub struct Service {
     /// DBの役割のコンテナの種類。指定のない設定はMariaDBとして読み、保存するときも省く。
     #[serde(default, skip_serializing_if = "DatabaseEngine::is_default")]
     pub engine: DatabaseEngine,
+    /// 名前を挙げたコンテナの準備ができてから、このコンテナを起動する。
+    /// 指定のないコンテナは、役割の順（DB、その他、アプリ）と一覧の順で起動する。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub start_after: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,6 +412,36 @@ pub fn image_digest(image: &str) -> Option<&str> {
     .then_some(rest)
 }
 
+/// コンテナを起動する順番。役割の順（DB、その他、アプリ）と一覧の順を基本にし、
+/// `start_after` に挙げたコンテナより後になるように遅らせる。順番を決められない指定は拒否する。
+fn start_order(services: &[Service]) -> io::Result<Vec<&Service>> {
+    let mut waiting: Vec<&Service> = services.iter().collect();
+    waiting.sort_by_key(|s| match s.role {
+        ServiceRole::Database => 0,
+        ServiceRole::Other => 1,
+        ServiceRole::App => 2,
+    });
+    let mut ordered: Vec<&Service> = Vec::with_capacity(waiting.len());
+    while !waiting.is_empty() {
+        let Some(next) = waiting.iter().position(|s| {
+            s.start_after
+                .iter()
+                .all(|name| ordered.iter().any(|started| &started.name == name))
+        }) else {
+            return Err(invalid(format!(
+                "コンテナの起動の順番を決められません。start_after が互いを待っています: {}",
+                waiting
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )));
+        };
+        ordered.push(waiting.remove(next));
+    }
+    Ok(ordered)
+}
+
 fn token(value: &str, what: &str, max: usize) -> io::Result<()> {
     if value.is_empty()
         || value.len() > max
@@ -479,6 +513,18 @@ pub fn validate_spec(spec: &ContainerSpec) -> io::Result<()> {
                 return Err(invalid("環境変数の名前と値を確認してください"));
             }
         }
+        let mut waits = std::collections::BTreeSet::new();
+        for name in &service.start_after {
+            if name == &service.name
+                || !waits.insert(name.as_str())
+                || !spec.services.iter().any(|s| &s.name == name)
+            {
+                return Err(invalid(format!(
+                    "コンテナ {} の start_after は、ほかのコンテナの名前を重複なく指定してください",
+                    service.name
+                )));
+            }
+        }
         for volume in &service.volumes {
             token(&volume.name, "ボリュームの名前", 32)?;
             if volume.path.is_empty()
@@ -539,6 +585,7 @@ pub fn validate_spec(spec: &ContainerSpec) -> io::Result<()> {
             ));
         }
     }
+    start_order(&spec.services)?;
     Ok(())
 }
 
@@ -844,13 +891,7 @@ impl Session {
                 }
             }
         }
-        let mut ordered: Vec<&Service> = spec.services.iter().collect();
-        ordered.sort_by_key(|s| match s.role {
-            ServiceRole::Database => 0,
-            ServiceRole::Other => 1,
-            ServiceRole::App => 2,
-        });
-        for service in ordered {
+        for service in start_order(&spec.services)? {
             match session.run(service) {
                 Ok(()) => {
                     if session.services.last().is_some_and(|s| !s.ready) {
@@ -1658,6 +1699,10 @@ impl Session {
         if ![&probe.database, &probe.table, &probe.match_column]
             .iter()
             .all(|s| crate::browser::sql_identifier(s))
+            || probe
+                .schema
+                .as_ref()
+                .is_some_and(|s| !crate::browser::sql_identifier(s))
             || probe.columns.is_empty()
             || !probe
                 .columns
@@ -2154,7 +2199,8 @@ fn http_request(
     if !payload.is_empty() {
         stream.write_all(payload)?;
     }
-    let _ = stream.shutdown(Shutdown::Write);
+    // 送信側は閉じない。要求の終わりは Content-Length で分かる。応答を読む前に送信側を閉じると、
+    // 要求を別のサーバーへ転送するnginxは、利用者が中断したとみなして転送をやめる（状態499）。
     let mut buf = Vec::new();
     stream.take(MAX_BODY as u64 + 8192).read_to_end(&mut buf)?;
     parse_http(&url, method, false, &buf)
@@ -2467,6 +2513,7 @@ mod tests {
                 env: BTreeMap::new(),
                 volumes: vec![],
                 web_build: None,
+                start_after: vec![],
                 engine: DatabaseEngine::default(),
                 command: vec![],
                 ready: ReadyCheck::Tcp,
@@ -2494,6 +2541,87 @@ mod tests {
         );
         spec.egress = Egress::Allowed;
         assert!(validate_spec(&spec).is_ok());
+    }
+
+    fn named(names: &[(&str, &str, &[&str])]) -> ContainerSpec {
+        let services: Vec<serde_json::Value> = names
+            .iter()
+            .map(|(name, role, after)| {
+                serde_json::json!({
+                    "name": name,
+                    "image": "nginx:1.27.4-alpine@sha256:4ff102c5d78d254a6f0da062b3cf39eaf07f01eec0927fd21e219d0af8bc0591",
+                    "role": role, "expose": 80, "ready": "tcp", "ready_timeout_ms": 5000,
+                    "start_after": after,
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({ "services": services })).unwrap()
+    }
+
+    fn order(spec: &ContainerSpec) -> Vec<&str> {
+        start_order(&spec.services)
+            .unwrap()
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn start_order_follows_roles_unless_a_service_waits_for_another() {
+        // 指定がなければ、役割の順（DB、その他、アプリ）と一覧の順で起動する。
+        let plain = named(&[
+            ("web", "app", &[]),
+            ("gateway", "other", &[]),
+            ("db", "database", &[]),
+            ("cache", "other", &[]),
+        ]);
+        validate_spec(&plain).unwrap();
+        assert_eq!(order(&plain), ["db", "gateway", "cache", "web"]);
+        // 指定のない設定の保存形は変わらない。
+        assert!(
+            !serde_json::to_string(&plain)
+                .unwrap()
+                .contains("start_after")
+        );
+        // 入口（その他）は、アプリの準備ができてから起動する。ほかの順番は変わらない。
+        let waits = named(&[
+            ("web", "app", &[]),
+            ("gateway", "other", &["web"]),
+            ("db", "database", &[]),
+            ("cache", "other", &[]),
+        ]);
+        validate_spec(&waits).unwrap();
+        assert_eq!(order(&waits), ["db", "cache", "web", "gateway"]);
+        // 待つ相手がさらに別のコンテナを待つ場合も、順に起動する。
+        let chained = named(&[
+            ("db", "database", &["seed"]),
+            ("seed", "other", &["certs"]),
+            ("certs", "app", &[]),
+        ]);
+        validate_spec(&chained).unwrap();
+        assert_eq!(order(&chained), ["certs", "seed", "db"]);
+    }
+
+    #[test]
+    fn start_after_rejects_unknown_names_itself_duplicates_and_cycles() {
+        for (spec, expected) in [
+            (
+                named(&[("web", "app", &["missing"])]),
+                "ほかのコンテナの名前",
+            ),
+            (named(&[("web", "app", &["web"])]), "ほかのコンテナの名前"),
+            (
+                named(&[("web", "app", &["db", "db"]), ("db", "database", &[])]),
+                "ほかのコンテナの名前",
+            ),
+            (
+                named(&[("web", "app", &["gateway"]), ("gateway", "other", &["web"])]),
+                "互いを待っています",
+            ),
+        ] {
+            let error = validate_spec(&spec).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]
@@ -2525,6 +2653,7 @@ mod tests {
                 env: BTreeMap::new(),
                 volumes: vec![],
             web_build: None,
+            start_after: vec![],
             engine: DatabaseEngine::default(),
                 command: vec![],
                 ready: ReadyCheck::Http { path: "/".into(), tls: false },

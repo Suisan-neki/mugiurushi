@@ -356,9 +356,10 @@ impl DatabaseEngine {
         }
     }
 
-    /// 指定した列が値と等しい行を、最大100行読むSQL。
+    /// 指定した列が値と等しい行を、最大100行読むSQL。`schema` を指定すると、表をスキーマの名前つきで指す。
     pub fn rows_sql(
         self,
+        schema: Option<&str>,
         table: &str,
         match_column: &str,
         columns: &[String],
@@ -374,9 +375,12 @@ impl DatabaseEngine {
             Self::Postgres => format!("{}::text", self.quote(match_column)),
             Self::Mariadb | Self::Other => self.quote(match_column),
         };
+        let table = match schema {
+            Some(schema) => format!("{}.{}", self.quote(schema), self.quote(table)),
+            None => self.quote(table),
+        };
         format!(
-            "SELECT {columns} FROM {} WHERE {column} = {} LIMIT 100",
-            self.quote(table),
+            "SELECT {columns} FROM {table} WHERE {column} = {} LIMIT 100",
             self.literal(value.as_bytes())
         )
     }
@@ -430,7 +434,7 @@ mod tests {
             ["MYSQL_PWD=other"]
         );
         assert_eq!(
-            DatabaseEngine::Mariadb.rows_sql("t", "m", &["a".into(), "b".into()], "é'"),
+            DatabaseEngine::Mariadb.rows_sql(None, "t", "m", &["a".into(), "b".into()], "é'"),
             "SELECT `a`,`b` FROM `t` WHERE `m` = CONVERT(0xc3a927 USING utf8mb4) LIMIT 100"
         );
     }
@@ -459,8 +463,13 @@ mod tests {
         assert!(defaults.argv.contains(&"--dbname=postgres".to_owned()));
         // 値は引用符を含んでも16進で渡り、SQLの文字列として解釈されない。
         assert_eq!(
-            DatabaseEngine::Postgres.rows_sql("t", "m", &["a".into()], "x'; DROP TABLE t;--"),
+            DatabaseEngine::Postgres.rows_sql(None, "t", "m", &["a".into()], "x'; DROP TABLE t;--"),
             "SELECT \"a\" FROM \"t\" WHERE \"m\"::text = convert_from(decode('78273b2044524f50205441424c4520743b2d2d','hex'),'UTF8') LIMIT 100"
+        );
+        // スキーマを指定すると、表をスキーマの名前つきで指す。指定しない場合のSQLは変わらない。
+        assert_eq!(
+            DatabaseEngine::Postgres.rows_sql(Some("clinic"), "t", "m", &["a".into()], "x"),
+            "SELECT \"a\" FROM \"clinic\".\"t\" WHERE \"m\"::text = convert_from(decode('78','hex'),'UTF8') LIMIT 100"
         );
     }
 

@@ -994,7 +994,7 @@ pub fn trace(
 
 /// 候補を作る規則の版。規則を変えたら上げる。以前の版の候補を新しい版の結果として扱わない。
 /// 版2：操作の前から値と等しい行があった場所と、操作の前に調べていない場所からは、DBの候補を作らない。
-pub const RULES: u32 = 2;
+pub const RULES: u32 = 3;
 const MAX_GENERATED: usize = 16;
 
 /// 観測から作った項目の出所。
@@ -1148,15 +1148,14 @@ pub fn draft(
                 ));
                 continue;
             }
-            let database = match scan.engine {
-                DatabaseEngine::Postgres if hit.schema != "public" => {
-                    out.skipped.push(format!(
-                        "{place}: public以外のスキーマの表は、読み出しの設定で指定できない"
-                    ));
-                    continue;
-                }
-                DatabaseEngine::Postgres => scan.database.clone(),
-                _ => hit.schema.clone(),
+            // PostgreSQLでは、接続するデータベースと表のあるスキーマが別である。
+            // public の表は、変更前の候補と同じく、スキーマを書かない。
+            let (database, schema) = match scan.engine {
+                DatabaseEngine::Postgres => (
+                    scan.database.clone(),
+                    (hit.schema != "public").then(|| hit.schema.clone()),
+                ),
+                _ => (hit.schema.clone(), None),
             };
             if out.database.len() >= MAX_GENERATED {
                 out.skipped.push(format!(
@@ -1170,6 +1169,7 @@ pub fn draft(
                 service: scan.service.clone(),
                 database,
                 table: hit.table.clone(),
+                schema,
                 match_column: hit.column.clone(),
                 columns: vec![hit.column.clone()],
                 match_value: Some(value.template.clone()),
@@ -1834,7 +1834,7 @@ mod tests {
             .map(|p| (p.table.as_str(), p.match_column.as_str()))
             .collect();
         assert_eq!(places, [("note", "body"), ("audit", "text")]);
-        assert_eq!(made.rules, 2);
+        assert_eq!(made.rules, RULES);
         // 前後で変化がなければ、候補も、候補にしない理由もない。
         let same = scanned(vec![at("note", 1, 1)]);
         let (made, traced) = draft_of(Some(&same), &same);
@@ -2126,13 +2126,14 @@ mod tests {
             None,
             &[],
         );
+        // public以外のスキーマの表は、スキーマの名前つきで候補にする。
         let other_schema = draft("run-1", &traced, Some(&after), &[]);
-        assert!(other_schema.database.is_empty());
+        assert_eq!(other_schema.database.len(), 1);
+        assert_eq!(other_schema.database[0].schema.as_deref(), Some("clinic"));
         assert!(
-            other_schema
-                .skipped
-                .iter()
-                .any(|s| s.contains("public以外"))
+            other_schema.skipped.is_empty(),
+            "{:?}",
+            other_schema.skipped
         );
         after.hits[0].schema = "public".into();
         let traced = trace(
@@ -2144,6 +2145,7 @@ mod tests {
         );
         let public = draft("run-1", &traced, Some(&after), &[]);
         assert_eq!(public.database[0].database, "records");
+        assert_eq!(public.database[0].schema, None);
     }
 
     fn browser_spec(extra: serde_json::Value) -> crate::browser::BrowserSpec {

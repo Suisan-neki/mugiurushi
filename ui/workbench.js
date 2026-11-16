@@ -917,7 +917,7 @@ function trialFormView(check, form, plan, exec) {
         field({ label: '依存先', control: dependencies, support: '1行に1つ、「所有者/リポジトリ 40桁のコミット 読み込み先（任意）」。例: pydicom/pydicom 20aa4b73aef76bffb6fbc46a8827588dfa9bb89d src' }))),
     h('fieldset', {}, h('legend', {}, '試験専用のコンテナ（任意）'),
       h('p', { class: 'note' }, 'イメージはタグだけではなく @sha256: と64桁のダイジェストを付けます。試行ごとに新しいコンテナ・ネットワーク・ボリュームを作り、待ち受けは 127.0.0.1 だけに公開し、終わったら消します。Dockerが使えないときはほかの方式へ切り替えません。対象リポジトリの compose をそのまま実行はしません。'),
-      field({ label: 'コンテナ（JSONの配列）', control: containers, support: '各要素は name, image, role（app / database / other）, expose, ready（tcp または {"http":{"path":"/","tls":false}}）, ready_timeout_ms。任意で env, volumes, command。例のポートは {{port:名前}} で引数に使えます。' }),
+      field({ label: 'コンテナ（JSONの配列）', control: containers, support: '各要素は name, image, role（app / database / other）, expose, ready（tcp または {"http":{"path":"/","tls":false}}）, ready_timeout_ms。任意で env, volumes, command, start_after（先に準備を待つコンテナの名前の配列）。例のポートは {{port:名前}} で引数に使えます。' }),
       h('div', { class: 'inline-fields' }, field({ label: 'HTTPの操作先', control: httpService }), field({ label: 'HTTPの方法', control: httpMethod }), field({ label: 'HTTPのパス', control: httpPath })),
       h('div', { class: 'inline-fields' }, field({ label: 'HTTPの本文ファイル', control: httpBody, support: '固定コミットの中の相対パス。空なら本文なし。' }), field({ label: 'Content-Type', control: httpType }))),
     h('fieldset', {}, h('legend', {}, '先に起動するプロセス（任意）'),
@@ -1195,7 +1195,7 @@ function databaseTargets(probes = []) {
     h('h4', {}, '試験で読み取るDB'),
     h('p', { class: 'note' }, '試験設定で指定した読み取り先です。これだけでは、意図した保存先かどうかや、書き込み先を確認したことにはなりません。'),
     observationTable('DBの読み取り設定', ['観測ID', 'サービス', 'DB', 'テーブル', '照合する列', '読み取る列'],
-      probes.map(p => [p.id, p.service, p.database, p.table, p.match_column, (p.columns || []).join('、')])));
+      probes.map(p => [p.id, p.service, p.database, p.schema ? `${p.schema}.${p.table}` : p.table, p.match_column, (p.columns || []).join('、')])));
 }
 function browserEvidence(trace) {
   const browser = trace?.recipe?.browser;
@@ -1221,7 +1221,7 @@ function browserEvidence(trace) {
       return [w.id, `${w.method} ${w.path}`, found.length ? found.map(r => `HTTP ${r.status}${r.request_step ? `（操作 ${r.request_step}）` : ''}`).join('、') : '記録なし'];
     })) : h('p', {}, 'HTTP応答の観測は指定されていません。'),
     probes.length ? observationTable('指定したDBからの読み取り', ['観測ID', '指定した読み取り先', '操作前', '操作後'], probes.map(p => [p.id,
-      `${p.service} / ${p.database} / ${p.table}（照合: ${p.match_column}、列: ${(p.columns || []).join('、')}）`,
+      `${p.service} / ${p.database} / ${p.schema ? `${p.schema}.${p.table}` : p.table}（照合: ${p.match_column}、列: ${(p.columns || []).join('、')}）`,
       p.before_actions || before.some(r => r.id === p.id) ? readDetail(before.find(r => r.id === p.id)) : '指定なし', readDetail(reads.find(r => r.id === p.id))]))
       : h('p', {}, 'DBの読み取りは指定されていません。'),
     h('p', { 'data-screen-record': '' }, h('strong', {}, '画面の構造の記録: '),

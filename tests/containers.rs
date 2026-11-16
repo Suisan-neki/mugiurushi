@@ -65,6 +65,7 @@ fn nginx(name: &str, role: ServiceRole) -> Service {
         env: Default::default(),
         volumes: vec![],
         web_build: None,
+        start_after: vec![],
         engine: Default::default(),
         command: vec![],
         ready: ReadyCheck::Http {
@@ -618,6 +619,7 @@ fn orthanc_stores_the_sample_dicom() {
             env,
             volumes: vec![],
             web_build: None,
+            start_after: vec![],
             engine: Default::default(),
             command: vec![],
             ready: ReadyCheck::Http {
@@ -706,6 +708,7 @@ fn openemr_becomes_ready_with_pinned_images() {
                     path: "/var/lib/mysql".into(),
                 }],
                 web_build: None,
+                start_after: vec![],
                 engine: Default::default(),
                 command: vec!["mariadbd".into(), "--character-set-server=utf8mb4".into()],
                 ready: ReadyCheck::Exec {
@@ -726,6 +729,7 @@ fn openemr_becomes_ready_with_pinned_images() {
                 env: app_env,
                 volumes: vec![],
                 web_build: None,
+                start_after: vec![],
                 engine: Default::default(),
                 command: vec![],
                 ready: ReadyCheck::Http {
@@ -1164,6 +1168,7 @@ fn postgres(engine: mugiurushi::database::DatabaseEngine) -> ContainerSpec {
             env,
             volumes: vec![],
             web_build: None,
+            start_after: vec![],
             engine,
             command: vec![],
             // このイメージは、初期化の間だけUNIXソケットで待ち受けるサーバーを動かし、止めてから本番のサーバーを起動する。
@@ -1224,6 +1229,7 @@ fn visit_probe(
         service: "db".into(),
         database: "records".into(),
         table: "visit".into(),
+        schema: None,
         match_column: match_column.into(),
         columns: vec!["reason".into(), "patient".into(), "note".into()],
         match_value: match_value.map(String::from),
@@ -1264,6 +1270,26 @@ fn postgres_rows_are_read_when_the_engine_is_declared() {
     let by_number = session.read_database(&visit_probe("patient", Some("7")), value);
     assert_eq!(by_number.exit_code, Some(0), "{}", by_number.detail);
     assert!(by_number.text.starts_with(value));
+    // public以外のスキーマの表は、スキーマを指定すると読める。指定しないと読取の失敗で、0行とは区別される。
+    // スキーマの名前は、接続する利用者（clinic）と別にする。同じ名前のスキーマは、指定しなくても探す順に入る。
+    psql(
+        &container,
+        "CREATE SCHEMA ward; CREATE TABLE ward.encounter (reason text, patient integer, note text)",
+    );
+    psql(
+        &container,
+        &format!("INSERT INTO ward.encounter (reason, patient) VALUES ($eel${value}$eel$, 9)"),
+    );
+    let mut other_schema = visit_probe("reason", None);
+    other_schema.table = "encounter".into();
+    let unqualified = session.read_database(&other_schema, value);
+    assert!(unqualified.performed);
+    assert_ne!(unqualified.exit_code, Some(0));
+    assert!(unqualified.text.is_empty());
+    other_schema.schema = Some("ward".into());
+    let qualified = session.read_database(&other_schema, value);
+    assert_eq!(qualified.exit_code, Some(0), "{}", qualified.detail);
+    assert_eq!(qualified.text, format!("{value}\t9\tNULL\n"));
     // 存在しない表は読取の失敗で、0行とは区別される。
     let mut missing_table = visit_probe("reason", None);
     missing_table.table = "no_such_table".into();
@@ -1437,6 +1463,7 @@ fn mariadb_scan_finds_where_a_value_went_without_being_told_the_schema() {
             env,
             volumes: vec![],
             web_build: None,
+            start_after: vec![],
             engine: Default::default(),
             command: vec![],
             ready: ReadyCheck::Exec {
@@ -1526,6 +1553,7 @@ fn mariadb_alone() -> ContainerSpec {
             env,
             volumes: vec![],
             web_build: None,
+            start_after: vec![],
             engine: Default::default(),
             command: vec![],
             ready: ReadyCheck::Exec {
@@ -1793,6 +1821,7 @@ fn mariadb_with_relay(cut: Option<mugiurushi::relay::CutPoint>) -> ContainerSpec
             env,
             volumes: vec![],
             web_build: None,
+            start_after: vec![],
             engine: Default::default(),
             command: vec![],
             ready: ReadyCheck::Exec {
@@ -2169,4 +2198,59 @@ fn a_service_that_never_becomes_ready_leaves_its_last_log_lines() {
             assert!(!service.log_excerpt.contains("EEL-EARLY"), "{name}");
         }
     }
+}
+
+#[test]
+#[ignore = "Dockerと固定イメージを使うため、手動・週次の統合試験で実行"]
+fn a_service_starts_after_the_one_it_waits_for() {
+    if !docker_available() {
+        return;
+    }
+    // 入口のnginxは、起動するときに転送先の名前を解決する。転送先のコンテナがまだなければ、起動に失敗して終了する。
+    let gateway = |start_after: &[&str]| {
+        let mut service = nginx("gateway", ServiceRole::Other);
+        service.command = vec![
+            "sh".into(),
+            "-c".into(),
+            "printf '%s' 'events{} http{server{listen 80; location / {proxy_pass http://web;}}}' > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"
+                .into(),
+        ];
+        service.start_after = start_after.iter().map(|s| (*s).to_owned()).collect();
+        service
+    };
+    let spec = |start_after: &[&str]| ContainerSpec {
+        services: vec![gateway(start_after), nginx("web", ServiceRole::App)],
+        egress: Egress::Blocked,
+        relay: None,
+    };
+    // 指定がなければ、役割の順で入口が先に起動し、準備の前に終了する。アプリは起動しない。
+    let mut early = Session::start("order-early", &spec(&[])).unwrap();
+    let phase = early.snapshot();
+    early.cleanup().unwrap();
+    assert_eq!(phase.services.len(), 1);
+    assert_eq!(phase.services[0].name, "gateway");
+    assert!(!phase.services[0].ready);
+    assert!(
+        phase.services[0]
+            .detail
+            .contains("host not found in upstream"),
+        "{}",
+        phase.services[0].detail
+    );
+    // アプリを待つ指定があれば、アプリの準備の後に入口が起動し、両方とも準備できる。
+    let mut ordered = Session::start("order-after", &spec(&["web"])).unwrap();
+    let ready = ordered.all_ready();
+    let phase = ordered.snapshot();
+    ordered.cleanup().unwrap();
+    assert!(
+        ready,
+        "{:?}",
+        phase
+            .services
+            .iter()
+            .map(|s| (&s.name, &s.detail))
+            .collect::<Vec<_>>()
+    );
+    let names: Vec<&str> = phase.services.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["web", "gateway"]);
 }
