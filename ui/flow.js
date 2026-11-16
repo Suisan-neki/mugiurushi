@@ -130,7 +130,8 @@ async function step1() {
       h('div', { class: 'scroll' }, h('table', { 'data-files': '' },
         h('thead', {}, h('tr', {}, h('th', { scope: 'col', style: 'width:48px;text-align:center' }, '読む'), h('th', { scope: 'col' }, 'ファイル'), h('th', { scope: 'col', style: 'width:100px;text-align:right' }, 'バイト'))),
         tbody)),
-      h('p', { class: 'note' }, count)),
+      h('p', { class: 'note' }, count),
+      investigationView(() => /** @type {HTMLTextAreaElement} */ (desc).value.trim())),
     h('section', { class: 'side' }, h('h2', {}, '記録者'), h('label', { for: 'person-name' }, '名前（記録に残します。本人確認はしません）'), h('div', {}, name),
       h('h2', { style: 'margin-top:16px' }, 'システムの説明（任意）'),
       h('p', {}, 'コードから分からないこと（使う人、扱う情報、提供の形）を書くと、照合が具体的になります。'), h('label', { for: 'desc' }, '説明'), desc,
@@ -147,6 +148,90 @@ async function step1() {
           applyScan(state.record, r, answers, at); await saveRecord(); go(2);
         });
       }, 'primary')), out)));
+}
+// ---------- コードをたどって懸念を出す（#230）----------
+// 対象の操作を出発点に、AIエージェントが求めた検索と読み取りに麦漆が固定したコミットから答える往復を回す。
+// 送る中身は往復の前に決まらないので、最初に一度、麦漆が組み立てた範囲を確かめて了承する。
+const BASIS = { repository: 'このリポジトリのコードと設定', external_default: 'リポジトリの外にある製品の既定の動き（このコードからは確かめていない）' };
+const CHECK_BY = { read: 'コードをさらに読む', ask: '人に聞く', run: '麦漆で動かして確かめる' };
+const STOPPED = { concluded: 'AIエージェントが結論を返した', rounds: '往復の上限に達した（AIエージェントは結論を返していない）' };
+function lineUrl(/** @type {string} */ path, /** @type {number} */ start, /** @type {number} */ end) {
+  const s = state.source;
+  return `https://github.com/${s.repository}/blob/${s.commit}/${path.split('/').map(encodeURIComponent).join('/')}#L${start}-L${end}`;
+}
+function investigationView(/** @type {() => string} */ summary) {
+  const saved = state.record?.investigation;
+  const operation = h('textarea', { rows: 2, id: 'operation', placeholder: '例：患者の新規登録（国民識別番号・氏名・性別・年齢を入力して保存する）' });
+  /** @type {HTMLTextAreaElement} */ (operation).value = saved?.operation || '';
+  const rounds = h('input', { type: 'number', id: 'rounds', min: '1', max: '30', value: String(saved?.rounds_limit || 12), style: 'width:80px;padding:6px;border:1px solid #8A9199' });
+  const exclusions = h('textarea', { rows: 2, id: 'exclusions', placeholder: '例：deploy/secrets/**（1行に1つ。既定の指定に足します）' });
+  /** @type {HTMLTextAreaElement} */ (exclusions).value = (saved?.exclusions || []).join('\n');
+  const out = h('div', {}, saved?.result ? investigationResult(saved) : null);
+  const request = () => ({
+    repository: state.source.repository, commit: state.source.commit,
+    operation: /** @type {HTMLTextAreaElement} */ (operation).value.trim(), summary: summary(),
+    exclusions: /** @type {HTMLTextAreaElement} */ (exclusions).value.split('\n').map(x => x.trim()).filter(Boolean),
+    rounds: Number(/** @type {HTMLInputElement} */ (rounds).value) || 12,
+  });
+  const check = btn('範囲を確かめる', () => guarded(async () => {
+    const body = request();
+    if (!body.operation) return showError('対象の操作を書いてください。');
+    const preview = await api('POST', '/api/v1/agent/investigate', body);
+    const scope = preview.scope;
+    const agree = h('input', { type: 'checkbox', id: 'agree-scope' });
+    const start = btn('この範囲で始める', () => guarded(async () => {
+      start.setAttribute('disabled', '');
+      setStatus('コードをたどっています。往復の回数によっては数分かかります。');
+      try {
+        const result = await api('POST', '/api/v1/agent/investigate', { ...body, confirm: { scope_sha256: preview.scope_sha256 } });
+        const record = { operation: body.operation, exclusions: body.exclusions, rounds_limit: body.rounds, scope_sha256: preview.scope_sha256, result, at: new Date().toISOString() };
+        state.record = { ...(state.record || {}), investigation: record };
+        await saveRecord();
+        fill(out, investigationResult(record));
+        setStatus('');
+      } finally { start.removeAttribute('disabled'); }
+    }), 'primary');
+    start.setAttribute('disabled', '');
+    agree.addEventListener('change', () => /** @type {HTMLInputElement} */ (agree).checked ? start.removeAttribute('disabled') : start.setAttribute('disabled', ''));
+    fill(out, h('div', { class: 'box', 'data-scope': '' },
+      h('div', { class: 'head' }, h('strong', {}, '送る範囲の確認'), h('span', { class: 'note' }, `送り先：${preview.destination}`)),
+      h('div', { class: 'pad' },
+        h('p', {}, preview.note),
+        h('table', {}, h('tbody', {},
+          h('tr', {}, h('th', { scope: 'row' }, 'リポジトリ'), h('td', {}, scope.repository)),
+          h('tr', {}, h('th', { scope: 'row' }, 'コミット'), h('td', { class: 'code' }, scope.commit)),
+          h('tr', {}, h('th', { scope: 'row' }, '対象の操作'), h('td', {}, scope.operation)),
+          scope.summary ? h('tr', {}, h('th', { scope: 'row' }, '説明'), h('td', {}, scope.summary)) : null,
+          h('tr', {}, h('th', { scope: 'row' }, '往復の上限'), h('td', {}, `${scope.limits.rounds}回（1回に${scope.limits.requests_per_round}件まで、資料の合計は${scope.limits.material_chars.toLocaleString('ja-JP')}文字まで）`)),
+          h('tr', {}, h('th', { scope: 'row' }, '送らないパス'), h('td', { class: 'code', 'data-exclusions': '' }, scope.exclusions.join('、'))))),
+        h('label', { style: 'display:flex;gap:8px;align-items:flex-start;margin-top:8px' }, agree, 'このリポジトリのこのコミットのコードを、送らないパスを除いて、AIが求めた分だけ送ることを了承する。送ってよいコードであることを確かめた'),
+        h('div', { class: 'actions' }, start))));
+  }));
+  return h('div', { 'data-investigation-form': '' },
+    h('h2', { style: 'margin-top:16px' }, 'コードをたどって懸念を出す（任意）'),
+    h('p', {}, '対象の操作を書くと、AIエージェントがこのコミットのコードを検索と読み取りでたどり、処理の推定と懸念を、根拠の行と確かめ方つきで返します。推定であり、実行して観測した結果ではありません。'),
+    h('label', { for: 'operation', style: 'font-weight:700' }, '対象の操作'), operation,
+    h('div', { style: 'display:flex;gap:16px;flex-wrap:wrap;margin-top:8px' },
+      h('div', {}, h('label', { for: 'rounds' }, '往復の上限（回）'), ' ', rounds),
+      h('div', { style: 'flex:1;min-width:240px' }, h('label', { for: 'exclusions' }, '送らないパスの追加（任意）'), exclusions)),
+    h('div', { class: 'actions' }, check), out);
+}
+function investigationResult(/** @type {any} */ saved) {
+  const r = saved.result;
+  const sent = (r.material || []).filter((/** @type {any} */ m) => m.kind !== 'refused').length;
+  return h('div', { class: 'box', 'data-investigation': r.stopped_by },
+    h('div', { class: 'head' }, h('strong', {}, `懸念 ${r.concerns.length}件`), h('span', { class: 'note' }, `${STOPPED[r.stopped_by] || r.stopped_by}。往復${r.rounds}回、送った資料${sent}件。記録 ${r.record}`)),
+    h('div', { class: 'pad' },
+      r.note ? h('p', { class: 'note' }, r.note) : null,
+      r.limits ? h('p', { class: 'note' }, r.limits) : null,
+      (r.concerns || []).map((/** @type {any} */ c) => h('div', { class: 'box', 'data-concern': c.id, style: 'margin-top:8px' },
+        h('div', { class: 'pad' },
+          h('p', {}, h('strong', {}, c.concern)),
+          h('p', {}, `推定：${c.estimate}`),
+          h('p', { class: 'note' }, `根拠の種類：${BASIS[c.basis] || c.basis}`),
+          h('p', {}, '根拠の行：', (c.evidence || []).map((/** @type {any} */ e, /** @type {number} */ i) => [i ? '、' : '', h('a', { href: lineUrl(e.path, e.start, e.end), target: '_blank', rel: 'noopener', 'data-evidence': '' }, `${e.path} ${e.start}〜${e.end}行`)])),
+          h('p', {}, `確かめ方：${CHECK_BY[c.check?.by] || c.check?.by}。${c.check?.detail || ''}${c.check?.observation ? `（観測の種類：${c.check.observation}）` : ''}`)))),
+      (r.questions || []).length ? [h('h3', {}, 'コードからは決められなかったこと'), h('ul', { class: 'items' }, r.questions.map((/** @type {string} */ q) => h('li', {}, q)))] : null));
 }
 // 画面の記録を添えた照合は、照合し直しと試験の案でも同じ試行を添える。
 function screenOf(/** @type {any} */ r) { return r?.screen_evidence ? { screen_evidence: r.screen_evidence } : {}; }

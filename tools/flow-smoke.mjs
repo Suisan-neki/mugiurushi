@@ -63,6 +63,17 @@ try {
       { id: 't-log', name: '操作の記録', kind: 'browser', finding_ids: ['f-2'], steps: ['タスクを開く', '記録を読み出す'], pass: ['職員・日時・対象が記録に残る'], observation: 'stored_file', observation_label: '保存先' },
     ] }) });
   });
+  // コードをたどる往復（#230）。了承がなければ範囲だけを返し、了承があれば結論を返す。
+  const investigations = [];
+  await page.route('**/api/v1/agent/investigate', route => {
+    const body = route.request().postDataJSON(); investigations.push(body);
+    if (!body.confirm) return route.fulfill({ json: { stage: 'preview', destination: '合成のAIエージェント', scope_sha256: 'f'.repeat(64), note: '合成の範囲の説明',
+      scope: { repository: body.repository, commit: body.commit, operation: body.operation, summary: body.summary, architecture: null, exclusions: ['.env', ...body.exclusions], limits: { rounds: body.rounds, requests_per_round: 8, material_chars: 400000, material_bytes: 800000 } } } });
+    return route.fulfill({ json: { stage: 'done', stopped_by: 'concluded', rounds: 2, requests_dropped: 0, limits: '合成の限界の説明', record: 'inv-1', scope_sha256: 'f'.repeat(64),
+      concerns: [{ id: 'c-1', estimate: 'ログインは利用者IDとパスワードだけで通す', evidence: [{ path: 'app/auth.py', start: 3, end: 5 }], concern: '2つ目の認証がない', basis: 'repository', check: { by: 'run', detail: 'ログインして一覧が出るかを見る', observation: 'browser_text' } }],
+      questions: ['院外から使うか'],
+      material: [{ kind: 'search', query: 'login', hits: 1, truncated: false }, { kind: 'read', path: 'app/auth.py', start: 1, end: 10, blob: 'a'.repeat(40) }, { kind: 'refused', request: { kind: 'read', path: '.env' }, reason: '送らないパス' }] } });
+  });
   // 事例の記録の観測の状態を差し替える（f-1 は不足を確認、f-2 は期待どおり）。
   let override = false, unlinked = false;
   await page.route('**/api/v1/case', async route => {
@@ -92,6 +103,30 @@ try {
   assert.deepEqual(await files.locator('tbody tr').evaluateAll(rows => rows.map(r => [r.children[1].textContent, r.querySelector('input').checked])), [['app/auth.py', true], ['README.md', false]]);
   assert.match(await page.locator('[data-files-shown]').innerText(), /全3件中、選んだ1件と、「readme」を含む1件を表示/);
   await page.locator('#file-filter').fill('');
+  await page.locator('#desc').fill('合成の診療所のタスク管理');
+  // コードをたどって懸念を出す：対象の操作がなければ送らない。範囲を確かめて了承してから往復を回す。
+  await page.getByRole('button', { name: '範囲を確かめる' }).click();
+  assert.match(await page.locator('#alert').innerText(), /対象の操作を書いてください/);
+  assert.equal(investigations.length, 0);
+  await page.locator('#operation').fill('ログインして一覧を開く');
+  await page.locator('#rounds').fill('5');
+  await page.locator('#exclusions').fill('deploy/**\n\n secrets/* ');
+  await page.getByRole('button', { name: '範囲を確かめる' }).click();
+  const scopeBox = page.locator('[data-scope]'); await scopeBox.waitFor();
+  assert.deepEqual(investigations[0], { repository, commit, operation: 'ログインして一覧を開く', summary: '合成の診療所のタスク管理', exclusions: ['deploy/**', 'secrets/*'], rounds: 5 });
+  assert.equal(await scopeBox.locator('[data-exclusions]').innerText(), '.env、deploy/**、secrets/*');
+  assert.match(await scopeBox.innerText(), /5回（1回に8件まで、資料の合計は400,000文字まで）/);
+  assert.equal(await page.getByRole('button', { name: 'この範囲で始める' }).isDisabled(), true, '了承の前は始められない');
+  await page.locator('#agree-scope').check(); await page.getByRole('button', { name: 'この範囲で始める' }).click();
+  const investigation = page.locator('[data-investigation]'); await investigation.waitFor();
+  assert.deepEqual(investigations[1].confirm, { scope_sha256: 'f'.repeat(64) });
+  assert.equal(await investigation.getAttribute('data-investigation'), 'concluded');
+  assert.match(await investigation.innerText(), /懸念 1件[\s\S]*往復2回、送った資料2件[\s\S]*2つ目の認証がない[\s\S]*このリポジトリのコードと設定[\s\S]*麦漆で動かして確かめる[\s\S]*院外から使うか/);
+  assert.equal(await investigation.locator('[data-evidence]').getAttribute('href'), `https://github.com/${repository}/blob/${commit}/app/auth.py#L3-L5`);
+  // 結果は事例の記録に残り、開き直しても出る。
+  await page.reload(); await page.locator('[data-investigation]').waitFor();
+  assert.equal(await page.locator('#operation').inputValue(), 'ログインして一覧を開く');
+  assert.equal(investigations.length, 2, '開き直しで送り直さない');
   await page.locator('#desc').fill('合成の診療所のタスク管理');
   // 画面の構造を記録した試験がない事例では、選択欄を出さず、画面の記録の項目を送らない。
   assert.match(await page.locator('main').innerText(), /画面の構造を記録した試験がありません/);
