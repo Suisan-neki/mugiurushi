@@ -161,6 +161,7 @@ pub fn investigate(
         bytes: 0,
         full: false,
         log: vec![],
+        material_rounds: vec![],
     };
     let outcome = run.rounds(config, &scope, rounds);
     let record_id = save_record(records, &scope, &scope_sha256, &run.log, &outcome)?;
@@ -189,6 +190,8 @@ struct Run<'a> {
     /// 資料の上限に達した。次の往復で結論を求める。
     full: bool,
     log: Vec<Value>,
+    /// 往復ごとに資料へ足した件数。
+    material_rounds: Vec<usize>,
 }
 
 impl Run<'_> {
@@ -202,6 +205,8 @@ impl Run<'_> {
                 "summary": scope["summary"],
                 "architecture": scope["architecture"],
                 "material": self.material,
+                // 往復ごとに資料へ足した件数。AIエージェントがキャッシュの区切りを往復の単位で置くために使う。
+                "material_rounds": self.material_rounds,
                 "budget": {"rounds_left": rounds_left, "requests_per_round": REQUESTS_PER_ROUND},
             });
             let base = json!({
@@ -252,6 +257,7 @@ impl Run<'_> {
                     "note": "往復の上限に達し、AIエージェントが結論を返さなかった。懸念は受け取っていない",
                 }));
             }
+            let before = self.material.len();
             let mut answered = vec![];
             for request in &requests {
                 answered.push(self.answer(request));
@@ -260,6 +266,7 @@ impl Run<'_> {
             for (request, reason) in &rejected {
                 answered.push(self.push(request.clone(), refused(request, reason)));
             }
+            self.material_rounds.push(self.material.len() - before);
             entry["requests"] = json!(requests);
             entry["rejected"] = json!(rejected.len());
             entry["answered"] = json!(answered);
@@ -284,6 +291,7 @@ impl Run<'_> {
         entry["usage"] = json!({
             "input_tokens": answer["model"]["input_tokens"],
             "cached_input_tokens": answer["model"]["cached_input_tokens"],
+            "cache_write_tokens": answer["model"]["cache_write_tokens"],
             "output_tokens": answer["model"]["output_tokens"],
         });
         if answer["done"] == json!(true) {
@@ -638,6 +646,7 @@ fn usage_total(log: &[Value]) -> Value {
         "reported": reported,
         "input_tokens": sum("input_tokens"),
         "cached_input_tokens": sum("cached_input_tokens"),
+        "cache_write_tokens": sum("cache_write_tokens"),
         "output_tokens": sum("output_tokens"),
     })
 }

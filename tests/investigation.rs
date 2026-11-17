@@ -215,7 +215,7 @@ fn concluded(concerns: Value) -> Value {
 /// AIエージェントが返す呼び出しの記録（トークン数つき）。
 fn usage(response_id: &str) -> Value {
     json!({"response_id": response_id, "response_model": "fake-model",
-        "input_tokens": 1000, "cached_input_tokens": 400, "output_tokens": 50})
+        "input_tokens": 1000, "cached_input_tokens": 400, "cache_write_tokens": 300, "output_tokens": 50})
 }
 
 fn concern(path: &str, start: u64, end: u64) -> Value {
@@ -367,6 +367,12 @@ fn requests_are_answered_from_the_pinned_commit_and_concerns_must_cite_returned_
         .collect();
     assert_eq!(left, [3, 2, 1]);
     assert_eq!(bodies[0].0["material"], json!([]));
+    // 往復ごとに資料へ足した件数を送る。AIエージェントがキャッシュの区切りを往復の単位で置くために使う。
+    let counts: Vec<Value> = bodies
+        .iter()
+        .map(|(b, _)| b["material_rounds"].clone())
+        .collect();
+    assert_eq!(counts, [json!([]), json!([4]), json!([4, 2])]);
     assert_eq!(bodies[0].0["operation"], "患者の新規登録");
     // 2回目の往復の資料：検索の結果、読み取った範囲、送らないファイルは理由だけ、一覧。
     let material = bodies[1].0["material"].as_array().unwrap();
@@ -421,10 +427,10 @@ fn requests_are_answered_from_the_pinned_commit_and_concerns_must_cite_returned_
     // 往復ごとのトークン数と、その合計を残す。費用を出すために使う。
     assert_eq!(
         rounds[0]["usage"],
-        json!({"input_tokens": 1000, "cached_input_tokens": 400, "output_tokens": 50})
+        json!({"input_tokens": 1000, "cached_input_tokens": 400, "cache_write_tokens": 300, "output_tokens": 50})
     );
     assert_eq!(rounds[0]["response_model"], "fake-model");
-    let total = json!({"calls": 3, "reported": 3, "input_tokens": 3000, "cached_input_tokens": 1200, "output_tokens": 150});
+    let total = json!({"calls": 3, "reported": 3, "input_tokens": 3000, "cached_input_tokens": 1200, "cache_write_tokens": 900, "output_tokens": 150});
     assert_eq!(saved["usage"], total);
     assert_eq!(result["usage"], total);
 }
@@ -676,7 +682,7 @@ fn token_counts_that_were_not_reported_are_not_summed_as_zero() {
     let result = run(&f, &agent, 3).unwrap();
     assert_eq!(
         result["usage"],
-        json!({"calls": 2, "reported": 2, "input_tokens": 1900, "cached_input_tokens": null, "output_tokens": 70})
+        json!({"calls": 2, "reported": 2, "input_tokens": 1900, "cached_input_tokens": null, "cache_write_tokens": null, "output_tokens": 70})
     );
 }
 
@@ -700,7 +706,7 @@ fn a_round_whose_token_counts_were_not_received_makes_the_totals_unknown() {
     // 2回目の往復は送ったが、トークン数を受け取れていない。1回目の分だけを合計として見せない。
     assert_eq!(
         saved["usage"],
-        json!({"calls": 3, "reported": 1, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null})
+        json!({"calls": 3, "reported": 1, "input_tokens": null, "cached_input_tokens": null, "cache_write_tokens": null, "output_tokens": null})
     );
 }
 

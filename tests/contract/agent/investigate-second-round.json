@@ -45,6 +45,9 @@
       "truncated": false
     }
   ],
+  "material_rounds": [
+    4
+  ],
   "budget": {
     "rounds_left": 2,
     "requests_per_round": 8

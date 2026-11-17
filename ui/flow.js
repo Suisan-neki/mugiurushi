@@ -227,7 +227,7 @@ function investigationResult(/** @type {any} */ saved) {
     h('div', { class: 'pad' },
       r.note ? h('p', { class: 'note' }, r.note) : null,
       r.limits ? h('p', { class: 'note' }, r.limits) : null,
-      r.usage ? h('p', { class: 'note', 'data-usage': '' }, `使ったトークン：入力 ${count(r.usage.input_tokens)}（うちキャッシュ ${count(r.usage.cached_input_tokens)}）、出力 ${count(r.usage.output_tokens)}。モデルの呼び出し${r.usage.calls}回`) : null,
+      r.usage ? h('p', { class: 'note', 'data-usage': '' }, `使ったトークン：入力 ${count(r.usage.input_tokens)}（うちキャッシュから読んだ分 ${count(r.usage.cached_input_tokens)}、キャッシュに書いた分 ${count(r.usage.cache_write_tokens)}）、出力 ${count(r.usage.output_tokens)}。モデルの呼び出し${r.usage.calls}回`) : null,
       (r.concerns || []).map((/** @type {any} */ c) => h('div', { class: 'box', 'data-concern': c.id, style: 'margin-top:8px' },
         h('div', { class: 'pad' },
           h('p', {}, h('strong', {}, c.concern)),
