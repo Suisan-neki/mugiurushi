@@ -218,6 +218,7 @@ function investigationView(/** @type {() => string} */ summary) {
       h('div', { style: 'flex:1;min-width:240px' }, h('label', { for: 'exclusions' }, '送らないパスの追加（任意）'), exclusions)),
     h('div', { class: 'actions' }, check), out);
 }
+const count = (/** @type {number|null|undefined} */ n) => typeof n === 'number' ? n.toLocaleString('ja-JP') : '不明';
 function investigationResult(/** @type {any} */ saved) {
   const r = saved.result;
   const sent = (r.material || []).filter((/** @type {any} */ m) => m.kind !== 'refused').length;
@@ -226,6 +227,7 @@ function investigationResult(/** @type {any} */ saved) {
     h('div', { class: 'pad' },
       r.note ? h('p', { class: 'note' }, r.note) : null,
       r.limits ? h('p', { class: 'note' }, r.limits) : null,
+      r.usage ? h('p', { class: 'note', 'data-usage': '' }, `使ったトークン：入力 ${count(r.usage.input_tokens)}（うちキャッシュ ${count(r.usage.cached_input_tokens)}）、出力 ${count(r.usage.output_tokens)}。モデルの呼び出し${r.usage.calls}回`) : null,
       (r.concerns || []).map((/** @type {any} */ c) => h('div', { class: 'box', 'data-concern': c.id, style: 'margin-top:8px' },
         h('div', { class: 'pad' },
           h('p', {}, h('strong', {}, c.concern)),
