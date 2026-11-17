@@ -34,6 +34,8 @@ pub const MAX_MATERIAL_BYTES: usize = 800_000;
 /// 1往復の件数（8件）を断る理由が収まる大きさにしている。
 const RESERVED_CHARS: usize = 2_000;
 const RESERVED_BYTES: usize = 8_000;
+/// 1往復で、AIエージェントの呼び出しを試す回数（最初の1回とやり直し）。
+const ATTEMPTS_PER_ROUND: usize = 2;
 /// 一覧で返す項目の数の上限。
 pub const MAX_LIST_ENTRIES: usize = 500;
 const MAX_OPERATION: usize = 2000;
@@ -169,6 +171,14 @@ pub fn investigate(
     Ok(result)
 }
 
+/// 1回の往復で受け取ったもの。
+enum Step {
+    /// 結論（懸念と質問）。
+    Done(Value),
+    /// 次に求めるものと、AIエージェントが渡せなかった求め（短い表し方と理由）。
+    More(Vec<Value>, Vec<(String, String)>),
+}
+
 struct Run<'a> {
     tree: &'a CodeTree,
     material: Vec<Value>,
@@ -194,45 +204,38 @@ impl Run<'_> {
                 "material": self.material,
                 "budget": {"rounds_left": rounds_left, "requests_per_round": REQUESTS_PER_ROUND},
             });
-            let mut entry = json!({
+            let base = json!({
                 "round": round + 1,
                 "rounds_left": rounds_left,
                 "payload_sha256": sha256(&payload),
                 "payload_bytes": serde_json::to_vec(&payload).map_err(io::Error::other)?.len(),
             });
-            let answer = config.post("/v1/investigate", &payload);
-            let answer = match answer {
-                Ok(answer) => answer,
-                Err(error) => {
-                    entry["error"] = json!(error.to_string());
-                    self.log.push(entry);
-                    return Err(error);
+            // AIエージェントの呼び出しが失敗したとき（応答を読めない、形が不正、根拠の外れた結論など）は、同じ送信内容で
+            // やり直す。1回の失敗で調べ全体が止まらないようにする（実際のモデルで、往復の途中で止まった。2026-11-17）。
+            // やり直しも送信なので、往復ごとに記録に残す。
+            let mut attempt = 0;
+            let (step, mut entry) = loop {
+                attempt += 1;
+                let mut entry = base.clone();
+                entry["attempt"] = json!(attempt);
+                match self.ask(config, &payload, &mut entry, round + 1) {
+                    Ok(step) => break (step, entry),
+                    Err(error) => {
+                        entry["error"] = json!(error.to_string());
+                        self.log.push(entry);
+                        if attempt >= ATTEMPTS_PER_ROUND {
+                            return Err(error);
+                        }
+                    }
                 }
             };
-            entry["response_id"] = answer["model"]["response_id"].clone();
-            entry["response_model"] = answer["model"]["response_model"].clone();
-            entry["usage"] = json!({
-                "input_tokens": answer["model"]["input_tokens"],
-                "cached_input_tokens": answer["model"]["cached_input_tokens"],
-                "output_tokens": answer["model"]["output_tokens"],
-            });
-            if answer["done"] == json!(true) {
-                entry["done"] = json!(true);
-                self.log.push(entry);
-                return self.conclusion(&answer, round + 1, "concluded");
-            }
-            let Some(requests) = answer["requests"]
-                .as_array()
-                .filter(|r| !r.is_empty() && r.len() <= REQUESTS_PER_ROUND)
-                .cloned()
-            else {
-                // 送った往復は、応答が不正でも記録に残す。
-                let error = io::Error::other(format!(
-                    "AIエージェントの求めるものの形が不正です（1回に{REQUESTS_PER_ROUND}件まで）"
-                ));
-                entry["error"] = json!(error.to_string());
-                self.log.push(entry);
-                return Err(error);
+            let (requests, rejected) = match step {
+                Step::Done(result) => {
+                    entry["done"] = json!(true);
+                    self.log.push(entry);
+                    return Ok(result);
+                }
+                Step::More(requests, rejected) => (requests, rejected),
             };
             if rounds_left == 0 {
                 // 最後の往復でも求めるものが返った。これ以上は送らない。
@@ -253,13 +256,75 @@ impl Run<'_> {
             for request in &requests {
                 answered.push(self.answer(request));
             }
+            // AIエージェントが渡せなかった求めは、理由を資料に入れて、次の往復でモデルに伝える。
+            for (request, reason) in &rejected {
+                answered.push(self.push(request.clone(), refused(request, reason)));
+            }
             entry["requests"] = json!(requests);
+            entry["rejected"] = json!(rejected.len());
             entry["answered"] = json!(answered);
             self.log.push(entry);
         }
         Err(io::Error::other(
             "往復の回数の上限に達しましたが、結論を受け取れませんでした",
         ))
+    }
+
+    /// 1回送って、結論か、次に求めるものを受け取る。受け取ったトークン数は entry に入れる。
+    fn ask(
+        &self,
+        config: &Config,
+        payload: &Value,
+        entry: &mut Value,
+        rounds: usize,
+    ) -> io::Result<Step> {
+        let answer = config.post("/v1/investigate", payload)?;
+        entry["response_id"] = answer["model"]["response_id"].clone();
+        entry["response_model"] = answer["model"]["response_model"].clone();
+        entry["usage"] = json!({
+            "input_tokens": answer["model"]["input_tokens"],
+            "cached_input_tokens": answer["model"]["cached_input_tokens"],
+            "output_tokens": answer["model"]["output_tokens"],
+        });
+        if answer["done"] == json!(true) {
+            return self
+                .conclusion(&answer, rounds, "concluded")
+                .map(Step::Done);
+        }
+        let invalid = || {
+            io::Error::other(format!(
+                "AIエージェントの求めるものの形が不正です（1回に{REQUESTS_PER_ROUND}件まで）"
+            ))
+        };
+        let requests = answer["requests"]
+            .as_array()
+            .filter(|r| r.len() <= REQUESTS_PER_ROUND)
+            .cloned()
+            .ok_or_else(invalid)?;
+        // 渡せなかった求めは、1往復の件数の分までを、短い表し方と理由の組として受け取る。
+        let rejected: Vec<(String, String)> = match answer.get("rejected") {
+            None | Some(Value::Null) => vec![],
+            Some(Value::Array(items)) => items
+                .iter()
+                .take(REQUESTS_PER_ROUND)
+                .map(|item| {
+                    let text =
+                        |key: &str| item[key].as_str().map(str::trim).filter(|t| !t.is_empty());
+                    match (text("request"), text("reason")) {
+                        (Some(request), Some(reason)) => Ok((
+                            crate::code_tree::clip(request, 300),
+                            crate::code_tree::clip(reason, 500),
+                        )),
+                        _ => Err(invalid()),
+                    }
+                })
+                .collect::<io::Result<_>>()?,
+            Some(_) => return Err(invalid()),
+        };
+        if requests.is_empty() && rejected.is_empty() {
+            return Err(invalid());
+        }
+        Ok(Step::More(requests, rejected))
     }
 
     /// 求められたもの1件に答え、資料に足す。答えられないときは、理由を資料に足す。記録用の要約を返す。
@@ -288,6 +353,11 @@ impl Run<'_> {
             }
             Err(reason) => refused(&key, &reason),
         };
+        self.push(key, material)
+    }
+
+    /// 資料を1件足し、記録用の要約を返す。断った理由も資料に数え、了承した上限は超えない。
+    fn push(&mut self, key: String, material: Value) -> Value {
         let (chars, bytes) = size_of(&material);
         // 断った理由も資料に数える。余裕を使い切ったら、理由も送らない。了承した上限は超えない。
         if self.chars + chars > MAX_MATERIAL_CHARS || self.bytes + bytes > MAX_MATERIAL_BYTES {
