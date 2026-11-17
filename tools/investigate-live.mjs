@@ -81,12 +81,10 @@ try {
     catch (e) { error = e instanceof Error ? e.message : String(e); }
     const seconds = Math.round((Date.now() - started) / 1000);
     // 往復の記録（送った資料の中身は持たない）も写す。
-    const records = join(data, 'investigations');
+    // 往復の記録は事例の置き場所の investigations/ にある。いちばん新しいものを読む。
     let saved = null;
-    try {
-      const ids = (await readdir(records)).sort();
-      saved = JSON.parse(await readFile(join(records, ids[ids.length - 1]), 'utf8'));
-    } catch { /* 記録がない */ }
+    const files = (await readdir(data, { recursive: true })).filter(p => /(^|\/)investigations\/[^/]+\.json$/.test(p)).sort((a, b) => a.split('/').pop().localeCompare(b.split('/').pop()));
+    if (files.length) saved = JSON.parse(await readFile(join(data, files[files.length - 1]), 'utf8'));
     const record = { at: new Date().toISOString(), model: process.env.MUGIURUSHI_AI_MODEL, commits, seconds, scope: preview.scope, scope_sha256: preview.scope_sha256, result: result || null, error, record: saved };
     const file = join(out, `investigate-live-${index + 1}.json`);
     await writeFile(file, JSON.stringify(record, null, 2) + '\n');
