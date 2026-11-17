@@ -63,6 +63,18 @@ try {
       { id: 't-log', name: '操作の記録', kind: 'browser', finding_ids: ['f-2'], steps: ['タスクを開く', '記録を読み出す'], pass: ['職員・日時・対象が記録に残る'], observation: 'stored_file', observation_label: '保存先' },
     ] }) });
   });
+  // コードをたどる往復（#230）。了承がなければ範囲だけを返し、了承があれば結論を返す。
+  const investigations = []; let hold = null;
+  await page.route('**/api/v1/agent/investigate', async route => {
+    const body = route.request().postDataJSON(); investigations.push(body);
+    if (body.confirm && hold) await hold;
+    if (!body.confirm) return route.fulfill({ json: { stage: 'preview', destination: '合成のAIエージェント', scope_sha256: 'f'.repeat(64), note: '合成の範囲の説明',
+      scope: { repository: body.repository, commit: body.commit, operation: body.operation, summary: body.summary, architecture: null, exclusions: ['.env', ...body.exclusions], limits: { rounds: body.rounds, requests_per_round: 8, material_chars: 400000, material_bytes: 800000 } } } });
+    return route.fulfill({ json: { stage: 'done', stopped_by: 'concluded', rounds: 2, requests_dropped: 0, limits: '合成の限界の説明', record: 'inv-1', scope_sha256: 'f'.repeat(64),
+      concerns: [{ id: 'c-1', estimate: 'ログインは利用者IDとパスワードだけで通す', evidence: [{ path: 'app/auth.py', start: 3, end: 5 }], concern: '2つ目の認証がない', basis: 'repository', check: { by: 'run', detail: 'ログインして一覧が出るかを見る', observation: 'browser_text' } }],
+      questions: ['院外から使うか'],
+      material: [{ kind: 'search', query: 'login', hits: 1, truncated: false }, { kind: 'read', path: 'app/auth.py', start: 1, end: 10, blob: 'a'.repeat(40) }, { kind: 'refused', request: { kind: 'read', path: '.env' }, reason: '送らないパス' }] } });
+  });
   // 事例の記録の観測の状態を差し替える（f-1 は不足を確認、f-2 は期待どおり）。
   let override = false, unlinked = false;
   await page.route('**/api/v1/case', async route => {
@@ -93,6 +105,31 @@ try {
   assert.match(await page.locator('[data-files-shown]').innerText(), /全3件中、選んだ1件と、「readme」を含む1件を表示/);
   await page.locator('#file-filter').fill('');
   await page.locator('#desc').fill('合成の診療所のタスク管理');
+  // コードをたどって懸念を出す：対象の操作がなければ送らない。範囲を確かめて了承してから往復を回す。
+  await page.getByRole('button', { name: '範囲を確かめる' }).click();
+  assert.match(await page.locator('#alert').innerText(), /対象の操作を書いてください/);
+  assert.equal(investigations.length, 0);
+  await page.locator('#operation').fill('ログインして一覧を開く');
+  await page.locator('#rounds').fill('5');
+  await page.locator('#exclusions').fill('deploy/**\n\n secrets/* ');
+  await page.getByRole('button', { name: '範囲を確かめる' }).click();
+  const scopeBox = page.locator('[data-scope]'); await scopeBox.waitFor();
+  assert.deepEqual(investigations[0], { repository, commit, operation: 'ログインして一覧を開く', summary: '合成の診療所のタスク管理', exclusions: ['deploy/**', 'secrets/*'], rounds: 5 });
+  assert.equal(await scopeBox.locator('[data-exclusions]').innerText(), '.env、deploy/**、secrets/*');
+  assert.equal(await scopeBox.locator('[data-scope-sha256]').innerText(), 'f'.repeat(64), '了承する範囲のSHA-256を示す');
+  assert.match(await scopeBox.innerText(), /5回（1回に8件まで、資料の合計は400,000文字まで）/);
+  assert.equal(await page.getByRole('button', { name: 'この範囲で始める' }).isDisabled(), true, '了承の前は始められない');
+  await page.locator('#agree-scope').check(); await page.getByRole('button', { name: 'この範囲で始める' }).click();
+  const investigation = page.locator('[data-investigation]'); await investigation.waitFor();
+  assert.deepEqual(investigations[1].confirm, { scope_sha256: 'f'.repeat(64) });
+  assert.equal(await investigation.getAttribute('data-investigation'), 'concluded');
+  assert.match(await investigation.innerText(), /懸念 1件[\s\S]*往復2回、送った資料2件[\s\S]*2つ目の認証がない[\s\S]*このリポジトリのコードと設定[\s\S]*麦漆で動かして確かめる[\s\S]*院外から使うか/);
+  assert.equal(await investigation.locator('[data-evidence]').getAttribute('href'), `https://github.com/${repository}/blob/${commit}/app/auth.py#L3-L5`);
+  // 結果は事例の記録に残り、開き直しても出る。
+  await page.reload(); await page.locator('[data-investigation]').waitFor();
+  assert.equal(await page.locator('#operation').inputValue(), 'ログインして一覧を開く');
+  assert.equal(investigations.length, 2, '開き直しで送り直さない');
+  await page.locator('#desc').fill('合成の診療所のタスク管理');
   // 画面の構造を記録した試験がない事例では、選択欄を出さず、画面の記録の項目を送らない。
   assert.match(await page.locator('main').innerText(), /画面の構造を記録した試験がありません/);
   assert.equal(await page.locator('#screen-evidence').count(), 0);
@@ -109,6 +146,16 @@ try {
   assert.deepEqual(requests.scan[1].confirm, { payload_sha256: 'e'.repeat(64), synthetic_only: true });
   assert.deepEqual(await page.locator('[data-section]').evaluateAll(s => s.map(x => x.getAttribute('data-section'))), ['g3', 'pi']);
   assert.doesNotMatch(await page.locator('main').innerText(), /運用の手順書/, '試験で確かめられない項目は出さない');
+  // 往復の途中でこの段へ戻っても、往復の結果とこの段の操作（回答、試験の案）の両方が記録に残る。
+  let release = () => {}; hold = new Promise(ok => { release = ok; });
+  await page.getByRole('button', { name: '1 照合の準備' }).click();
+  await page.getByRole('button', { name: '範囲を確かめる' }).click();
+  await page.locator('[data-scope]').waitFor(); await page.locator('#agree-scope').check();
+  await page.getByRole('button', { name: 'この範囲で始める' }).click();
+  await page.getByRole('button', { name: /2 照合とヒアリング/ }).click();
+  await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
+  const investigationSaved = page.waitForResponse(r => r.url().endsWith('/api/v1/flow') && r.request().method() === 'POST');
+  release(); await investigationSaved; hold = null;
   await page.locator('[data-question="q1"] input[type=radio]').first().check();
   await page.locator('#ask').fill('ログの保存期間は？');
   await page.getByRole('button', { name: 'ガイドラインに照らして答えてもらう' }).click();
@@ -123,6 +170,9 @@ try {
 
   // 3 検証案の了承：了承した試験ごとに確認項目を作り、照合の候補を確かめる部分として登録する。
   await page.locator('[data-test="t-login"]').waitFor();
+  const stored = (await (await page.request.get(url + '/api/v1/flow', { headers: { 'X-Review-Token': await token() } })).json()).records[`${repository}@${commit}`].record;
+  assert.equal(stored.investigation?.result?.record, 'inv-1', '往復の結果が記録に残る');
+  assert.deepEqual(stored.answers?.q1?.answer, 'はい', '往復の途中で答えた回答が記録に残る');
   await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
   await page.locator('[data-result]').first().waitFor();
   const view = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await token() } })).json();
