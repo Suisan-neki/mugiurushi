@@ -3,6 +3,8 @@
 // 必要なもの: GitHubへのgit接続、mugiurushi-ai のチェックアウト（MUGIURUSHI_AI_DIR）と uv、
 // 運営者が設定するモデル名（MUGIURUSHI_AI_MODEL）・認証（OPENAI_API_KEY か MUGIURUSHI_AI_AUTH=proxy）。
 // 対象と操作は引数のJSONファイルで渡す（例: examples/investigate-live/openelis.json）。
+// 送る前に、人が範囲を了承する。1回目は、麦漆が組み立てた範囲の全体とSHA-256を示すだけで、何も送らずに終わる。
+// 範囲を確かめた人が、そのSHA-256を EEL_APPROVED_SCOPES（カンマ区切り）に入れて実行し直したときだけ、その範囲を送る。
 // 送るのは、公開リポジトリの固定したコミットのコードのうち、AIが求めた範囲だけである。実患者の情報・認証情報・ログは送らない。
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -20,6 +22,7 @@ const planFile = process.argv[2];
 assert(planFile, '対象と操作のJSONファイルを指定してください');
 const plan = JSON.parse(await readFile(planFile, 'utf8'));
 const only = process.argv[3] ? Number(process.argv[3]) : null;
+const approved = new Set((process.env.EEL_APPROVED_SCOPES || '').split(',').map(s => s.trim()).filter(Boolean));
 const binary = process.env.REVIEW_BINARY || join(root, 'target/debug/mugiurushi');
 const out = join(root, 'test-results');
 await mkdir(out, { recursive: true });
@@ -75,7 +78,11 @@ try {
     const started = Date.now();
     const preview = await post(body);
     assert.equal(preview.stage, 'preview');
-    console.log(`範囲 ${index + 1}: ${preview.scope.operation}（SHA-256 ${preview.scope_sha256}）`);
+    console.log(`範囲 ${index + 1}（送り先：${preview.destination}）\n${JSON.stringify(preview.scope, null, 2)}\nSHA-256 ${preview.scope_sha256}\n${preview.note}`);
+    if (!approved.has(preview.scope_sha256)) {
+      console.log(`了承されていないので送らない。この範囲を確かめて了承する場合は、EEL_APPROVED_SCOPES=${preview.scope_sha256} を付けて実行し直す。`);
+      continue;
+    }
     let result, error = null;
     try { result = await post({ ...body, confirm: { scope_sha256: preview.scope_sha256 } }); }
     catch (e) { error = e instanceof Error ? e.message : String(e); }

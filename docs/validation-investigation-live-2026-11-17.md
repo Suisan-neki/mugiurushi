@@ -22,7 +22,9 @@ MUGIURUSHI_AI_DIR=<mugiurushi-ai のチェックアウト> MUGIURUSHI_AI_MODEL=g
   node tools/investigate-live.mjs examples/investigate-live/openelis.json
 ```
 
-スクリプトは、mugiurushi-ai と麦漆の画面版を起動し、画面のAPIで範囲の確認と了承を順に呼ぶ。結果と往復の記録（送った資料の中身は持たない）を `test-results/investigate-live-<番号>.json` に書く。送ったのは公開リポジトリのコードのうちAIが求めた範囲だけで、実患者の情報・認証情報・ログは送っていない。
+スクリプトは、mugiurushi-ai と麦漆の画面版を起動し、画面のAPIで範囲を確かめる。1回目は、範囲の全体とSHA-256を示すだけで、何も送らずに終わる。人が範囲を確かめて、そのSHA-256を `EEL_APPROVED_SCOPES` に入れて実行し直したときだけ、了承を添えて往復を回す。
+
+今回の試行のときのスクリプトは、範囲の操作名とSHA-256だけを示し、人の了承を待たずにそのまま了承として送っていた。利用者は、OpenELISの2つの操作を実際のモデルで調べることを了承していたが、送らないパスや量の上限を含む範囲の全体は、事前に示していない。試行の後に、上の2段階の形に直した。結果と往復の記録（送った資料の中身は持たない）を `test-results/investigate-live-<番号>.json` に書く。送ったのは公開リポジトリのコードのうちAIが求めた範囲だけで、実患者の情報・認証情報・ログは送っていない。
 
 前回と違い、今回読めるのはアプリ本体のリポジトリだけである。前回は配布物のリポジトリ（`DIGI-UW/openelis-docker`）も読んでいた。
 

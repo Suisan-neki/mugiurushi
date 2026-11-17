@@ -545,11 +545,17 @@ fn sha256(value: &Value) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// 往復ごとのトークン数の合計。費用を出すために使う。どれかの往復で数が分からないものは null にする。
+/// 往復ごとのトークン数の合計。費用を出すために使う。`calls` は送った往復の数、`reported` はトークン数を受け取れた
+/// 往復の数である。トークン数を受け取れなかった往復（応答の前後で失敗した往復を含む）や、数が分からない項目があれば、
+/// その合計は null にする。分からない分を除いた数を合計として見せると、費用を少なく見積もるためである。
 fn usage_total(log: &[Value]) -> Value {
+    let reported = log.iter().filter(|e| e.get("usage").is_some()).count();
     let sum = |key: &str| -> Value {
+        if reported < log.len() {
+            return Value::Null;
+        }
         let mut total = 0u64;
-        for entry in log.iter().filter(|e| e.get("usage").is_some()) {
+        for entry in log {
             match entry["usage"][key].as_u64() {
                 Some(n) => total += n,
                 None => return Value::Null,
@@ -558,7 +564,8 @@ fn usage_total(log: &[Value]) -> Value {
         json!(total)
     };
     json!({
-        "calls": log.iter().filter(|e| e.get("usage").is_some()).count(),
+        "calls": log.len(),
+        "reported": reported,
         "input_tokens": sum("input_tokens"),
         "cached_input_tokens": sum("cached_input_tokens"),
         "output_tokens": sum("output_tokens"),
