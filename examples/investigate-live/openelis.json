@@ -1,0 +1,10 @@
+{
+  "repository": "DIGI-UW/OpenELIS-Global-2",
+  "commit": "bcead488e7c6a633113a5981bb2131690c1dbab3",
+  "summary": "OpenELIS Global 2 の 3.3.0。検査室の情報システム。",
+  "rounds": 12,
+  "operations": [
+    { "operation": "患者の新規登録（画面で国民識別番号・姓・名・性別・年齢を入力して保存する）" },
+    { "operation": "患者の検索（画面の Patient ID の欄に識別番号を入れて検索する）" }
+  ]
+}

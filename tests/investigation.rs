@@ -149,11 +149,18 @@ impl Agent {
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
                 log.lock().unwrap().push((path, body));
-                let answer = answers.next().map_or("{}".to_owned(), |a| a.to_string());
+                let answer = answers.next().unwrap_or_else(|| json!({}));
+                // `{"__status": 502}` は、AIエージェントが処理できなかった応答を表す。
+                let status = answer["__status"].as_u64().unwrap_or(200);
+                let answer = if status == 200 {
+                    answer.to_string()
+                } else {
+                    json!({"detail": "合成の失敗"}).to_string()
+                };
                 let mut stream = stream;
                 write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
                     answer.len()
                 )
                 .unwrap();
@@ -197,12 +204,18 @@ fn request(f: &Fixture, rounds: usize, confirm: Option<String>) -> InvestigateRe
 }
 
 fn need(requests: Value) -> Value {
-    json!({"status": "candidate", "done": false, "requests": requests, "model": {"response_id": "fake"}})
+    json!({"status": "candidate", "done": false, "requests": requests, "model": usage("fake")})
 }
 
 fn concluded(concerns: Value) -> Value {
     json!({"status": "candidate", "done": true, "concerns": concerns, "questions": ["ログは何日残しますか"],
-        "requests_dropped": 0, "limits": "合成", "model": {"response_id": "fake-done"}})
+        "requests_dropped": 0, "limits": "合成", "model": usage("fake-done")})
+}
+
+/// AIエージェントが返す呼び出しの記録（トークン数つき）。
+fn usage(response_id: &str) -> Value {
+    json!({"response_id": response_id, "response_model": "fake-model",
+        "input_tokens": 1000, "cached_input_tokens": 400, "output_tokens": 50})
 }
 
 fn concern(path: &str, start: u64, end: u64) -> Value {
@@ -405,6 +418,15 @@ fn requests_are_answered_from_the_pinned_commit_and_concerns_must_cite_returned_
         "記録に資料の中身がある"
     );
     assert_eq!(saved["result"]["concerns"].as_array().unwrap().len(), 1);
+    // 往復ごとのトークン数と、その合計を残す。費用を出すために使う。
+    assert_eq!(
+        rounds[0]["usage"],
+        json!({"input_tokens": 1000, "cached_input_tokens": 400, "output_tokens": 50})
+    );
+    assert_eq!(rounds[0]["response_model"], "fake-model");
+    let total = json!({"calls": 3, "reported": 3, "input_tokens": 3000, "cached_input_tokens": 1200, "output_tokens": 150});
+    assert_eq!(saved["usage"], total);
+    assert_eq!(result["usage"], total);
 }
 
 #[test]
@@ -533,6 +555,45 @@ fn material_including_refusals_never_exceeds_the_accepted_total() {
     assert!(
         refused.iter().any(|r| r.contains("合計の上限")),
         "{refused:?}"
+    );
+}
+
+#[test]
+fn token_counts_that_were_not_reported_are_not_summed_as_zero() {
+    let f = fixture("usage");
+    let mut first = need(json!([read("app/patient.py", 1, 3)]));
+    first["model"] = json!({"response_id": "fake", "input_tokens": 900, "output_tokens": 20});
+    let agent = Agent::start(
+        &f.root,
+        vec![first, concluded(json!([concern("app/patient.py", 2, 2)]))],
+    );
+    let result = run(&f, &agent, 3).unwrap();
+    assert_eq!(
+        result["usage"],
+        json!({"calls": 2, "reported": 2, "input_tokens": 1900, "cached_input_tokens": null, "output_tokens": 70})
+    );
+}
+
+#[test]
+fn a_round_whose_token_counts_were_not_received_makes_the_totals_unknown() {
+    let f = fixture("usage-failed");
+    let agent = Agent::start(
+        &f.root,
+        vec![
+            need(json!([read("app/patient.py", 1, 3)])),
+            json!({"__status": 502}),
+        ],
+    );
+    assert!(run(&f, &agent, 3).is_err());
+    let ids: Vec<_> = fs::read_dir(f.root.join("case/investigations"))
+        .unwrap()
+        .flatten()
+        .collect();
+    let saved: Value = serde_json::from_slice(&fs::read(ids[0].path()).unwrap()).unwrap();
+    // 2回目の往復は送ったが、トークン数を受け取れていない。1回目の分だけを合計として見せない。
+    assert_eq!(
+        saved["usage"],
+        json!({"calls": 2, "reported": 1, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null})
     );
 }
 

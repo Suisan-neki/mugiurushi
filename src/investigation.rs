@@ -164,6 +164,7 @@ pub fn investigate(
     let record_id = save_record(records, &scope, &scope_sha256, &run.log, &outcome)?;
     let mut result = outcome?;
     result["record"] = json!(record_id);
+    result["usage"] = usage_total(&run.log);
     result["scope_sha256"] = json!(scope_sha256);
     Ok(result)
 }
@@ -209,6 +210,12 @@ impl Run<'_> {
                 }
             };
             entry["response_id"] = answer["model"]["response_id"].clone();
+            entry["response_model"] = answer["model"]["response_model"].clone();
+            entry["usage"] = json!({
+                "input_tokens": answer["model"]["input_tokens"],
+                "cached_input_tokens": answer["model"]["cached_input_tokens"],
+                "output_tokens": answer["model"]["output_tokens"],
+            });
             if answer["done"] == json!(true) {
                 entry["done"] = json!(true);
                 self.log.push(entry);
@@ -538,6 +545,33 @@ fn sha256(value: &Value) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// 往復ごとのトークン数の合計。費用を出すために使う。`calls` は送った往復の数、`reported` はトークン数を受け取れた
+/// 往復の数である。トークン数を受け取れなかった往復（応答の前後で失敗した往復を含む）や、数が分からない項目があれば、
+/// その合計は null にする。分からない分を除いた数を合計として見せると、費用を少なく見積もるためである。
+fn usage_total(log: &[Value]) -> Value {
+    let reported = log.iter().filter(|e| e.get("usage").is_some()).count();
+    let sum = |key: &str| -> Value {
+        if reported < log.len() {
+            return Value::Null;
+        }
+        let mut total = 0u64;
+        for entry in log {
+            match entry["usage"][key].as_u64() {
+                Some(n) => total += n,
+                None => return Value::Null,
+            }
+        }
+        json!(total)
+    };
+    json!({
+        "calls": log.len(),
+        "reported": reported,
+        "input_tokens": sum("input_tokens"),
+        "cached_input_tokens": sum("cached_input_tokens"),
+        "output_tokens": sum("output_tokens"),
+    })
+}
+
 /// 往復の記録を保存する。送った資料の中身は持たず、どのファイルのどの範囲かと、内容のオブジェクトIDを持つ。
 /// 中身は、固定したコミットとオブジェクトIDから読み直せる。
 fn save_record(
@@ -567,6 +601,7 @@ fn save_record(
         "scope": scope,
         "scope_sha256": scope_sha256,
         "rounds": log,
+        "usage": usage_total(log),
         "result": result,
     });
     let path = records.join(format!("{id}.json"));
