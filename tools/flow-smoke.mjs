@@ -70,7 +70,7 @@ try {
     if (body.confirm && hold) await hold;
     if (!body.confirm) return route.fulfill({ json: { stage: 'preview', destination: '合成のAIエージェント', scope_sha256: 'f'.repeat(64), note: '合成の範囲の説明',
       scope: { repository: body.repository, commit: body.commit, operation: body.operation, summary: body.summary, architecture: null, exclusions: ['.env', ...body.exclusions], limits: { rounds: body.rounds, requests_per_round: 8, material_chars: 400000, material_bytes: 800000 } } } });
-    return route.fulfill({ json: { stage: 'done', stopped_by: 'concluded', rounds: 2, requests_dropped: 0, limits: '合成の限界の説明', record: 'inv-1', usage: { calls: 2, input_tokens: 12345, cached_input_tokens: null, output_tokens: 678 }, scope_sha256: 'f'.repeat(64),
+    return route.fulfill({ json: { stage: 'done', stopped_by: 'concluded', rounds: 2, requests_dropped: 0, limits: '合成の限界の説明', record: 'inv-1', usage: { calls: 2, input_tokens: 12345, cached_input_tokens: null, cache_write_tokens: 2000, output_tokens: 678 }, scope_sha256: 'f'.repeat(64),
       concerns: [{ id: 'c-1', estimate: 'ログインは利用者IDとパスワードだけで通す', evidence: [{ path: 'app/auth.py', start: 3, end: 5 }], concern: '2つ目の認証がない', basis: 'repository', check: { by: 'run', detail: 'ログインして一覧が出るかを見る', observation: 'browser_text' } }],
       questions: ['院外から使うか'],
       material: [{ kind: 'search', query: 'login', hits: 1, truncated: false }, { kind: 'read', path: 'app/auth.py', start: 1, end: 10, blob: 'a'.repeat(40) }, { kind: 'refused', request: { kind: 'read', path: '.env' }, reason: '送らないパス' }] } });
@@ -124,7 +124,7 @@ try {
   assert.deepEqual(investigations[1].confirm, { scope_sha256: 'f'.repeat(64) });
   assert.equal(await investigation.getAttribute('data-investigation'), 'concluded');
   assert.match(await investigation.innerText(), /懸念 1件[\s\S]*往復2回、送った資料2件[\s\S]*2つ目の認証がない[\s\S]*このリポジトリのコードと設定[\s\S]*麦漆で動かして確かめる[\s\S]*院外から使うか/);
-  assert.equal(await investigation.locator('[data-usage]').innerText(), '使ったトークン：入力 12,345（うちキャッシュ 不明）、出力 678。モデルの呼び出し2回');
+  assert.equal(await investigation.locator('[data-usage]').innerText(), '使ったトークン：入力 12,345（うちキャッシュから読んだ分 不明、キャッシュに書いた分 2,000）、出力 678。モデルの呼び出し2回');
   assert.equal(await investigation.locator('[data-evidence]').getAttribute('href'), `https://github.com/${repository}/blob/${commit}/app/auth.py#L3-L5`);
   // 結果は事例の記録に残り、開き直しても出る。
   await page.reload(); await page.locator('[data-investigation]').waitFor();

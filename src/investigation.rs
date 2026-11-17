@@ -284,6 +284,7 @@ impl Run<'_> {
         entry["usage"] = json!({
             "input_tokens": answer["model"]["input_tokens"],
             "cached_input_tokens": answer["model"]["cached_input_tokens"],
+            "cache_write_tokens": answer["model"]["cache_write_tokens"],
             "output_tokens": answer["model"]["output_tokens"],
         });
         if answer["done"] == json!(true) {
@@ -638,6 +639,7 @@ fn usage_total(log: &[Value]) -> Value {
         "reported": reported,
         "input_tokens": sum("input_tokens"),
         "cached_input_tokens": sum("cached_input_tokens"),
+        "cache_write_tokens": sum("cache_write_tokens"),
         "output_tokens": sum("output_tokens"),
     })
 }
