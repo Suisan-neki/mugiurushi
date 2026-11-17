@@ -864,7 +864,7 @@ fn parse_hit(record: &[u8], prefix: &str) -> Option<(String, usize, String)> {
 }
 
 /// 文字の数で切る。切った場合は、末尾に「…」を付ける。
-fn clip(text: &str, max: usize) -> String {
+pub(crate) fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
     }

@@ -436,7 +436,8 @@ fn a_concern_citing_lines_that_were_not_returned_is_refused_and_recorded() {
         &f.root,
         vec![
             need(json!([read("app/patient.py", 1, 1)])),
-            // 2行目は返していない。
+            // 2行目は返していない。やり直しでも同じ結論が返る。
+            concluded(json!([concern("app/patient.py", 1, 2)])),
             concluded(json!([concern("app/patient.py", 1, 2)])),
         ],
     );
@@ -481,7 +482,7 @@ fn the_last_round_asks_for_a_conclusion_and_more_requests_are_not_answered() {
 fn more_requests_than_allowed_in_one_round_are_refused() {
     let f = fixture("many");
     let many: Vec<Value> = (1..=9).map(|n| read("app/patient.py", n, n)).collect();
-    let agent = Agent::start(&f.root, vec![need(json!(many))]);
+    let agent = Agent::start(&f.root, vec![need(json!(many.clone())), need(json!(many))]);
     assert!(run(&f, &agent, 3).is_err());
     // 不正な応答で止まっても、送った往復（送信内容のSHA-256と応答のID）は記録に残る。
     let ids: Vec<_> = fs::read_dir(f.root.join("case/investigations"))
@@ -490,11 +491,116 @@ fn more_requests_than_allowed_in_one_round_are_refused() {
         .collect();
     assert_eq!(ids.len(), 1);
     let saved: Value = serde_json::from_slice(&fs::read(ids[0].path()).unwrap()).unwrap();
+    // 1回やり直してから止まる。どちらの送信も記録に残る。
     let rounds = saved["rounds"].as_array().unwrap();
-    assert_eq!(rounds.len(), 1, "{saved}");
-    assert_eq!(rounds[0]["payload_sha256"].as_str().unwrap().len(), 64);
-    assert_eq!(rounds[0]["response_id"], "fake");
-    assert!(rounds[0]["error"].as_str().unwrap().contains("形が不正"));
+    assert_eq!(rounds.len(), 2, "{saved}");
+    for (n, entry) in rounds.iter().enumerate() {
+        assert_eq!(entry["round"], 1);
+        assert_eq!(entry["attempt"], n + 1);
+        assert_eq!(entry["payload_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(entry["response_id"], "fake");
+        assert!(entry["error"].as_str().unwrap().contains("形が不正"));
+    }
+    assert_eq!(rounds[0]["payload_sha256"], rounds[1]["payload_sha256"]);
+}
+
+#[test]
+fn a_failed_round_is_tried_again_with_the_same_payload_and_the_investigation_goes_on() {
+    let f = fixture("retry");
+    let agent = Agent::start(
+        &f.root,
+        vec![
+            need(json!([read("app/patient.py", 1, 3)])),
+            // 応答を読めなかった（502）。同じ送信内容でやり直すと、結論が返る。
+            json!({"__status": 502}),
+            concluded(json!([concern("app/patient.py", 2, 2)])),
+        ],
+    );
+    let result = run(&f, &agent, 3).unwrap();
+    assert_eq!(result["stopped_by"], "concluded");
+    assert_eq!(result["rounds"], 2);
+    let bodies = agent.bodies();
+    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies[1].1, bodies[2].1, "やり直しは同じ送信内容");
+    let saved = record(&f, result["record"].as_str().unwrap());
+    let attempts: Vec<_> = saved["rounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["round"].as_u64().unwrap(),
+                e["attempt"].as_u64().unwrap(),
+                e.get("error").is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(attempts, [(1, 1, false), (2, 1, true), (2, 2, false)]);
+    // やり直した分も送信なので、合計に数える。トークン数を受け取れなかった送信があるので、合計は分からない。
+    assert_eq!(result["usage"]["calls"], 3);
+    assert_eq!(result["usage"]["reported"], 2);
+    assert_eq!(result["usage"]["input_tokens"], Value::Null);
+}
+
+#[test]
+fn requests_the_agent_could_not_pass_on_are_told_back_as_refused_material() {
+    let f = fixture("rejected");
+    let mut first = need(json!([read("app/patient.py", 1, 3)]));
+    first["rejected"] = json!([{"request": "read '../etc/passwd' 1-2", "reason": "読み取りのパスは、リポジトリの中の相対パスにしてください"}]);
+    // 渡せる求めがなく、渡せなかった求めだけの回も、往復を続ける。
+    let mut second = need(json!([]));
+    second["rejected"] = json!([{"request": "search 'a\\nb'", "reason": "検索の語は、改行などの制御文字を含まない1〜200文字にしてください"}]);
+    let agent = Agent::start(
+        &f.root,
+        vec![
+            first,
+            second,
+            concluded(json!([concern("app/patient.py", 2, 2)])),
+        ],
+    );
+    let result = run(&f, &agent, 4).unwrap();
+    assert_eq!(
+        (result["stopped_by"].as_str(), result["rounds"].as_u64()),
+        (Some("concluded"), Some(3))
+    );
+    let bodies = agent.bodies();
+    let refused: Vec<(&str, &str)> = bodies[2].0["material"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["kind"] == "refused")
+        .map(|m| {
+            (
+                m["request"].as_str().unwrap(),
+                m["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        refused,
+        [
+            (
+                "read '../etc/passwd' 1-2",
+                "読み取りのパスは、リポジトリの中の相対パスにしてください"
+            ),
+            (
+                "search 'a\\nb'",
+                "検索の語は、改行などの制御文字を含まない1〜200文字にしてください"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_reply_with_nothing_to_answer_and_nothing_rejected_is_refused() {
+    let f = fixture("empty");
+    // 何もない応答を受け付けると、次の往復で結論を受け取って終わってしまう並び。
+    let agent = Agent::start(
+        &f.root,
+        vec![need(json!([])), need(json!([])), concluded(json!([]))],
+    );
+    let error = run(&f, &agent, 3).unwrap_err().to_string();
+    assert!(error.contains("形が不正"), "{error}");
 }
 
 #[test]
@@ -582,6 +688,7 @@ fn a_round_whose_token_counts_were_not_received_makes_the_totals_unknown() {
         vec![
             need(json!([read("app/patient.py", 1, 3)])),
             json!({"__status": 502}),
+            json!({"__status": 502}),
         ],
     );
     assert!(run(&f, &agent, 3).is_err());
@@ -593,7 +700,7 @@ fn a_round_whose_token_counts_were_not_received_makes_the_totals_unknown() {
     // 2回目の往復は送ったが、トークン数を受け取れていない。1回目の分だけを合計として見せない。
     assert_eq!(
         saved["usage"],
-        json!({"calls": 2, "reported": 1, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null})
+        json!({"calls": 3, "reported": 1, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null})
     );
 }
 
