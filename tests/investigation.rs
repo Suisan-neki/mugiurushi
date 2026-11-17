@@ -48,6 +48,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 /// 架空の診療所のリポジトリ。保存の処理と、送らないファイル（秘密の値を含む）を持つ。
 fn fixture(name: &str) -> Fixture {
+    fixture_with(name, &[])
+}
+
+/// 架空の診療所のリポジトリに、ファイルを足したもの。
+fn fixture_with(name: &str, extra: &[(String, String)]) -> Fixture {
     let root = std::env::temp_dir().join(format!(
         "mugiurushi-investigation-{name}-{}",
         std::process::id()
@@ -71,6 +76,11 @@ fn fixture(name: &str) -> Fixture {
     )
     .unwrap();
     fs::write(source.join("README.md"), "架空の診療所\n").unwrap();
+    for (path, text) in extra {
+        let path = source.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
     git(&source, &["init", "-q"]);
     git(&source, &["add", "-A"]);
     git(
@@ -386,6 +396,10 @@ fn requests_are_answered_from_the_pinned_commit_and_concerns_must_cite_returned_
         assert_eq!(entry["payload_sha256"].as_str().unwrap(), sent);
     }
     assert_eq!(rounds[0]["answered"][1]["blob"].as_str().unwrap().len(), 40);
+    // 検索で送った行も、ファイルと範囲（当たった行と前後の行）を記録と結果に残す。
+    let sent = json!([{"path": "app/patient.py", "start": 1, "end": 3}]);
+    assert_eq!(rounds[0]["answered"][0]["ranges"], sent);
+    assert_eq!(result["material"][0]["ranges"], sent);
     assert!(
         !serde_json::to_string(&saved).unwrap().contains("db.insert"),
         "記録に資料の中身がある"
@@ -447,6 +461,79 @@ fn more_requests_than_allowed_in_one_round_are_refused() {
     let many: Vec<Value> = (1..=9).map(|n| read("app/patient.py", n, n)).collect();
     let agent = Agent::start(&f.root, vec![need(json!(many))]);
     assert!(run(&f, &agent, 3).is_err());
+    // 不正な応答で止まっても、送った往復（送信内容のSHA-256と応答のID）は記録に残る。
+    let ids: Vec<_> = fs::read_dir(f.root.join("case/investigations"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(ids.len(), 1);
+    let saved: Value = serde_json::from_slice(&fs::read(ids[0].path()).unwrap()).unwrap();
+    let rounds = saved["rounds"].as_array().unwrap();
+    assert_eq!(rounds.len(), 1, "{saved}");
+    assert_eq!(rounds[0]["payload_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(rounds[0]["response_id"], "fake");
+    assert!(rounds[0]["error"].as_str().unwrap().contains("形が不正"));
+}
+
+#[test]
+fn material_including_refusals_never_exceeds_the_accepted_total() {
+    // 4万文字近いファイルを11件。8件と3件を求めると、合計の上限に達する。
+    let line = "x".repeat(99);
+    let big = format!("{line}\n").repeat(400);
+    let extra: Vec<(String, String)> = (0..11)
+        .map(|n| (format!("big/{n:02}.txt"), big.clone()))
+        .collect();
+    let f = fixture_with("total", &extra);
+    let reads = |range: std::ops::Range<u64>| -> Value {
+        json!(
+            range
+                .map(|n| read(&format!("big/{n:02}.txt"), 1, 400))
+                .collect::<Vec<_>>()
+        )
+    };
+    let mut second = reads(8..11);
+    // 同じ要求と送らないファイルも求め、断る理由を増やす。
+    for again in reads(0..3).as_array().unwrap() {
+        second.as_array_mut().unwrap().push(again.clone());
+    }
+    second
+        .as_array_mut()
+        .unwrap()
+        .push(read("app/conf/.env", 1, 1));
+    let agent = Agent::start(
+        &f.root,
+        vec![need(reads(0..8)), need(second), concluded(json!([]))],
+    );
+    let result = run(&f, &agent, 5).unwrap();
+    assert_eq!(result["stopped_by"], "concluded");
+    let bodies = agent.bodies();
+    assert_eq!(bodies.len(), 3);
+    // 上限に達した後の往復では、結論を求める。
+    assert_eq!(bodies[2].0["budget"]["rounds_left"], 0);
+    let material = bodies[2].0["material"].as_array().unwrap();
+    let chars: usize = material
+        .iter()
+        .map(|m| {
+            let len = |key: &str| m[key].as_str().map_or(0, |s| s.chars().count());
+            len("text") + len("reason")
+        })
+        .sum();
+    let bytes: usize = material
+        .iter()
+        .map(|m| serde_json::to_vec(m).unwrap().len())
+        .sum();
+    assert!(chars <= 400_000, "資料の文字の数 {chars} が上限を超えた");
+    assert!(bytes <= 800_000, "資料のバイト数 {bytes} が上限を超えた");
+    // 上限に達した要求は、中身を返さず理由を返す。
+    let refused: Vec<&str> = material
+        .iter()
+        .filter(|m| m["kind"] == "refused")
+        .map(|m| m["reason"].as_str().unwrap())
+        .collect();
+    assert!(
+        refused.iter().any(|r| r.contains("合計の上限")),
+        "{refused:?}"
+    );
 }
 
 #[test]

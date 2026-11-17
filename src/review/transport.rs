@@ -89,6 +89,21 @@ async fn gate(State(server): State<Server>, request: HttpRequest, next: Next) ->
         Err(Rejection(status, message)) => failure(status, message),
     }
 }
+/// AIと外部読取の待ちが、事例・結果の読出しの枠を使い切らないようにする。
+/// この経路は同時実行の枠を取り、`Prefer: respond-async` なら受付と待ち合わせで回す。
+fn slow(method: &str, path: &str) -> bool {
+    method == "POST"
+        && matches!(
+            path,
+            "/api/v1/system-diagram"
+                | "/api/v1/system-diagram/question"
+                | "/api/v1/system-diagram/dialogue"
+                | "/api/v1/ai"
+                | "/api/v1/understand"
+                | "/api/v1/prepare"
+                | "/api/v1/agent/investigate"
+        )
+}
 async fn handle(server: Server, request: HttpRequest) -> Response {
     let asynchronous = request
         .headers()
@@ -109,17 +124,7 @@ async fn handle(server: Server, request: HttpRequest) -> Response {
         path,
         body,
     };
-    // AIと外部読取の待ちが、事例・結果の読出しの枠を使い切らないようにする。
-    let slow = request.method == "POST"
-        && matches!(
-            request.path.as_str(),
-            "/api/v1/system-diagram"
-                | "/api/v1/system-diagram/question"
-                | "/api/v1/system-diagram/dialogue"
-                | "/api/v1/ai"
-                | "/api/v1/understand"
-                | "/api/v1/prepare"
-        );
+    let slow = slow(&request.method, &request.path);
     if let Some(id) = request
         .path
         .strip_prefix("/api/v1/jobs/")
@@ -274,4 +279,18 @@ pub(super) fn connection(
             .await
             .map_err(io::Error::other)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slow;
+
+    #[test]
+    fn long_running_routes_are_queued_and_limited() {
+        // コードをたどる往復は、取得と複数回のAIの呼び出しを含むので、受付と待ち合わせで回す。
+        assert!(slow("POST", "/api/v1/agent/investigate"));
+        assert!(slow("POST", "/api/v1/understand"));
+        assert!(!slow("GET", "/api/v1/agent/investigate"));
+        assert!(!slow("POST", "/api/v1/flow"));
+    }
 }

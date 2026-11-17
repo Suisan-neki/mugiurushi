@@ -468,17 +468,19 @@ impl CodeTree {
         let mut returned = start - 1;
         let mut truncated = false;
         for line in &lines[start - 1..last] {
-            let count = line.chars().count() + usize::from(!out.is_empty());
+            // 区切りの改行は、本文が空かどうかではなく、返した行の数で決める。空行から始まる範囲でも行番号がずれない。
+            let first = returned == start - 1;
+            let count = line.chars().count() + usize::from(!first);
             if used + count > MAX_READ_CHARS {
                 truncated = true;
                 // 1行目だけで上限を超える場合は、その行の先頭だけを返す。
-                if out.is_empty() {
+                if first {
                     out = clip(line, MAX_READ_CHARS);
                     returned += 1;
                 }
                 break;
             }
-            if !out.is_empty() {
+            if !first {
                 out.push('\n');
             }
             out.push_str(line);
@@ -496,19 +498,23 @@ impl CodeTree {
         })
     }
 
-    /// オブジェクトの内容を、UTF-8のテキストとして読む。NULを含むものはバイナリとして扱う。
     fn blob_text(&self, blob: &str) -> io::Result<String> {
-        let output = run(
-            &self.git_dir,
-            &["cat-file", "blob", blob],
-            COMMAND_TIMEOUT,
-            MAX_FILE_BYTES as usize + 1,
-        )?;
-        if output.contains(&0) {
-            return Err(invalid("バイナリのファイルです"));
-        }
-        String::from_utf8(output).map_err(|_| invalid("UTF-8のテキストではありません"))
+        blob_text(&self.git_dir, blob)
     }
+}
+
+/// オブジェクトの内容を、UTF-8のテキストとして読む。NULを含むものはバイナリとして扱う。
+fn blob_text(git_dir: &Path, blob: &str) -> io::Result<String> {
+    let output = run(
+        git_dir,
+        &["cat-file", "blob", blob],
+        COMMAND_TIMEOUT,
+        MAX_FILE_BYTES as usize + 1,
+    )?;
+    if output.contains(&0) {
+        return Err(invalid("バイナリのファイルです"));
+    }
+    String::from_utf8(output).map_err(|_| invalid("UTF-8のテキストではありません"))
 }
 
 /// リポジトリ（owner/name）とコミット（40桁の16進数）の形を確かめる。
@@ -736,7 +742,9 @@ fn list_files(
     Ok(files)
 }
 
-/// gitの検索を実行し、当たった行を上限まで受け取る。送ってよい通常のファイルの行だけを残す。
+/// gitの検索を実行し、当たった行を上限まで受け取る。送ってよい通常のファイルのうち、読み取りでも返せるもの
+/// （大きさの上限以内で、NULを含まないUTF-8のテキスト）の行だけを残し、それだけを上限に数える。
+/// gitの `-I` はファイルの先頭しかバイナリかどうかを見ず、UTF-8かどうかも見ないので、こちらで確かめる。
 /// 上限を超えた時点で検索を止める。上限を超えたか（ほかにも当たった行があるか）を返す。
 fn grep(
     git_dir: &Path,
@@ -752,16 +760,24 @@ fn grep(
     let err = child.stderr.take().expect("piped stderr");
     let errors = thread::spawn(move || read_capped(err, 8 * 1024));
     let prefix = format!("{commit}:");
-    let allowed: Arc<Vec<String>> = Arc::new(allowed.keys().cloned().collect());
+    let allowed = allowed.clone();
+    let objects = git_dir.to_path_buf();
     let found: Arc<Mutex<Found>> = Arc::new(Mutex::new((vec![], false)));
     let shared = found.clone();
     let reader = thread::spawn(move || {
         let mut reader = BufReader::new(out);
+        let mut readable: BTreeMap<String, bool> = BTreeMap::new();
         while let Some(record) = next_record(&mut reader) {
             let Some(hit) = parse_hit(&record, &prefix) else {
                 continue;
             };
-            if allowed.binary_search(&hit.0).is_err() {
+            let Some(entry) = allowed.get(&hit.0) else {
+                continue;
+            };
+            let ok = *readable.entry(hit.0.clone()).or_insert_with(|| {
+                entry.size <= MAX_FILE_BYTES && blob_text(&objects, &entry.blob).is_ok()
+            });
+            if !ok {
                 continue;
             }
             let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
@@ -919,6 +935,16 @@ mod tests {
             format!("{}\n", "x".repeat(200)).repeat(400).as_bytes(),
         );
         write("app/big.txt", &vec![b'a'; MAX_FILE_BYTES as usize + 10]);
+        // 読み取りでは返さないが、gitの検索には当たるファイル（UTF-8でない、先頭より後ろにNUL、大きすぎる）。
+        write("app/latin1.txt", b"unreadable_marker caf\xe9\n");
+        let mut late = b"unreadable_marker\n".to_vec();
+        late.extend(vec![b'a'; 20_000]);
+        late.extend(b"\0\n");
+        write("app/late-nul.txt", &late);
+        let mut large = b"unreadable_marker\n".to_vec();
+        large.extend(vec![b'a'; MAX_FILE_BYTES as usize + 10]);
+        write("app/large-match.txt", &large);
+        write("app/blank-start.txt", b"\n\nneedle\n");
         std::os::unix::fs::symlink("patient.py", source.join("app/link.py")).unwrap();
         git(&source, &["init", "-q"]);
         git(&source, &["add", "-A"]);
@@ -1058,6 +1084,9 @@ mod tests {
             ("we:ird name.txt", 1)
         );
         assert!(tree.search("-e", false).unwrap().hits.is_empty());
+        // 読み取りで返さないファイルの行は、検索でも返さない。
+        let unreadable = tree.search("unreadable_marker", false).unwrap();
+        assert!(unreadable.hits.is_empty(), "{unreadable:?}");
         for bad in ["", "a\nb", &"x".repeat(MAX_QUERY_CHARS + 1)] {
             assert!(tree.search(bad, false).is_err(), "{bad:?} を受け付けない");
         }
@@ -1102,6 +1131,10 @@ mod tests {
         );
         assert_eq!(read.blob.len(), 40);
         assert!(!read.truncated);
+        // 空行から始まる範囲でも、空行を落とさない（本文の行と行番号が対応する）。
+        let blank = tree.read("app/blank-start.txt", 1, 3).unwrap();
+        assert_eq!((blank.start, blank.end), (1, 3));
+        assert_eq!(blank.text, "\n\nneedle");
         // 文字の数の上限で、範囲の途中で打ち切る。
         let long = tree.read("app/long.txt", 1, MAX_READ_LINES).unwrap();
         assert!(long.truncated && long.end < MAX_READ_LINES);

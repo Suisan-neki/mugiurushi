@@ -30,6 +30,10 @@ pub const REQUESTS_PER_ROUND: usize = 8;
 /// 送る資料の合計の上限。文字の数はAIエージェントの上限と同じ数え方で、バイト数はHTTPの入力の上限（1MiB）に収めるため。
 pub const MAX_MATERIAL_CHARS: usize = 400_000;
 pub const MAX_MATERIAL_BYTES: usize = 800_000;
+/// 上限のうち、断った理由を書くために残す分。中身のある資料は、この分を除いた量までにする。
+/// 1往復の件数（8件）を断る理由が収まる大きさにしている。
+const RESERVED_CHARS: usize = 2_000;
+const RESERVED_BYTES: usize = 8_000;
 /// 一覧で返す項目の数の上限。
 pub const MAX_LIST_ENTRIES: usize = 500;
 const MAX_OPERATION: usize = 2000;
@@ -210,15 +214,19 @@ impl Run<'_> {
                 self.log.push(entry);
                 return self.conclusion(&answer, round + 1, "concluded");
             }
-            let requests = answer["requests"]
+            let Some(requests) = answer["requests"]
                 .as_array()
                 .filter(|r| !r.is_empty() && r.len() <= REQUESTS_PER_ROUND)
-                .ok_or_else(|| {
-                    io::Error::other(format!(
-                        "AIエージェントの求めるものの形が不正です（1回に{REQUESTS_PER_ROUND}件まで）"
-                    ))
-                })?
-                .clone();
+                .cloned()
+            else {
+                // 送った往復は、応答が不正でも記録に残す。
+                let error = io::Error::other(format!(
+                    "AIエージェントの求めるものの形が不正です（1回に{REQUESTS_PER_ROUND}件まで）"
+                ));
+                entry["error"] = json!(error.to_string());
+                self.log.push(entry);
+                return Err(error);
+            };
             if rounds_left == 0 {
                 // 最後の往復でも求めるものが返った。これ以上は送らない。
                 entry["requests"] = json!(requests);
@@ -260,9 +268,10 @@ impl Run<'_> {
         };
         let material = match reply {
             Ok(material) => {
+                // 中身のある資料は、断った理由を書く余裕を残した上限までにする。
                 let (chars, bytes) = size_of(&material);
-                if self.chars + chars > MAX_MATERIAL_CHARS
-                    || self.bytes + bytes > MAX_MATERIAL_BYTES
+                if self.chars + chars > MAX_MATERIAL_CHARS - RESERVED_CHARS
+                    || self.bytes + bytes > MAX_MATERIAL_BYTES - RESERVED_BYTES
                 {
                     self.full = true;
                     refused(&key, "資料の合計の上限に達したので、これ以上は返さない")
@@ -273,6 +282,12 @@ impl Run<'_> {
             Err(reason) => refused(&key, &reason),
         };
         let (chars, bytes) = size_of(&material);
+        // 断った理由も資料に数える。余裕を使い切ったら、理由も送らない。了承した上限は超えない。
+        if self.chars + chars > MAX_MATERIAL_CHARS || self.bytes + bytes > MAX_MATERIAL_BYTES {
+            self.full = true;
+            return json!({"request": key, "kind": "not_sent",
+                "reason": "資料の合計の上限に達したので、断った理由も送らなかった"});
+        }
         self.chars += chars;
         self.bytes += bytes;
         let summary = json!({
@@ -283,6 +298,7 @@ impl Run<'_> {
             "end": material.get("end"),
             "blob": material.get("blob"),
             "hits": material.get("hits").and_then(Value::as_array).map(Vec::len),
+            "ranges": (material["kind"] == "search").then(|| hit_ranges(&material)),
             "entries": material.get("paths").and_then(Value::as_array).map(Vec::len),
             "truncated": material.get("truncated"),
             "reason": material.get("reason"),
@@ -375,7 +391,7 @@ impl Run<'_> {
             .iter()
             .map(|m| match m["kind"].as_str() {
                 Some("read") => json!({"kind": "read", "path": m["path"], "start": m["start"], "end": m["end"], "blob": m["blob"]}),
-                Some("search") => json!({"kind": "search", "query": m["query"], "hits": m["hits"].as_array().map_or(0, Vec::len), "truncated": m["truncated"]}),
+                Some("search") => json!({"kind": "search", "query": m["query"], "hits": m["hits"].as_array().map_or(0, Vec::len), "ranges": hit_ranges(m), "truncated": m["truncated"]}),
                 Some("list") => json!({"kind": "list", "prefix": m["prefix"], "entries": m["paths"].as_array().map_or(0, Vec::len)}),
                 _ => json!({"kind": "refused", "request": m["request"], "reason": m["reason"]}),
             })
@@ -456,6 +472,30 @@ fn size_of(material: &Value) -> (usize, usize) {
     (chars, bytes)
 }
 
+/// 検索の結果で送った行の範囲（当たった行と、送った前後の行）。中身は持たない。記録と根拠の確かめに使う。
+fn hit_ranges(material: &Value) -> Vec<Value> {
+    material["hits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|hit| {
+            let path = hit["path"].as_str()?;
+            let line = hit["line"].as_u64()?;
+            let start = if hit["before"].is_string() && line > 1 {
+                line - 1
+            } else {
+                line
+            };
+            let end = if hit["after"].is_string() {
+                line + 1
+            } else {
+                line
+            };
+            Some(json!({"path": path, "start": start, "end": end}))
+        })
+        .collect()
+}
+
 /// 資料の中にある行（パスごと）。懸念の根拠にできるのは、この行だけである。
 fn covered_lines(material: &[Value]) -> BTreeMap<String, BTreeSet<usize>> {
     let mut lines: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
@@ -473,20 +513,18 @@ fn covered_lines(material: &[Value]) -> BTreeMap<String, BTreeSet<usize>> {
                     .extend(start as usize..=end as usize);
             }
             Some("search") => {
-                for hit in m["hits"].as_array().into_iter().flatten() {
-                    let (Some(path), Some(line)) = (hit["path"].as_str(), hit["line"].as_u64())
-                    else {
+                for range in hit_ranges(m) {
+                    let (Some(path), Some(start), Some(end)) = (
+                        range["path"].as_str(),
+                        range["start"].as_u64(),
+                        range["end"].as_u64(),
+                    ) else {
                         continue;
                     };
-                    let line = line as usize;
-                    let got = lines.entry(path.to_owned()).or_default();
-                    got.insert(line);
-                    if hit["before"].is_string() && line > 1 {
-                        got.insert(line - 1);
-                    }
-                    if hit["after"].is_string() {
-                        got.insert(line + 1);
-                    }
+                    lines
+                        .entry(path.to_owned())
+                        .or_default()
+                        .extend(start as usize..=end as usize);
                 }
             }
             _ => {}
