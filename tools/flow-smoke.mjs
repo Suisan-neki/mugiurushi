@@ -64,9 +64,10 @@ try {
     ] }) });
   });
   // コードをたどる往復（#230）。了承がなければ範囲だけを返し、了承があれば結論を返す。
-  const investigations = [];
-  await page.route('**/api/v1/agent/investigate', route => {
+  const investigations = []; let hold = null;
+  await page.route('**/api/v1/agent/investigate', async route => {
     const body = route.request().postDataJSON(); investigations.push(body);
+    if (body.confirm && hold) await hold;
     if (!body.confirm) return route.fulfill({ json: { stage: 'preview', destination: '合成のAIエージェント', scope_sha256: 'f'.repeat(64), note: '合成の範囲の説明',
       scope: { repository: body.repository, commit: body.commit, operation: body.operation, summary: body.summary, architecture: null, exclusions: ['.env', ...body.exclusions], limits: { rounds: body.rounds, requests_per_round: 8, material_chars: 400000, material_bytes: 800000 } } } });
     return route.fulfill({ json: { stage: 'done', stopped_by: 'concluded', rounds: 2, requests_dropped: 0, limits: '合成の限界の説明', record: 'inv-1', scope_sha256: 'f'.repeat(64),
@@ -115,6 +116,7 @@ try {
   const scopeBox = page.locator('[data-scope]'); await scopeBox.waitFor();
   assert.deepEqual(investigations[0], { repository, commit, operation: 'ログインして一覧を開く', summary: '合成の診療所のタスク管理', exclusions: ['deploy/**', 'secrets/*'], rounds: 5 });
   assert.equal(await scopeBox.locator('[data-exclusions]').innerText(), '.env、deploy/**、secrets/*');
+  assert.equal(await scopeBox.locator('[data-scope-sha256]').innerText(), 'f'.repeat(64), '了承する範囲のSHA-256を示す');
   assert.match(await scopeBox.innerText(), /5回（1回に8件まで、資料の合計は400,000文字まで）/);
   assert.equal(await page.getByRole('button', { name: 'この範囲で始める' }).isDisabled(), true, '了承の前は始められない');
   await page.locator('#agree-scope').check(); await page.getByRole('button', { name: 'この範囲で始める' }).click();
@@ -144,6 +146,16 @@ try {
   assert.deepEqual(requests.scan[1].confirm, { payload_sha256: 'e'.repeat(64), synthetic_only: true });
   assert.deepEqual(await page.locator('[data-section]').evaluateAll(s => s.map(x => x.getAttribute('data-section'))), ['g3', 'pi']);
   assert.doesNotMatch(await page.locator('main').innerText(), /運用の手順書/, '試験で確かめられない項目は出さない');
+  // 往復の途中でこの段へ戻っても、往復の結果とこの段の操作（回答、試験の案）の両方が記録に残る。
+  let release = () => {}; hold = new Promise(ok => { release = ok; });
+  await page.getByRole('button', { name: '1 照合の準備' }).click();
+  await page.getByRole('button', { name: '範囲を確かめる' }).click();
+  await page.locator('[data-scope]').waitFor(); await page.locator('#agree-scope').check();
+  await page.getByRole('button', { name: 'この範囲で始める' }).click();
+  await page.getByRole('button', { name: /2 照合とヒアリング/ }).click();
+  await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
+  const investigationSaved = page.waitForResponse(r => r.url().endsWith('/api/v1/flow') && r.request().method() === 'POST');
+  release(); await investigationSaved; hold = null;
   await page.locator('[data-question="q1"] input[type=radio]').first().check();
   await page.locator('#ask').fill('ログの保存期間は？');
   await page.getByRole('button', { name: 'ガイドラインに照らして答えてもらう' }).click();
@@ -158,6 +170,9 @@ try {
 
   // 3 検証案の了承：了承した試験ごとに確認項目を作り、照合の候補を確かめる部分として登録する。
   await page.locator('[data-test="t-login"]').waitFor();
+  const stored = (await (await page.request.get(url + '/api/v1/flow', { headers: { 'X-Review-Token': await token() } })).json()).records[`${repository}@${commit}`].record;
+  assert.equal(stored.investigation?.result?.record, 'inv-1', '往復の結果が記録に残る');
+  assert.deepEqual(stored.answers?.q1?.answer, 'はい', '往復の途中で答えた回答が記録に残る');
   await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
   await page.locator('[data-result]').first().waitFor();
   const view = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await token() } })).json();

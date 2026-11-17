@@ -185,7 +185,8 @@ function investigationView(/** @type {() => string} */ summary) {
       try {
         const result = await api('POST', '/api/v1/agent/investigate', { ...body, confirm: { scope_sha256: preview.scope_sha256 } });
         const record = { operation: body.operation, exclusions: body.exclusions, rounds_limit: body.rounds, scope_sha256: preview.scope_sha256, result, at: new Date().toISOString() };
-        state.record = { ...(state.record || {}), investigation: record };
+        // 記録の物は差し替えない。往復の途中でほかの段へ移ると、その段の操作が今の記録の物を書き換えるため。
+        if (state.record) state.record.investigation = record; else state.record = { investigation: record };
         await saveRecord();
         fill(out, investigationResult(record));
         setStatus('');
@@ -203,7 +204,8 @@ function investigationView(/** @type {() => string} */ summary) {
           h('tr', {}, h('th', { scope: 'row' }, '対象の操作'), h('td', {}, scope.operation)),
           scope.summary ? h('tr', {}, h('th', { scope: 'row' }, '説明'), h('td', {}, scope.summary)) : null,
           h('tr', {}, h('th', { scope: 'row' }, '往復の上限'), h('td', {}, `${scope.limits.rounds}回（1回に${scope.limits.requests_per_round}件まで、資料の合計は${scope.limits.material_chars.toLocaleString('ja-JP')}文字まで）`)),
-          h('tr', {}, h('th', { scope: 'row' }, '送らないパス'), h('td', { class: 'code', 'data-exclusions': '' }, scope.exclusions.join('、'))))),
+          h('tr', {}, h('th', { scope: 'row' }, '送らないパス'), h('td', { class: 'code', 'data-exclusions': '' }, scope.exclusions.join('、'))),
+          h('tr', {}, h('th', { scope: 'row' }, '範囲のSHA-256'), h('td', { class: 'code', 'data-scope-sha256': '' }, preview.scope_sha256)))),
         h('label', { style: 'display:flex;gap:8px;align-items:flex-start;margin-top:8px' }, agree, 'このリポジトリのこのコミットのコードを、送らないパスを除いて、AIが求めた分だけ送ることを了承する。送ってよいコードであることを確かめた'),
         h('div', { class: 'actions' }, start))));
   }));
