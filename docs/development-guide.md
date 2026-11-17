@@ -50,6 +50,7 @@ Cargoパッケージ名とバイナリ名は`mugiurushi`です。旧名称はexe
 | `src/system_diagram/` | 構成図、部分ごとの会話、期待と結果への対応づけ |
 | `src/execution.rs`・`src/trial.rs` | 固定版の実行、故障条件、観測と判定 |
 | `src/shutdown.rs` | 終了の合図（SIGTERM・SIGINT）を受けたときの、子のプロセスとコンテナの回収 |
+| `src/code_tree.rs` | 照合でAIエージェントが求める検索と読み取りに答える、固定したコミットの浅い取得・検索・範囲の読み取り |
 | `src/recording.rs`・`src/run_record.rs` | 出来事・試行情報・完了記録の保存 |
 | `src/user_trial.rs`・`ui/web-trial.*` | 過去の試作のWeb試用記録（保存済みデータを継続して扱う） |
 | `src/workspace.rs`・`src/comparison.rs` | 条件、根拠、人の判断、履歴と試行比較 |

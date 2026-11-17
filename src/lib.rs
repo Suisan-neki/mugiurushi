@@ -6,6 +6,7 @@ pub mod backup;
 pub mod browser;
 pub mod browser_evidence;
 pub mod browser_recipes;
+pub mod code_tree;
 pub mod comparison;
 pub mod container;
 pub mod coverage;
