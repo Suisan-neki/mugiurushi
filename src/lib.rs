@@ -15,6 +15,7 @@ pub mod environment;
 pub mod error;
 pub mod execution;
 pub mod http_probe;
+pub mod investigation;
 pub mod model;
 pub mod prepared_web;
 mod process;

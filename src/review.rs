@@ -53,6 +53,8 @@ pub struct App {
     /// 運営者が設定したAIエージェント（mugiurushi-ai）。未設定でも確認項目・試験・判定は使える。
     pub agent: Option<crate::agent::Config>,
     pub dify: Option<crate::system_diagram::dialogue::DifyConfig>,
+    /// 照合でコードをたどるために取得した、固定したコミットの置き場所。
+    pub checkouts: std::path::PathBuf,
 }
 
 struct Request {
@@ -287,6 +289,20 @@ fn handle_request(
                             .map(|id| crate::agent::screens_for(directory, id))
                             .transpose()?;
                         crate::agent::flow_scan(app.agent.as_ref(), &app.store, r, screens.as_ref())
+                    });
+                return result_response(stream, result);
+            }
+            ("POST", "/api/v1/agent/investigate") => {
+                // 了承の前は範囲だけを返す。了承した後は、範囲の中で往復を回し、記録を事例のディレクトリに残す。
+                let result = parse_body::<crate::investigation::InvestigateRequest>(&request.body)
+                    .and_then(|r| {
+                        crate::investigation::investigate(
+                            app.agent.as_ref(),
+                            &app.checkouts,
+                            &directory.join("investigations"),
+                            r,
+                            crate::investigation::Source::GitHub,
+                        )
                     });
                 return result_response(stream, result);
             }
@@ -602,6 +618,7 @@ pub fn serve_app(
         ai: crate::ai::Config::for_app(&data)?,
         agent: crate::agent::Config::from_env()?,
         dify: crate::system_diagram::dialogue::DifyConfig::for_app(&data)?,
+        checkouts: data.join("checkouts"),
     };
     println!(
         "データの保存先: {}\nAIによる説明: {}",

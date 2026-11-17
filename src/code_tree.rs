@@ -291,7 +291,8 @@ impl CodeTree {
         Self::open_from(base, repository, commit, &url, exclusions)
     }
 
-    fn open_from(
+    /// 取得元のURL（https か file）を指定して開く。試験と、GitHub以外から取得する場合に使う。
+    pub fn open_from(
         base: &Path,
         repository: &str,
         commit: &str,
@@ -516,7 +517,8 @@ fn blob_text(git_dir: &Path, blob: &str) -> io::Result<String> {
     String::from_utf8(output).map_err(|_| invalid("UTF-8のテキストではありません"))
 }
 
-fn validate_source(repository: &str, commit: &str) -> io::Result<()> {
+/// リポジトリ（owner/name）とコミット（40桁の16進数）の形を確かめる。
+pub fn validate_source(repository: &str, commit: &str) -> io::Result<()> {
     let part = |s: &str| {
         !s.is_empty()
             && s.len() <= 100
