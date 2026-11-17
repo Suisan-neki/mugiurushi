@@ -5,6 +5,7 @@
   "summary": "架空の診療所の受付",
   "architecture": null,
   "material": [],
+  "material_rounds": [],
   "budget": {
     "rounds_left": 3,
     "requests_per_round": 8

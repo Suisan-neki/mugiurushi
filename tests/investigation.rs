@@ -367,6 +367,12 @@ fn requests_are_answered_from_the_pinned_commit_and_concerns_must_cite_returned_
         .collect();
     assert_eq!(left, [3, 2, 1]);
     assert_eq!(bodies[0].0["material"], json!([]));
+    // 往復ごとに資料へ足した件数を送る。AIエージェントがキャッシュの区切りを往復の単位で置くために使う。
+    let counts: Vec<Value> = bodies
+        .iter()
+        .map(|(b, _)| b["material_rounds"].clone())
+        .collect();
+    assert_eq!(counts, [json!([]), json!([4]), json!([4, 2])]);
     assert_eq!(bodies[0].0["operation"], "患者の新規登録");
     // 2回目の往復の資料：検索の結果、読み取った範囲、送らないファイルは理由だけ、一覧。
     let material = bodies[1].0["material"].as_array().unwrap();
