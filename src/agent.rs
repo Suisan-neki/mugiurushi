@@ -799,6 +799,18 @@ pub struct PlanFinding {
     pub requirement: String,
     #[serde(default)]
     pub how: String,
+    /// 候補の出どころ。ガイドラインとの照合の候補か、コードをたどって出た懸念か。省略はガイドラインの候補として扱う。
+    /// 懸念の候補は、懸念が起きていないことを確かめる試験にする。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<FindingSource>,
+}
+
+/// 試験の案の候補の出どころ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSource {
+    Guideline,
+    Concern,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1594,6 +1594,7 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
                 id: id.into(),
                 requirement: "二要素認証".into(),
                 how: String::new(),
+                source: None,
             })
             .collect(),
         confirm,
@@ -1844,6 +1845,7 @@ fn screens_join_the_scan_input_only_when_chosen_and_unsent_screen_references_are
                 id: "f-1".into(),
                 requirement: "二要素認証".into(),
                 how: "入力欄の種類を見る".into(),
+                source: None,
             }],
             confirm: None,
             screen_evidence: None,
@@ -1960,6 +1962,7 @@ fn plan_accounts_for_every_candidate_without_guessing_reasons() {
                     id: id.into(),
                     requirement: format!("要求{id}"),
                     how: String::new(),
+                    source: None,
                 })
                 .collect(),
             screen_evidence: None,
@@ -2026,4 +2029,57 @@ fn plan_accounts_for_every_candidate_without_guessing_reasons() {
     ] {
         assert!(run(bad).is_err(), "{why}");
     }
+}
+
+#[test]
+fn a_concern_candidate_is_sent_to_the_plan_with_its_source() {
+    use mugiurushi::agent::{FindingSource, PlanFinding, PlanRequest, plan};
+    let f = Fixture::new("懸念の候補を試験の案へ");
+    let commit = "a".repeat(40);
+    let snapshots = f.directory.join("snapshots");
+    fs::create_dir_all(snapshots.join("example/clinic")).unwrap();
+    fs::write(
+        snapshots.join(format!("example/clinic/{commit}.json")),
+        serde_json::json!({"schema": 1, "fullName": "example/clinic", "reference": commit, "commit": commit,
+            "inventory": [{"path": "app/patient.py", "mode": "100644"}],
+            "files": {"app/patient.py": "def save(p):\n    log(p.national_id)\n"}, "omitted": []})
+        .to_string(),
+    )
+    .unwrap();
+    let store = mugiurushi::understanding::Store::new(snapshots).unwrap();
+    let agent = FakeAgent::start(&f.directory, vec![]);
+    let config = agent.config();
+    let candidate = |id: &str, source| PlanFinding {
+        id: id.into(),
+        requirement: format!("候補{id}"),
+        how: String::new(),
+        source,
+    };
+    let preview = plan(
+        Some(&config),
+        &store,
+        PlanRequest {
+            repository: "example/clinic".into(),
+            commit,
+            files: vec!["app/patient.py".into()],
+            summary: String::new(),
+            answers: vec![],
+            findings: vec![
+                candidate("f-1", None),
+                candidate("c-1", Some(FindingSource::Concern)),
+            ],
+            confirm: None,
+            screen_evidence: None,
+        },
+        None,
+    )
+    .unwrap();
+    let findings = preview["payload"]["findings"].as_array().unwrap();
+    // 出どころを書かない候補は、これまでと同じ形で送る（受け渡しの固定ファイルを変えない）。
+    assert!(findings[0].get("source").is_none(), "{findings:?}");
+    assert_eq!(findings[1]["source"], "concern");
+    assert!(
+        agent.received.lock().unwrap().is_empty(),
+        "確認の段階では送らない"
+    );
 }

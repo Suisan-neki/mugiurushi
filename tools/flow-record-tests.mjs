@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import {
   applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, StaleResponse,
   approve, approvedCheck, approvedTests, planForCheck, checkIdOf, startStep, migrate, fingerprint, untestedFindings,
+  applyInvestigation, runConcerns, planIsCurrent,
 } from '../ui/flow-record.js';
 
 const scan = (reqs, questions = []) => ({ findings: reqs.map(requirement => ({ requirement, verification: { executable_check: true } })), questions });
@@ -130,4 +131,58 @@ test('試験にしていない候補を、AIが試験にしなかった・未分
   // 以前の形式の案（未分類の欄が無い）で、どこにも入っていない候補は、理由が記録されていないものとして出す。
   delete r.plan.unclassified;
   assert.deepEqual(untestedFindings(r, f).at(-1).kind, 'unknown');
+});
+
+const concern = (id, by = 'run') => ({ id, estimate: '推定', evidence: [{ path: 'app/auth.py', start: 3, end: 5 }], concern: `懸念${id}`, basis: 'repository', check: { by, detail: '確かめ方', observation: by === 'run' ? 'container_log' : null } });
+const investigated = (record, id, concerns) => applyInvestigation(record, { operation: '登録', result: { record: id, concerns } });
+const concernPlan = () => ({ tests: [{ id: 't-c', name: '懸念の試験', kind: 'browser', finding_ids: ['c-1'], steps: ['登録する'], pass: ['ログに出ない'], observation: 'container_log' }], not_planned: [] });
+
+test('照合なしでも、動かして確かめる懸念があれば試験の案の段へ進み、懸念だけから作った案を今の案として扱う', () => {
+  const r = investigated({}, 'inv-1', [concern('c-1'), concern('c-2', 'ask'), concern('c-3', 'read')]);
+  assert.deepEqual(runConcerns(r).map(c => c.id), ['c-1'], '確かめ方が「動かす」の懸念だけを候補にする');
+  assert.equal(startStep(r), 2);
+  applyPlan(r, concernPlan(), planGeneration(r), runConcerns(r));
+  assert.equal(r.plan.investigation, 'inv-1');
+  assert.deepEqual(r.plan.concerns.map(c => c.id), ['c-1'], '案の候補にした懸念を案に写す');
+  assert.equal(planIsCurrent(r), true);
+  approve(r, r.plan.tests[0], 'flow-x-tc');
+  assert.equal(approvedCheck(r, r.plan.tests[0]), 'flow-x-tc');
+  assert.equal(startStep(r), 4);
+  // 指紋は懸念の文を含む。懸念の文が変われば了承していない扱い。
+  r.plan.concerns[0].concern = '別の懸念';
+  assert.equal(approvedCheck(r, r.plan.tests[0]), null);
+  assert.equal(investigated({}, 'inv-0', [concern('c-1', 'ask')]) && startStep(investigated({}, 'inv-0', [concern('c-1', 'ask')])), 1, '動かして確かめる懸念がなければ進まない');
+});
+
+test('懸念を出し直すと、前の懸念から作った案・了承・結果を履歴へ移す。照合と回答は残す', () => {
+  const r = scanned(scan(['担当外に出さない'], [q('q1', '院外から使いますか')]));
+  setAnswer(r, r.scan.questions[0], 'はい');
+  investigated(r, 'inv-1', [concern('c-1')]);
+  applyPlan(r, concernPlan(), planGeneration(r), runConcerns(r));
+  approve(r, r.plan.tests[0], 'flow-x-tc');
+  investigated(r, 'inv-2', [concern('c-1')]);
+  for (const k of ['plan', 'chosen', 'approved']) assert.equal(r[k], undefined, k);
+  assert.equal(r.scan.generation, 1, '照合は残す');
+  assert.equal(r.answers.q1.answer, 'はい', '回答は残す');
+  assert.equal(r.history.at(-1).reason, '懸念を出し直した');
+  // 履歴の案からも、了承した確認項目をたどれる（指紋は案に写した懸念で計算する）。
+  assert.equal(planForCheck(r, 'flow-x-tc')?.test.id, 't-c');
+});
+
+test('照合の候補だけから作った案は、懸念を出し直しても今の案のまま', () => {
+  const r = scanned(scan(['担当外に出さない']));
+  applyPlan(r, plan(['A'], ['B']), planGeneration(r));
+  approve(r, r.plan.tests[0], 'flow-x-t');
+  const before = fingerprint(r.plan.tests[0], r.scan);
+  investigated(r, 'inv-1', [concern('c-1')]);
+  assert.equal(planIsCurrent(r), true);
+  assert.equal(approvedCheck(r, r.plan.tests[0]), 'flow-x-t');
+  assert.equal(fingerprint(r.plan.tests[0], r.scan, []), before, '懸念のない案の指紋は以前と同じ');
+});
+
+test('懸念を送った後に調べを出し直していたら、遅れて返った案を採用しない', () => {
+  const r = investigated({}, 'inv-1', [concern('c-1')]);
+  const at = planGeneration(r);
+  investigated(r, 'inv-2', [concern('c-1')]);
+  assert.throws(() => applyPlan(r, concernPlan(), at, runConcerns(r)), StaleResponse);
 });
