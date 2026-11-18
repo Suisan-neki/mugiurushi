@@ -79,11 +79,12 @@ try {
       material: [{ kind: 'search', query: 'login', hits: 1, truncated: false }, { kind: 'read', path: 'app/auth.py', start: 1, end: 10, blob: 'a'.repeat(40) }, { kind: 'refused', request: { kind: 'read', path: '.env' }, reason: '送らないパス' }] } });
   });
   // 事例の記録の観測の状態を差し替える（f-1 は不足を確認、f-2 は期待どおり）。
-  let override = false, unlinked = false;
+  let override = false, unlinked = false, concernNg = false;
   await page.route('**/api/v1/case', async route => {
     const response = await route.fetch(); const json = await response.json();
     if (override) for (const cv of json.checks) for (const a of cv.coverage?.aspects || []) {
       if (a.id === 'f-1') Object.assign(a, { status: 'contradicted', status_label: '期待と異なる', detail: 'IDとパスワードだけで一覧が表示された', trial_checks: [{ id: 'c2', label: '2つ目の認証を求める画面が出る（ブラウザの表示）' }] });
+      if (a.id === 'c-1' && concernNg) Object.assign(a, { status: 'contradicted', status_label: '期待と異なる', detail: 'IDとパスワードだけで一覧が表示された', trial_checks: [{ id: 'c9', label: '2つ目の認証を求める画面が出る（ブラウザの表示）' }] });
       if (a.id === 'f-2') Object.assign(a, unlinked ? { status: 'unlinked', status_label: 'どの判定条件が答えるか未対応づけ', detail: 'この部分に答える判定条件を選んでいない' } : { status: 'observed', status_label: '観測した', detail: '記録に残った' });
       cv.evidence = [{ id: 'ev-1', run_id: 'run-1', applicable: true, invalidated_by: [], observed: {} }]; cv.selected_evidence = 'ev-1';
     }
@@ -261,14 +262,48 @@ try {
   const concernTest = page.locator('[data-test="t-concern"]'); await concernTest.waitFor();
   assert.match(await concernTest.innerText(), /確かめる項目：次のことが起きていないこと：2つ目の認証がない/);
   await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
-  const concernTests = page.locator('[data-concern-tests]'); await concernTests.waitFor();
-  assert.match(await concernTests.innerText(), /2つ目の認証を求めるか：2つ目の認証がない/);
+  // 4 結果：懸念の項目は「コードから出た懸念」の区分に出る。優先度は付けない。
+  const concernSection = page.locator('[data-result-section="concern"]'); await concernSection.waitFor();
+  assert.match(await concernSection.innerText(), /コードから出た懸念：[\s\S]*次のことが起きていないこと：2つ目の認証がない[\s\S]*2つ目の認証を求めるか/);
+  assert.equal(await page.locator('main h2').first().innerText(), 'コードから出た懸念と、このコミットの試験結果');
   const after = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await token() } })).json();
   const concernCheck = after.workspace.checks.find(c => c.aspects?.some(a => a.id === 'c-1'));
   assert(concernCheck, '懸念を確かめる確認項目を登録した');
   assert.match(concernCheck.origin, /コードから出た懸念の試験の案（fake・応答ID fake-concern-plan）を合成の開発者が了承/);
   assert.deepEqual([concernCheck.source.path, concernCheck.source.line, concernCheck.source.end_line, concernCheck.source.commit], ['app/auth.py', 1, 2, previous], '根拠の行を確認項目の参照先にする');
   assert.match(concernCheck.aspects[0].origin, /コードから出た懸念（コードからの推定で、観測でも判定でもない）。根拠の行：app\/auth.py 1〜2行。調べの記録 inv-1/);
+  // 試験で懸念が起きていた（期待と異なる）場合は、不足として数え、詳細にガイドラインの代わりに懸念と根拠の行を示す。
+  concernNg = true;
+  await page.getByRole('button', { name: '結果を読み直す' }).click();
+  await page.locator('[data-ng-count="1"]').waitFor();
+  await page.locator('[data-result="ng"]').getByRole('button', { name: '詳細' }).click();
+  assert.equal(await page.locator('[data-detail-concern]').innerText(), '2つ目の認証がない');
+  assert.match(await page.locator('[data-detail]').innerText(), /推定\s+ログインは利用者IDとパスワードだけで通す[\s\S]*根拠の行\s+app\/auth.py 1〜2行[\s\S]*IDとパスワードだけで一覧が表示された/);
+  // 5 修正用のプロンプト：ガイドラインの代わりに、懸念・推定・根拠の行を入れる。
+  await page.getByRole('button', { name: '修正用のプロンプトを作る' }).click();
+  const concernPrompt = await page.locator('[data-prompt]').innerText();
+  for (const part of ['## 次のことが起きていないこと：2つ目の認証がない', '根拠: コードから出た懸念（コードからの推定で、観測でも判定でもない）', '> 2つ目の認証がない', '- 根拠の行: app/auth.py 1〜2行', '- 結果: IDとパスワードだけで一覧が表示された', '関係しそうなコード: app/auth.py'])
+    assert(concernPrompt.includes(part), part);
+  // 6 再試験：懸念の項目も、文が同じなら前後で比べる。
+  await page.getByRole('button', { name: '修正をコミットしたら再試験へ' }).click();
+  await page.locator('[data-compare-table]').waitFor();
+  assert.match(await page.locator('[data-compare-table] [data-kind="concern"]').innerText(), /次のことが起きていないこと：2つ目の認証がない[\s\S]*コードから出た懸念\s+—\s+不足を確認\s+変わらず不足/);
+
+  // 引き継ぎ：別のコミットで、前のコミットで試験にした懸念を引き継ぐ。文が同じなので、再試験で前後を比べられる。
+  await page.goto(flowUrl(commit));
+  await page.getByRole('button', { name: '1 照合の準備' }).click();
+  await page.getByRole('button', { name: `前のコミット ${previous.slice(0, 7)} で試験にした懸念を引き継ぐ（1件）` }).click();
+  const carried = page.locator('[data-investigation="carried"]'); await carried.waitFor();
+  assert.match(await carried.innerText(), /前のコミットで試験にした懸念を引き継いだ/);
+  assert.equal(await carried.locator('[data-evidence]').getAttribute('href'), `https://github.com/${repository}/blob/${previous}/app/auth.py#L1-L2`, '根拠の行は前のコミットの行を指す');
+  await page.getByRole('button', { name: '動かして確かめる懸念から試験の案を作る' }).click();
+  await page.locator('[data-concern-candidate="c-1"]').waitFor();
+  const before = requests.plan.length;
+  await page.getByRole('button', { name: '試験の案を作る' }).click();
+  await page.locator('[data-preview]').waitFor();
+  const carriedPlan = requests.plan[before];
+  assert.equal(carriedPlan.findings.find(f => f.id === 'c-1').requirement, '次のことが起きていないこと：2つ目の認証がない', '引き継いだ懸念は文が同じ');
+  assert.deepEqual(carriedPlan.evidence, [{ path: 'app/auth.py', start: 1, end: 2, commit: previous }], '根拠の行には前のコミットを添える');
   assert.deepEqual(errors, []);
   console.log('flow smoke: ok');
 } finally {

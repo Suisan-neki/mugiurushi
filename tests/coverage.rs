@@ -2049,7 +2049,7 @@ fn a_concern_candidate_is_sent_to_the_plan_with_its_source() {
         .to_string(),
     )
     .unwrap();
-    let store = mugiurushi::understanding::Store::new(snapshots).unwrap();
+    let store = mugiurushi::understanding::Store::new(snapshots.clone()).unwrap();
     let agent = FakeAgent::start(&f.directory, vec![]);
     let config = agent.config();
     let candidate = |id: &str, source| PlanFinding {
@@ -2073,6 +2073,7 @@ fn a_concern_candidate_is_sent_to_the_plan_with_its_source() {
         path: path.into(),
         start,
         end,
+        commit: None,
     };
     // 照合をしていない懸念だけの案は、読んだファイルなしで、根拠の行の前後を行番号つきで添える。同じ範囲は一度だけ。
     let only = plan(
@@ -2090,12 +2091,46 @@ fn a_concern_candidate_is_sent_to_the_plan_with_its_source() {
         only["payload"]["evidence"],
         serde_json::json!([{"ref": "app/patient.py:2-2", "text": "1: def save(p):\n2:     log(p.national_id)"}])
     );
-    // 読んだファイルも根拠の行もない要求、ファイルの外の行、範囲の誤りは受け付けない。
+    // 前のコミットから引き継いだ懸念の根拠は、そのコミットの行を読み、参照にそのコミットを書く。
+    let earlier = "b".repeat(40);
+    fs::write(
+        snapshots.join(format!("example/clinic/{earlier}.json")),
+        serde_json::json!({"schema": 1, "fullName": "example/clinic", "reference": earlier, "commit": earlier,
+            "inventory": [{"path": "app/patient.py", "mode": "100644"}],
+            "files": {"app/patient.py": "def save(p):\n    print(p.national_id)\n"}, "omitted": []})
+        .to_string(),
+    )
+    .unwrap();
+    let carried = plan(
+        Some(&config),
+        &store,
+        request(
+            vec![],
+            vec![EvidenceRange {
+                commit: Some(earlier.clone()),
+                ..range("app/patient.py", 2, 2)
+            }],
+        ),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        carried["payload"]["evidence"],
+        serde_json::json!([{"ref": "app/patient.py:2-2@bbbbbbb", "text": "1: def save(p):\n2:     print(p.national_id)"}])
+    );
+    // 読んだファイルも根拠の行もない要求、ファイルの外の行、範囲の誤り、不正なコミットは受け付けない。
     for bad in [
         request(vec![], vec![]),
         request(vec![], vec![range("app/patient.py", 9, 9)]),
         request(vec![], vec![range("app/patient.py", 0, 1)]),
         request(vec![], vec![range("app/patient.py", 2, 1)]),
+        request(
+            vec![],
+            vec![EvidenceRange {
+                commit: Some("../x".into()),
+                ..range("app/patient.py", 1, 1)
+            }],
+        ),
     ] {
         assert!(plan(Some(&config), &store, bad, None).is_err());
     }

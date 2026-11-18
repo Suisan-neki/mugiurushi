@@ -50,8 +50,52 @@ export function applyInvestigation(/** @type {any} */ record, /** @type {any} */
  * ファイル丸ごとではなく根拠の行の前後だけを添えるので、照合で読むファイル（上限40件）と取り合わない。 */
 export function planEvidence(/** @type {any[]} */ concerns) {
   const seen = new Set();
-  return concerns.flatMap((/** @type {any} */ c) => (c.evidence || []).map((/** @type {any} */ e) => ({ path: e.path, start: e.start, end: e.end })))
-    .filter((/** @type {any} */ e) => { const k = `${e.path}:${e.start}-${e.end}`; return seen.has(k) ? false : (seen.add(k), true); });
+  // 前のコミットから引き継いだ懸念（commit あり）の根拠の行は、そのコミットの行なので、読むコミットを添える。
+  return concerns.flatMap((/** @type {any} */ c) => (c.evidence || []).map((/** @type {any} */ e) => ({ path: e.path, start: e.start, end: e.end, ...(c.commit ? { commit: c.commit } : {}) })))
+    .filter((/** @type {any} */ e) => { const k = `${e.path}:${e.start}-${e.end}@${e.commit || ''}`; return seen.has(k) ? false : (seen.add(k), true); });
+}
+
+/** 記録を、保存日時の新しい順に並べる。保存日時のない以前の記録は後ろに、登録の新しい順で並べる。
+ * 保存しても記録の並び（登録の順）は変わらないので、並びの最後を「最後に保存した記録」とは扱えない。 */
+export function byLatestSave(/** @type {any[]} */ entries) {
+  return entries.map((x, i) => ({ x, i })).sort((a, b) => {
+    const sa = a.x?.record?.saved_at || '', sb = b.x?.record?.saved_at || '';
+    return sa === sb ? b.i - a.i : sa < sb ? 1 : -1;
+  }).map(({ x }) => x);
+}
+
+/** 懸念を確かめる確認項目の参照先。根拠の行のファイルを使う。
+ * 引き継いだ懸念（commit が今のコミットと違う）の根拠は前のコミットの行なので、今のコミットにあるファイルだけを選び、
+ * その先頭を参照先にする（行の位置は変わっている可能性がある）。どれも今のコミットになければ null（設定画面で対応づける）。 */
+export function concernSource(/** @type {any[]} */ concerns, /** @type {string} */ commit, /** @type {string[]} */ paths) {
+  const exists = new Set(paths);
+  for (const c of concerns) for (const e of c.evidence || []) {
+    if (!c.commit || c.commit === commit) return { path: e.path, line: e.start, end_line: e.end };
+    if (exists.has(e.path)) return { path: e.path, line: 1, end_line: 1 };
+  }
+  return null;
+}
+
+/** 同じリポジトリの前のコミットの記録から、了承した試験に入った懸念を引き継ぐ。最後に保存された記録から探す。
+ * 懸念をたどり直すと、AIが文を作り直すので、同じ問題でも文が変わり、再試験で前後を比べられない。
+ * 引き継いだ懸念は文が同じなので、試験の案・了承・結果を経て、前のコミットと比べられる。根拠の行は前のコミットの行。 */
+export function carryableConcerns(/** @type {any} */ records, /** @type {string} */ repository, /** @type {string} */ commit) {
+  const others = Object.values(records || {}).filter((/** @type {any} */ x) => x.repository === repository && x.commit !== commit && x.record);
+  for (const x of byLatestSave(others)) {
+    const tested = new Set(approvedTests(x.record).flatMap((/** @type {any} */ t) => t.finding_ids));
+    const concerns = (x.record.plan?.concerns || []).filter((/** @type {any} */ c) => tested.has(c.id));
+    if (concerns.length) {
+      return { from: x.commit, operation: x.record.investigation?.operation || '', investigation: x.record.plan.investigation,
+        concerns: concerns.map((/** @type {any} */ c) => ({ ...c, commit: c.commit || x.commit })) };
+    }
+  }
+  return null;
+}
+
+/** 引き継いだ懸念を、調べの結果の形にする。コードはたどり直していない。 */
+export function carriedInvestigation(/** @type {any} */ carry) {
+  return { operation: carry.operation, carried_from: carry.from, at: new Date().toISOString(),
+    result: { record: `carried-${carry.from.slice(0, 7)}-${carry.investigation}`, stopped_by: 'carried', rounds: 0, concerns: carry.concerns, questions: [], material: [] } };
 }
 
 /** 送った時点の照合の世代。応答が返るまでに別の照合が終わっていたら、その応答は使わない。 */

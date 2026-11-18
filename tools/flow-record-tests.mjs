@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import {
   applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, StaleResponse,
   approve, approvedCheck, approvedTests, planForCheck, checkIdOf, startStep, migrate, fingerprint, untestedFindings,
-  applyInvestigation, runConcerns, planIsCurrent, planEvidence,
+  applyInvestigation, runConcerns, planIsCurrent, planEvidence, carryableConcerns, carriedInvestigation, byLatestSave, concernSource,
 } from '../ui/flow-record.js';
 
 const scan = (reqs, questions = []) => ({ findings: reqs.map(requirement => ({ requirement, verification: { executable_check: true } })), questions });
@@ -194,4 +194,44 @@ test('試験の案には、懸念の候補の根拠の行を、同じ範囲は�
     { path: 'app/a.py', start: 3, end: 5 }, { path: 'app/b.py', start: 1, end: 1 }, { path: 'app/a.py', start: 9, end: 9 },
   ]);
   assert.deepEqual(planEvidence([]), [], '懸念を候補にしなければ添えない');
+});
+
+test('前のコミットで了承した試験に入った懸念だけを、根拠のコミットを付けて引き継ぐ', () => {
+  const prev = investigated({}, 'inv-1', [concern('c-1'), concern('c-2')]);
+  applyPlan(prev, concernPlan(), planGeneration(prev), runConcerns(prev));
+  const records = { a: { repository: 'x/y', commit: 'a'.repeat(40), record: prev } };
+  assert.equal(carryableConcerns(records, 'x/y', 'b'.repeat(40)), null, '了承していなければ引き継がない');
+  approve(prev, prev.plan.tests[0], 'flow-a-tc');
+  const carry = carryableConcerns(records, 'x/y', 'b'.repeat(40));
+  assert.deepEqual(carry.concerns.map(c => [c.id, c.commit]), [['c-1', 'a'.repeat(40)]], '試験に入っていない c-2 は引き継がない');
+  assert.equal(carryableConcerns(records, 'x/y', 'a'.repeat(40)), null, '同じコミットからは引き継がない');
+  assert.equal(carryableConcerns(records, 'x/z', 'b'.repeat(40)), null, '別のリポジトリからは引き継がない');
+  // 引き継いだ懸念で案を作ると、根拠の行に前のコミットを添える。
+  const now = applyInvestigation({}, carriedInvestigation(carry));
+  assert.equal(now.investigation.result.stopped_by, 'carried');
+  assert.deepEqual(planEvidence(runConcerns(now)), [{ path: 'app/auth.py', start: 3, end: 5, commit: 'a'.repeat(40) }]);
+});
+
+test('引き継ぎ元は、登録の順ではなく、最後に保存した記録から選ぶ', () => {
+  const make = (commit, id, saved_at) => {
+    const r = investigated({}, id, [{ ...concern('c-1'), concern: `懸念${commit}` }]);
+    applyPlan(r, concernPlan(), planGeneration(r), runConcerns(r));
+    approve(r, r.plan.tests[0], `flow-${commit}`);
+    r.saved_at = saved_at;
+    return { repository: 'x/y', commit: commit.repeat(40), record: r };
+  };
+  // A を先に登録し、B を登録した後で、A を保存し直した。
+  const records = { a: make('a', 'inv-a', '2026-11-18T03:00:00Z'), b: make('b', 'inv-b', '2026-11-18T02:00:00Z') };
+  assert.equal(carryableConcerns(records, 'x/y', 'c'.repeat(40)).from, 'a'.repeat(40));
+  assert.deepEqual(byLatestSave(Object.values(records)).map(x => x.commit[0]), ['a', 'b']);
+  // 保存日時のない以前の記録は後ろに、登録の新しい順で並べる。
+  assert.deepEqual(byLatestSave([{ commit: 'p' }, { commit: 'q' }, { commit: 's', record: { saved_at: '2026-01-01' } }]).map(x => x.commit), ['s', 'q', 'p']);
+});
+
+test('引き継いだ懸念の確認項目の参照先は、今のコミットにある根拠のファイルだけから選ぶ', () => {
+  const now = 'b'.repeat(40), before = 'a'.repeat(40);
+  const moved = { evidence: [{ path: 'app/old.py', start: 3, end: 5 }, { path: 'app/auth.py', start: 7, end: 9 }], commit: before };
+  assert.deepEqual(concernSource([moved], now, ['app/auth.py']), { path: 'app/auth.py', line: 1, end_line: 1 }, '消えたファイルは選ばない。行は先頭');
+  assert.equal(concernSource([moved], now, ['app/other.py']), null, 'どれもなければ参照先を空にする');
+  assert.deepEqual(concernSource([{ evidence: [{ path: 'app/x.py', start: 3, end: 5 }] }], now, []), { path: 'app/x.py', line: 3, end_line: 5 }, 'このコミットの懸念は根拠の行をそのまま使う');
 });
