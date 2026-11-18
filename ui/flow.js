@@ -3,7 +3,7 @@
 // 判定と観測の状態は事例の記録（/api/v1/case）が正。流れの記録（/api/v1/flow）は画面を続けるための控え。
 // AIへ送る内容は、送る前にサーバーが組み立てた内容をそのまま表示し、人が確かめたときだけ送る。
 import { apiRequest as api } from './api.js';
-import { applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
+import { applyScan, applyPlan, applyInvestigation, runConcerns, planEvidence, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
 
 /** @param {string} tag @param {Record<string, any>} [attrs] @param {...any} children */
 function h(tag, attrs = {}, ...children) {
@@ -52,7 +52,7 @@ function renderChrome() {
     state.record?.files ? h('div', {}, h('span', { class: 'k' }, '読んだコード'), `\u3000${state.record.files.length}ファイル`) : null);
   const done = state.record || {};
   const approvedAny = approvedTests(done).length > 0;
-  const reachable = [true, !!done.scan, planIsCurrent(done), approvedAny, approvedAny, true];
+  const reachable = [true, !!done.scan || runConcerns(done).length > 0, planIsCurrent(done), approvedAny, approvedAny, true];
   fill($('steps'), STEPS.map((t, i) => h('button', { type: 'button', 'aria-current': state.step === i + 1 ? 'step' : null, disabled: !reachable[i], onclick: () => go(i + 1) }, (i ? '▸ ' : '') + t)));
   $('person').textContent = person() ? `記録者：${person()}` : '';
   $('foot-left').textContent = done.scan?.model_call?.response_id ? `照合の応答ID ${done.scan.model_call.response_id}` : '';
@@ -186,8 +186,11 @@ function investigationView(/** @type {() => string} */ summary) {
         const result = await api('POST', '/api/v1/agent/investigate', { ...body, confirm: { scope_sha256: preview.scope_sha256 } });
         const record = { operation: body.operation, exclusions: body.exclusions, rounds_limit: body.rounds, scope_sha256: preview.scope_sha256, result, at: new Date().toISOString() };
         // 記録の物は差し替えない。往復の途中でほかの段へ移ると、その段の操作が今の記録の物を書き換えるため。
-        if (state.record) state.record.investigation = record; else state.record = { investigation: record };
+        // 前の懸念から作った試験の案は、履歴へ移す（applyInvestigation）。
+        if (!state.record) state.record = {};
+        applyInvestigation(state.record, record);
         await saveRecord();
+        renderChrome();
         fill(out, investigationResult(record));
         setStatus('');
       } finally { start.removeAttribute('disabled'); }
@@ -235,7 +238,43 @@ function investigationResult(/** @type {any} */ saved) {
           h('p', { class: 'note' }, `根拠の種類：${BASIS[c.basis] || c.basis}`),
           h('p', {}, '根拠の行：', (c.evidence || []).map((/** @type {any} */ e, /** @type {number} */ i) => [i ? '、' : '', h('a', { href: lineUrl(e.path, e.start, e.end), target: '_blank', rel: 'noopener', 'data-evidence': '' }, `${e.path} ${e.start}〜${e.end}行`)])),
           h('p', {}, `確かめ方：${CHECK_BY[c.check?.by] || c.check?.by}。${c.check?.detail || ''}${c.check?.observation ? `（観測の種類：${c.check.observation}）` : ''}`)))),
-      (r.questions || []).length ? [h('h3', {}, 'コードからは決められなかったこと'), h('ul', { class: 'items' }, r.questions.map((/** @type {string} */ q) => h('li', {}, q)))] : null));
+      (r.questions || []).length ? [h('h3', {}, 'コードからは決められなかったこと'), h('ul', { class: 'items' }, r.questions.map((/** @type {string} */ q) => h('li', {}, q)))] : null,
+      (r.concerns || []).some((/** @type {any} */ c) => c.check?.by === 'run')
+        ? h('div', { class: 'actions' }, btn('動かして確かめる懸念から試験の案を作る', () => go(2)), h('span', { class: 'note' }, 'ガイドラインとの照合をしなくても進めます。'))
+        : null));
+}
+
+// ---------- 懸念を試験の案の候補にする（#230）----------
+// 確かめ方が「麦漆で動かす」の懸念だけを候補にする。「人に聞く」「さらに読む」の懸念は、試験にしても麦漆で観測できないので示すだけにする。
+// 懸念は「こうなると問題」という形なので、候補の要求の文は「その懸念が起きていないこと」にする。
+const concernChosen = new Map();
+function concernRequirement(/** @type {any} */ c) { return `次のことが起きていないこと：${c.concern}`.slice(0, 2000); }
+function evidenceText(/** @type {any} */ c) { return (c.evidence || []).map((/** @type {any} */ e) => `${e.path} ${e.start}〜${e.end}行`).join('、'); }
+function concernCandidate(/** @type {any} */ c) {
+  return { id: c.id, requirement: concernRequirement(c), how: `${c.check?.detail || ''}（コードからの推定：${c.estimate}。根拠の行：${evidenceText(c)}）`.slice(0, 2000), source: 'concern' };
+}
+function chosenConcerns(/** @type {any} */ r) {
+  const id = r?.investigation?.result?.record;
+  return runConcerns(r).filter((/** @type {any} */ c) => concernChosen.get(`${id}:${c.id}`) !== false);
+}
+function concernsView(/** @type {any} */ r) {
+  const id = r?.investigation?.result?.record;
+  const all = r?.investigation?.result?.concerns || [];
+  if (!all.length) return null;
+  const others = all.filter((/** @type {any} */ c) => c.check?.by !== 'run');
+  return h('div', { 'data-concerns': '' },
+    h('h2', { style: 'margin-top:16px' }, 'コードから出た懸念'),
+    h('p', {}, `「1 照合の準備」でコードをたどって出した懸念です（対象の操作：${r.investigation.operation}）。動かして確かめる懸念を選ぶと、懸念が起きていないことを確かめる試験の案を作ります。`),
+    runConcerns(r).length ? h('table', {}, h('tbody', {}, runConcerns(r).map((/** @type {any} */ c) => {
+      const box = h('input', { type: 'checkbox', checked: concernChosen.get(`${id}:${c.id}`) !== false, 'aria-label': `${c.id}を試験の案の候補にする` });
+      box.addEventListener('change', () => concernChosen.set(`${id}:${c.id}`, /** @type {HTMLInputElement} */ (box).checked));
+      return h('tr', { 'data-concern-candidate': c.id },
+        h('td', { style: 'width:48px;text-align:center' }, box),
+        h('td', {}, c.concern, h('div', { class: 'note', style: 'font-size:12px' }, `確かめ方：${c.check.detail}（観測の種類：${c.check.observation}）。根拠の行：${evidenceText(c)}`)));
+    }))) : h('p', { class: 'note' }, '動かして確かめる懸念はありません。'),
+    others.length ? h('div', { 'data-concerns-other': '' },
+      h('h3', {}, '試験にしない懸念'),
+      h('ul', { class: 'items' }, others.map((/** @type {any} */ c) => h('li', {}, `${c.concern}（確かめ方：${CHECK_BY[c.check?.by] || c.check?.by}。${c.check?.detail || ''}）`)))) : null);
 }
 // 画面の記録を添えた照合は、照合し直しと試験の案でも同じ試行を添える。
 function screenOf(/** @type {any} */ r) { return r?.screen_evidence ? { screen_evidence: r.screen_evidence } : {}; }
@@ -255,45 +294,61 @@ async function step2() {
   const out = h('div', {});
   const askOut = h('div', {});
   const ask = h('textarea', { rows: 3, id: 'ask', placeholder: '例：ログの保存期間はどれくらい必要ですか' });
+  const planButton = btn('試験の案を作る', () => {
+    const concerns = chosenConcerns(r);
+    const findings = [
+      ...testable().map((/** @type {any} */ f) => ({ id: f.id, requirement: f.requirement, how: f.verification.how || '' })),
+      ...concerns.map(concernCandidate),
+    ];
+    if (!findings.length) return showError('試験で確かめられる項目がありません。');
+    if (findings.length > 24) return showError('試験の案の候補は24件までです。懸念の選択を減らしてください。');
+    const at = planGeneration(r);
+    return confirmAndSend(out, '/api/v1/agent/plan', { repository: state.source.repository, commit: state.source.commit, files: r.files || [], evidence: planEvidence(concerns), summary: r.summary || '', answers: answersOf(r), findings, ...screenOf(r) }, async (/** @type {any} */ p) => { applyPlan(r, p, at, concerns); await saveRecord(); go(3); });
+  }, 'primary');
+  const scanMain = r.scan ? [
+    h('h2', {}, '照合の結果：満たしていない可能性がある項目'),
+    h('p', {}, '読んだコードと説明をガイドラインと照らしました。試験で確かめられる項目を、ガイドラインごとに優先度順で並べています。'),
+    testable().length ? bySection(testable()).map(s => h('div', { 'data-section': s.key }, h('h3', {}, s.name),
+      h('table', {}, h('tbody', {}, s.rows.map((/** @type {any} */ f) => h('tr', { 'data-finding': f.id },
+        h('td', { style: 'width:48px;text-align:center' }, prio(f.priority)),
+        h('td', {}, f.requirement, f.system_refs?.length ? h('div', { class: 'note', style: 'font-size:12px' }, `関係するコード：${f.system_refs.filter((/** @type {string} */ x) => !x.startsWith('screen:')).join('、') || 'なし'}`) : null,
+          f.basis?.includes('screen') ? h('div', { class: 'note', style: 'font-size:12px', 'data-basis-screen': '' }, '根拠に、試験で記録した画面の構造を含みます。') : null))))))) : h('p', { class: 'note' }, '試験で確かめられる項目は見つかりませんでした。'),
+    h('p', { class: 'note', style: 'font-size:12px' }, r.scan.priority_rule || '')] : [
+    h('h2', {}, '試験の案の候補'),
+    h('p', { class: 'note', 'data-no-scan': '' }, 'ガイドラインとの照合はしていません。コードから出た懸念だけから試験の案を作ります。照合をする場合は「1 照合の準備」から始めてください。')];
+  const scanSide = r.scan ? [
+    r.scan.questions?.length ? [h('p', {}, 'コードだけでは決められないことを確認します。回答は照合と試験の案に使います。'),
+      r.scan.questions.map((/** @type {any} */ q, /** @type {number} */ i) => h('fieldset', { 'data-question': q.id }, h('legend', {}, `質問${i + 1}`), h('div', {}, q.text), h('div', { class: 'note', style: 'font-size:12px' }, q.why),
+        h('div', { style: 'display:flex;flex-wrap:wrap;gap:12px;margin-top:4px' }, q.options.map((/** @type {string} */ o) => {
+          const radio = h('input', { type: 'radio', name: q.id, checked: answerTo(r, q) === o });
+          radio.addEventListener('change', () => setAnswer(r, q, o));
+          return h('label', { style: 'display:inline-flex;gap:6px;align-items:center' }, radio, o);
+        }))))] : h('p', { class: 'note' }, '確認したいことはありません。'),
+    h('label', { for: 'ask', style: 'font-weight:700;display:block;margin-top:8px' }, 'こちらから聞きたいこと'), ask,
+    h('div', { class: 'actions' }, btn('ガイドラインに照らして答えてもらう', () => {
+      const q = /** @type {HTMLTextAreaElement} */ (ask).value.trim(); if (!q) return showError('質問を書いてください。');
+      return confirmAndSend(askOut, '/api/v1/agent/ask', { question: q }, async (/** @type {any} */ a) => { r.asks = [...(r.asks || []), { question: q, ...a }]; await saveRecord(); render(); });
+    })), askOut,
+    (r.asks || []).slice().reverse().map((/** @type {any} */ a) => h('div', { class: 'box', 'data-asked': '' }, h('div', { class: 'pad' }, h('strong', {}, `質問：${a.question}`), h('div', {}, a.answer),
+      a.citations?.map((/** @type {any} */ c) => h('div', { class: 'note', style: 'font-size:12px' }, `出典：${c.document} ${c.page}ページ（SHA-256 ${c.sha256.slice(0, 12)}…）`)))))] : [];
+  const askConcerns = (r.investigation?.result?.concerns || []).filter((/** @type {any} */ c) => c.check?.by === 'ask');
   fill($('main'), h('div', { class: 'cols' },
-    h('section', { class: 'main' }, h('h2', {}, '照合の結果：満たしていない可能性がある項目'),
-      h('p', {}, '読んだコードと説明をガイドラインと照らしました。試験で確かめられる項目を、ガイドラインごとに優先度順で並べています。'),
-      testable().length ? bySection(testable()).map(s => h('div', { 'data-section': s.key }, h('h3', {}, s.name),
-        h('table', {}, h('tbody', {}, s.rows.map((/** @type {any} */ f) => h('tr', { 'data-finding': f.id },
-          h('td', { style: 'width:48px;text-align:center' }, prio(f.priority)),
-          h('td', {}, f.requirement, f.system_refs?.length ? h('div', { class: 'note', style: 'font-size:12px' }, `関係するコード：${f.system_refs.filter((/** @type {string} */ x) => !x.startsWith('screen:')).join('、') || 'なし'}`) : null,
-            f.basis?.includes('screen') ? h('div', { class: 'note', style: 'font-size:12px', 'data-basis-screen': '' }, '根拠に、試験で記録した画面の構造を含みます。') : null))))))) : h('p', { class: 'note' }, '試験で確かめられる項目は見つかりませんでした。'),
-      h('p', { class: 'note', style: 'font-size:12px' }, r.scan.priority_rule || '')),
+    h('section', { class: 'main' }, scanMain, concernsView(r)),
     h('section', { class: 'side' }, h('h2', {}, 'ヒアリング'),
-      r.scan.questions?.length ? [h('p', {}, 'コードだけでは決められないことを確認します。回答は照合と試験の案に使います。'),
-        r.scan.questions.map((/** @type {any} */ q, /** @type {number} */ i) => h('fieldset', { 'data-question': q.id }, h('legend', {}, `質問${i + 1}`), h('div', {}, q.text), h('div', { class: 'note', style: 'font-size:12px' }, q.why),
-          h('div', { style: 'display:flex;flex-wrap:wrap;gap:12px;margin-top:4px' }, q.options.map((/** @type {string} */ o) => {
-            const radio = h('input', { type: 'radio', name: q.id, checked: answerTo(r, q) === o });
-            radio.addEventListener('change', () => setAnswer(r, q, o));
-            return h('label', { style: 'display:inline-flex;gap:6px;align-items:center' }, radio, o);
-          }))))] : h('p', { class: 'note' }, '確認したいことはありません。'),
-      h('label', { for: 'ask', style: 'font-weight:700;display:block;margin-top:8px' }, 'こちらから聞きたいこと'), ask,
-      h('div', { class: 'actions' }, btn('ガイドラインに照らして答えてもらう', () => {
-        const q = /** @type {HTMLTextAreaElement} */ (ask).value.trim(); if (!q) return showError('質問を書いてください。');
-        return confirmAndSend(askOut, '/api/v1/agent/ask', { question: q }, async (/** @type {any} */ a) => { r.asks = [...(r.asks || []), { question: q, ...a }]; await saveRecord(); render(); });
-      })), askOut,
-      (r.asks || []).slice().reverse().map((/** @type {any} */ a) => h('div', { class: 'box', 'data-asked': '' }, h('div', { class: 'pad' }, h('strong', {}, `質問：${a.question}`), h('div', {}, a.answer),
-        a.citations?.map((/** @type {any} */ c) => h('div', { class: 'note', style: 'font-size:12px' }, `出典：${c.document} ${c.page}ページ（SHA-256 ${c.sha256.slice(0, 12)}…）`))))),
+      scanSide,
+      askConcerns.length ? h('div', { 'data-ask-concerns': '' }, h('h3', {}, '懸念のうち、人に聞いて確かめること'),
+        h('ul', { class: 'items' }, askConcerns.map((/** @type {any} */ c) => h('li', {}, `${c.check.detail}（懸念：${c.concern}）`)))) : null,
+      !r.scan && !askConcerns.length ? h('p', { class: 'note' }, '確認したいことはありません。') : null,
       h('div', { class: 'actions' },
-        btn('回答して照合し直す', () => { const answers = answersOf(r), at = scanGeneration(r); return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers, ...screenOf(r) }, async (/** @type {any} */ s) => { applyScan(r, s, answers, at); await saveRecord(); render(); }); }),
-        btn('試験の案を作る', () => {
-          const findings = testable().map((/** @type {any} */ f) => ({ id: f.id, requirement: f.requirement, how: f.verification.how || '' }));
-          if (!findings.length) return showError('試験で確かめられる項目がありません。');
-          const at = planGeneration(r);
-          return confirmAndSend(out, '/api/v1/agent/plan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers: answersOf(r), findings, ...screenOf(r) }, async (/** @type {any} */ p) => { applyPlan(r, p, at); await saveRecord(); go(3); });
-        }, 'primary')),
-      r.plan ? h('p', { class: 'note', 'data-rescan-note': '' }, '照合し直すと、今の試験の案・了承・結果は履歴に移し、新しい照合では使いません。了承した確認項目と試験の記録は残ります。') : null,
+        r.scan ? btn('回答して照合し直す', () => { const answers = answersOf(r), at = scanGeneration(r); return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files: r.files, summary: r.summary, answers, ...screenOf(r) }, async (/** @type {any} */ s) => { applyScan(r, s, answers, at); await saveRecord(); render(); }); }) : null,
+        planButton),
+      r.plan ? h('p', { class: 'note', 'data-rescan-note': '' }, '照合し直すと、今の試験の案・了承・結果は履歴に移し、新しい照合では使いません。懸念を出し直した場合も、懸念から作った試験の案は同じく履歴に移します。了承した確認項目と試験の記録は残ります。') : null,
       r.history?.length ? h('p', { class: 'note', style: 'font-size:12px' }, `前の照合・試験の案 ${r.history.length}件を履歴に残しています。`) : null, out)));
 }
 
 // ---------- 3 検証案の了承 ----------
 async function step3() {
-  const r = state.record; const findings = Object.fromEntries((r.scan.findings || []).map((/** @type {any} */ f) => [f.id, f]));
+  const r = state.record; const findings = candidatesOf(r);
   if (!planIsCurrent(r)) return go(2);
   const out = h('div', {});
   const done = (/** @type {any} */ t) => approvedCheck(r, t);
@@ -328,8 +383,18 @@ async function step3() {
       go(4);
     }), 'primary'), h('span', { class: 'note' }, '手順はAIエージェントの案です。'), out)));
 }
-/** 試験の結果をコードへたどれるように、案の候補が関係するとしたファイル（なければ照合で読んだ最初のファイル）を対応づける。 */
+/** 今の案の候補（照合の候補と、案に写した懸念）。懸念は、要求の文を「懸念が起きていないこと」にして、元の懸念を持たせる。 */
+function candidatesOf(/** @type {any} */ r) {
+  return Object.fromEntries([
+    ...(r.scan?.findings || []).map((/** @type {any} */ f) => [f.id, f]),
+    ...(r.plan?.concerns || []).map((/** @type {any} */ c) => [c.id, { id: c.id, requirement: concernRequirement(c), concern: c }]),
+  ]);
+}
+/** 試験の結果をコードへたどれるように、案の候補が関係するとしたファイル（なければ照合で読んだ最初のファイル）を対応づける。
+ * 懸念の候補は、根拠の最初の行の範囲を対応づける。 */
 function codeRef(/** @type {any} */ t, /** @type {Record<string, any>} */ findings) {
+  const evidence = t.finding_ids.map((/** @type {string} */ id) => findings[id]?.concern?.evidence?.[0]).find(Boolean);
+  if (evidence) return { repository: state.source.repository, commit: state.source.commit, path: evidence.path, line: evidence.start, end_line: evidence.end };
   const files = state.record.files || [];
   const refs = t.finding_ids.flatMap((/** @type {string} */ id) => findings[id]?.system_refs || []);
   const path = refs.find((/** @type {string} */ p) => files.includes(p)) || files[0];
@@ -349,7 +414,9 @@ async function register(/** @type {any} */ t, /** @type {Record<string, any>} */
   const r = state.record;
   const base = `flow-${short(state.source.commit)}-${t.id.replace(/[^a-z0-9-]/gi, '').slice(0, 20)}`;
   const call = r.plan.model_call || {};
-  const origin = `ガイドライン照合の試験の案（${call.response_model || call.requested_model || 'AI'}・応答ID ${call.response_id || '不明'}）を${person()}が了承して登録。対象 ${state.source.repository}@${short(state.source.commit)}`;
+  const kinds = new Set(t.finding_ids.map((/** @type {string} */ id) => findings[id]?.concern ? 'concern' : 'guideline'));
+  const label = kinds.has('concern') ? (kinds.has('guideline') ? 'ガイドライン照合とコードから出た懸念の試験の案' : 'コードから出た懸念の試験の案') : 'ガイドライン照合の試験の案';
+  const origin = `${label}（${call.response_model || call.requested_model || 'AI'}・応答ID ${call.response_id || '不明'}）を${person()}が了承して登録。対象 ${state.source.repository}@${short(state.source.commit)}`;
   const text = `${t.name}：${t.pass.join('／')}`.slice(0, 1000);
   await loadCase();
   const checks = state.view.workspace.checks;
@@ -358,11 +425,14 @@ async function register(/** @type {any} */ t, /** @type {Record<string, any>} */
   let id = partial?.id || base;
   if (!partial) {
     while (checks.some((/** @type {any} */ c) => c.id === id)) id += '-2';
-    await change({ op: 'add_check', check: { id, version: 1, text, origin, source: codeRef(t, findings), observation: null, rule: 'manual_only', dependencies: [], questions: [] } }, 'ガイドライン照合の試験の案を了承した');
+    await change({ op: 'add_check', check: { id, version: 1, text, origin, source: codeRef(t, findings), observation: null, rule: 'manual_only', dependencies: [], questions: [] } }, `${label}を了承した`);
   }
   const aspects = t.finding_ids.map((/** @type {string} */ fid) => {
     const f = findings[fid]; const c = f.citations?.[0] || {};
-    return { id: fid, text: f.requirement.slice(0, 2000), origin: `照合の候補。出典：${c.document || ''} ${c.page || ''}ページ（SHA-256 ${(c.sha256 || '').slice(0, 12)}…）`.slice(0, 1000), observation: t.observation, trial_checks: [] };
+    const origin = f.concern
+      ? `コードから出た懸念（コードからの推定で、観測でも判定でもない）。根拠の行：${evidenceText(f.concern)}。調べの記録 ${r.plan.investigation}`
+      : `照合の候補。出典：${c.document || ''} ${c.page || ''}ページ（SHA-256 ${(c.sha256 || '').slice(0, 12)}…）`;
+    return { id: fid, text: f.requirement.slice(0, 2000), origin: origin.slice(0, 1000), observation: t.observation, trial_checks: [] };
   });
   await change({ op: 'set_aspects', check_id: id, aspects }, '試験で確かめる項目を登録した');
   return id;
@@ -443,9 +513,24 @@ async function step4() {
             h('td', { style: 'text-align:center' }, btn('詳細', () => { state.sel = f.id; render(); }, f.id === state.sel ? 'primary' : '')))))))),
       items.filter((/** @type {any} */ f) => f.res.state === 'ok').length ? h('p', { class: 'note' }, `試験で期待どおりだった項目：${items.filter((/** @type {any} */ f) => f.res.state === 'ok').map((/** @type {any} */ f) => f.requirement).join('、')}`) : null,
       untestedView(),
+      concernTestsView(),
       h('div', { class: 'actions' }, ng ? btn('修正用のプロンプトを作る', () => go(5), 'primary') : null, btn('結果を読み直す', () => render()))),
     detail));
   showDetail(sel);
+}
+
+/** 懸念から作って了承した試験。結果の表示（不足・期待どおり）と修正用のプロンプトへの組み込みは、まだ作っていない。
+ * ここでは、どの懸念をどの確認項目で確かめるかと、設定画面への行き先だけを示す。 */
+function concernTestsView() {
+  const r = state.record; const findings = candidatesOf(r);
+  const tests = approvedTests(r).filter((/** @type {any} */ t) => t.finding_ids.some((/** @type {string} */ id) => findings[id]?.concern));
+  if (!tests.length) return null;
+  return h('div', { 'data-concern-tests': '' },
+    h('h3', {}, 'コードから出た懸念を確かめる試験'),
+    h('p', { class: 'note' }, 'この試験の結果は、まだこの画面の集計と修正用のプロンプトに入りません。設定と実行、結果の確認は、試験の設定画面で行ってください。'),
+    h('ul', { class: 'items' }, tests.map((/** @type {any} */ t) => h('li', {},
+      h('a', { href: workbenchUrl(/** @type {string} */ (approvedCheck(r, t))) }, t.name), '：',
+      t.finding_ids.filter((/** @type {string} */ id) => findings[id]?.concern).map((/** @type {string} */ id) => findings[id].concern.concern).join('、')))));
 }
 
 /** 試験にしていない候補。未実行（了承して登録した試験をまだ実行していない）や未確認とは分け、合否は付けない。 */

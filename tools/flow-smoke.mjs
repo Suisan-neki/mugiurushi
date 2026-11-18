@@ -58,6 +58,9 @@ try {
   });
   await page.route('**/api/v1/agent/plan', route => {
     const body = route.request().postDataJSON();
+    // 懸念だけを候補にした案には、懸念を確かめる試験を返す。
+    if (body.findings.every(f => f.source === 'concern')) return route.fulfill({ json: sendOrPreview('plan', body, { findings: body.findings }, { stage: 'sent', status: 'draft', not_planned: [], model_call: { response_id: 'fake-concern-plan', response_model: 'fake' }, tests: [
+      { id: 't-concern', name: '2つ目の認証を求めるか', kind: 'browser', finding_ids: ['c-1'], steps: ['架空の職員でログインする'], pass: ['2つ目の認証を求められる'], observation: 'browser_text', observation_label: 'ブラウザの画面' }] }) });
     return route.fulfill({ json: sendOrPreview('plan', body, { findings: body.findings }, { stage: 'sent', status: 'draft', not_planned: [], model_call: { response_id: 'fake-plan', response_model: 'fake' }, tests: [
       { id: 't-login', name: 'ログインと一覧の表示', kind: 'browser', finding_ids: ['f-1'], steps: ['職員1でログインする'], pass: ['2つ目の認証を求められる'], observation: 'browser_text', observation_label: 'ブラウザの画面' },
       { id: 't-log', name: '操作の記録', kind: 'browser', finding_ids: ['f-2'], steps: ['タスクを開く', '記録を読み出す'], pass: ['職員・日時・対象が記録に残る'], observation: 'stored_file', observation_label: '保存先' },
@@ -71,7 +74,7 @@ try {
     if (!body.confirm) return route.fulfill({ json: { stage: 'preview', destination: '合成のAIエージェント', scope_sha256: 'f'.repeat(64), note: '合成の範囲の説明',
       scope: { repository: body.repository, commit: body.commit, operation: body.operation, summary: body.summary, architecture: null, exclusions: ['.env', ...body.exclusions], limits: { rounds: body.rounds, requests_per_round: 8, material_chars: 400000, material_bytes: 800000 } } } });
     return route.fulfill({ json: { stage: 'done', stopped_by: 'concluded', rounds: 2, requests_dropped: 0, limits: '合成の限界の説明', record: 'inv-1', usage: { calls: 2, input_tokens: 12345, cached_input_tokens: null, cache_write_tokens: 2000, output_tokens: 678 }, scope_sha256: 'f'.repeat(64),
-      concerns: [{ id: 'c-1', estimate: 'ログインは利用者IDとパスワードだけで通す', evidence: [{ path: 'app/auth.py', start: 3, end: 5 }], concern: '2つ目の認証がない', basis: 'repository', check: { by: 'run', detail: 'ログインして一覧が出るかを見る', observation: 'browser_text' } }],
+      concerns: [{ id: 'c-1', estimate: 'ログインは利用者IDとパスワードだけで通す', evidence: [{ path: 'app/auth.py', start: 1, end: 2 }], concern: '2つ目の認証がない', basis: 'repository', check: { by: 'run', detail: 'ログインして一覧が出るかを見る', observation: 'browser_text' } }],
       questions: ['院外から使うか'],
       material: [{ kind: 'search', query: 'login', hits: 1, truncated: false }, { kind: 'read', path: 'app/auth.py', start: 1, end: 10, blob: 'a'.repeat(40) }, { kind: 'refused', request: { kind: 'read', path: '.env' }, reason: '送らないパス' }] } });
   });
@@ -125,9 +128,10 @@ try {
   assert.equal(await investigation.getAttribute('data-investigation'), 'concluded');
   assert.match(await investigation.innerText(), /懸念 1件[\s\S]*往復2回、送った資料2件[\s\S]*2つ目の認証がない[\s\S]*このリポジトリのコードと設定[\s\S]*麦漆で動かして確かめる[\s\S]*院外から使うか/);
   assert.equal(await investigation.locator('[data-usage]').innerText(), '使ったトークン：入力 12,345（うちキャッシュから読んだ分 不明、キャッシュに書いた分 2,000）、出力 678。モデルの呼び出し2回');
-  assert.equal(await investigation.locator('[data-evidence]').getAttribute('href'), `https://github.com/${repository}/blob/${commit}/app/auth.py#L3-L5`);
-  // 結果は事例の記録に残り、開き直しても出る。
-  await page.reload(); await page.locator('[data-investigation]').waitFor();
+  assert.equal(await investigation.locator('[data-evidence]').getAttribute('href'), `https://github.com/${repository}/blob/${commit}/app/auth.py#L1-L2`);
+  // 結果は事例の記録に残り、開き直しても出る。動かして確かめる懸念があるので、開き直すと試験の案の候補の段（2）から開く。
+  await page.reload(); await page.locator('[data-concern-candidate="c-1"]').waitFor();
+  await page.getByRole('button', { name: '1 照合の準備' }).click(); await page.locator('[data-investigation]').waitFor();
   assert.equal(await page.locator('#operation').inputValue(), 'ログインして一覧を開く');
   assert.equal(investigations.length, 2, '開き直しで送り直さない');
   await page.locator('#desc').fill('合成の診療所のタスク管理');
@@ -144,6 +148,8 @@ try {
 
   // 2 照合とヒアリング：試験で確かめられる項目だけをガイドライン別に出す。
   await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
+  // 1で出した懸念のうち、動かして確かめるものを、試験の案の候補として並べる。
+  await page.locator('[data-concern-candidate="c-1"]').waitFor();
   assert.deepEqual(requests.scan[1].confirm, { payload_sha256: 'e'.repeat(64), synthetic_only: true });
   assert.deepEqual(await page.locator('[data-section]').evaluateAll(s => s.map(x => x.getAttribute('data-section'))), ['g3', 'pi']);
   assert.doesNotMatch(await page.locator('main').innerText(), /運用の手順書/, '試験で確かめられない項目は出さない');
@@ -166,7 +172,12 @@ try {
   await page.getByRole('button', { name: '試験の案を作る' }).click();
   await page.locator('[data-preview]').waitFor();
   assert.deepEqual(requests.plan[0].answers, [{ question: '院外から使いますか', answer: 'はい' }], 'ヒアリングの回答を試験の案に使う');
-  assert.deepEqual(requests.plan[0].findings.map(f => f.id), ['f-1', 'f-2']);
+  // 照合の候補に、動かして確かめる懸念（1で出したもの）を足して送る。懸念は「起きていないこと」を要求の文にする。
+  assert.deepEqual(requests.plan[0].findings.map(f => f.id), ['f-1', 'f-2', 'c-1']);
+  assert.deepEqual(requests.plan[0].findings[2], { id: 'c-1', requirement: '次のことが起きていないこと：2つ目の認証がない', how: 'ログインして一覧が出るかを見る（コードからの推定：ログインは利用者IDとパスワードだけで通す。根拠の行：app/auth.py 1〜2行）', source: 'concern' });
+  assert.equal('source' in requests.plan[0].findings[0], false, 'ガイドラインの候補には出どころを付けない');
+  assert.deepEqual(requests.plan[0].files, ['app/auth.py'], '照合で読んだファイルはそのまま');
+  assert.deepEqual(requests.plan[0].evidence, [{ path: 'app/auth.py', start: 1, end: 2 }], '懸念の根拠の行は別に添える');
   await page.locator('#agree').check(); await page.getByRole('button', { name: 'この内容を送る' }).click();
 
   // 3 検証案の了承：了承した試験ごとに確認項目を作り、照合の候補を確かめる部分として登録する。
@@ -228,6 +239,36 @@ try {
   assert.match(await compare.innerText(), /二要素認証\s+不足を確認\s+不足を確認\s+変わらず不足/);
   await page.setViewportSize({ width: 390, height: 844 });
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), '390px幅で横にはみ出さない');
+
+  // 懸念だけから：ガイドラインとの照合をしていない前のコミットで、コードをたどって出た懸念から試験の案を作り、了承する。
+  await page.goto(flowUrl(previous));
+  await page.locator('#operation').fill('ログインして一覧を開く');
+  await page.getByRole('button', { name: '範囲を確かめる' }).click();
+  await page.locator('[data-scope]').waitFor(); await page.locator('#agree-scope').check();
+  await page.getByRole('button', { name: 'この範囲で始める' }).click();
+  await page.locator('[data-investigation]').waitFor();
+  await page.getByRole('button', { name: '動かして確かめる懸念から試験の案を作る' }).click();
+  await page.locator('[data-no-scan]').waitFor();
+  assert.equal(await page.locator('[data-finding]').count(), 0, '照合の候補はない');
+  const planned = requests.plan.length;
+  await page.getByRole('button', { name: '試験の案を作る' }).click();
+  await page.locator('[data-preview]').waitFor();
+  const concernPlan = requests.plan[planned];
+  assert.deepEqual(concernPlan.findings.map(f => [f.id, f.source]), [['c-1', 'concern']]);
+  assert.deepEqual(concernPlan.files, [], '照合をしていなければ、読んだファイルはない');
+  assert.deepEqual(concernPlan.evidence, [{ path: 'app/auth.py', start: 1, end: 2 }], '懸念の根拠の行を添える');
+  await page.locator('#agree').check(); await page.getByRole('button', { name: 'この内容を送る' }).click();
+  const concernTest = page.locator('[data-test="t-concern"]'); await concernTest.waitFor();
+  assert.match(await concernTest.innerText(), /確かめる項目：次のことが起きていないこと：2つ目の認証がない/);
+  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+  const concernTests = page.locator('[data-concern-tests]'); await concernTests.waitFor();
+  assert.match(await concernTests.innerText(), /2つ目の認証を求めるか：2つ目の認証がない/);
+  const after = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await token() } })).json();
+  const concernCheck = after.workspace.checks.find(c => c.aspects?.some(a => a.id === 'c-1'));
+  assert(concernCheck, '懸念を確かめる確認項目を登録した');
+  assert.match(concernCheck.origin, /コードから出た懸念の試験の案（fake・応答ID fake-concern-plan）を合成の開発者が了承/);
+  assert.deepEqual([concernCheck.source.path, concernCheck.source.line, concernCheck.source.end_line, concernCheck.source.commit], ['app/auth.py', 1, 2, previous], '根拠の行を確認項目の参照先にする');
+  assert.match(concernCheck.aspects[0].origin, /コードから出た懸念（コードからの推定で、観測でも判定でもない）。根拠の行：app\/auth.py 1〜2行。調べの記録 inv-1/);
   assert.deepEqual(errors, []);
   console.log('flow smoke: ok');
 } finally {

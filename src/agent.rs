@@ -687,6 +687,7 @@ fn system_of(
     files: &[String],
     summary: &str,
     screens: Option<&ScreenInput>,
+    no_files: bool,
 ) -> io::Result<(Value, std::collections::BTreeSet<String>)> {
     let summary = summary.trim();
     if summary.chars().count() > MAX_SUMMARY {
@@ -694,7 +695,7 @@ fn system_of(
     }
     let mut system = json!({
         "summary": if summary.is_empty() { NO_SUMMARY } else { summary },
-        "excerpts": excerpts(store, repository, commit, files)?,
+        "excerpts": if no_files { vec![] } else { excerpts(store, repository, commit, files)? },
     });
     let mut sent = std::collections::BTreeSet::new();
     // 画面の記録を添える場合だけ項目を足す。添えない場合の送信内容は従来と同じ。
@@ -740,6 +741,7 @@ pub fn flow_scan(
         &request.files,
         &request.summary,
         screens,
+        false,
     )?;
     let payload = json!({"system": system, "answers": request.answers});
     if let Some(preview) = preview_or_check("/v1/scan", &payload, request.confirm.as_ref())? {
@@ -799,6 +801,18 @@ pub struct PlanFinding {
     pub requirement: String,
     #[serde(default)]
     pub how: String,
+    /// 候補の出どころ。ガイドラインとの照合の候補か、コードをたどって出た懸念か。省略はガイドラインの候補として扱う。
+    /// 懸念の候補は、懸念が起きていないことを確かめる試験にする。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<FindingSource>,
+}
+
+/// 試験の案の候補の出どころ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSource {
+    Guideline,
+    Concern,
 }
 
 #[derive(Debug, Deserialize)]
@@ -817,6 +831,91 @@ pub struct PlanRequest {
     /// 画面の構造の記録を添える場合の、事例の試行のID。
     #[serde(default)]
     pub screen_evidence: Option<String>,
+    /// 懸念の候補の根拠の行。行の前後を、照合で読んだファイルとは別の抜粋として添える。
+    /// ファイル丸ごとではなく根拠の行だけを添えるので、照合で読むファイルの上限と取り合わない。
+    #[serde(default)]
+    pub evidence: Vec<EvidenceRange>,
+}
+
+/// 根拠の行の範囲（1から数えた最初の行と最後の行）。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceRange {
+    pub path: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// 根拠の行の前後に添える行の数。
+const EVIDENCE_CONTEXT: usize = 10;
+/// 根拠の範囲の数と、1つの範囲の行の数と、抜粋の合計の文字の数の上限。
+const MAX_EVIDENCE: usize = 60;
+const MAX_EVIDENCE_LINES: usize = 400;
+const MAX_EVIDENCE_CHARS: usize = 100_000;
+
+/// 根拠の行の前後を、行番号つきで切り出す。同じ範囲は一度だけにする。
+fn evidence_excerpts(
+    store: &crate::understanding::Store,
+    repository: &str,
+    commit: &str,
+    ranges: &[EvidenceRange],
+) -> io::Result<Vec<Value>> {
+    let ranges: std::collections::BTreeSet<&EvidenceRange> = ranges.iter().collect();
+    if ranges.len() > MAX_EVIDENCE {
+        return Err(invalid(format!(
+            "根拠の行の範囲は{MAX_EVIDENCE}件までです。懸念の選択を減らしてください"
+        )));
+    }
+    let mut total = 0;
+    let mut out = vec![];
+    for range in ranges {
+        if range.start == 0
+            || range.end < range.start
+            || range.end - range.start + 1 > MAX_EVIDENCE_LINES
+        {
+            return Err(invalid(format!(
+                "根拠の行の範囲は、1以上の最初の行から{MAX_EVIDENCE_LINES}行までにしてください"
+            )));
+        }
+        let file = store.handle(crate::understanding::UnderstandRequest::File {
+            repository: repository.to_owned(),
+            commit: commit.to_owned(),
+            path: range.path.clone(),
+        })?;
+        let lines: Vec<&str> = file["file"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .lines()
+            .collect();
+        if range.start > lines.len() {
+            return Err(invalid(format!(
+                "{} は{}行です。根拠の行がファイルの外です",
+                range.path,
+                lines.len()
+            )));
+        }
+        let from = range.start.saturating_sub(EVIDENCE_CONTEXT).max(1);
+        let to = (range.end + EVIDENCE_CONTEXT).min(lines.len());
+        let text = (from..=to)
+            .map(|n| {
+                format!(
+                    "{n}: {}",
+                    lines[n - 1].chars().take(500).collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        total += text.chars().count();
+        if total > MAX_EVIDENCE_CHARS {
+            return Err(invalid(
+                "根拠の行の抜粋が多すぎます。懸念の選択を減らしてください",
+            ));
+        }
+        out.push(
+            json!({"ref": format!("{}:{}-{}", range.path, range.start, range.end), "text": text}),
+        );
+    }
+    Ok(out)
 }
 
 /// 試験の案。人が了承するまで実行されない。観測の種類は麦漆で判定に使える種類だけを受け取る。
@@ -830,6 +929,10 @@ pub fn plan(
     if request.findings.is_empty() || request.findings.len() > 24 {
         return Err(invalid("試験の案を作る候補を1〜24件選んでください"));
     }
+    // 照合をしていない場合（懸念だけの案）は、読んだファイルがなく、根拠の行だけを添える。
+    if request.files.is_empty() && request.evidence.is_empty() {
+        return Err(invalid("照合で読んだファイルか、懸念の根拠の行が要ります"));
+    }
     let (system, _) = system_of(
         store,
         &request.repository,
@@ -837,9 +940,19 @@ pub fn plan(
         &request.files,
         &request.summary,
         screens,
+        request.files.is_empty(),
     )?;
-    let payload =
+    let mut payload =
         json!({"system": system, "findings": request.findings, "answers": request.answers});
+    // 根拠の行がないときは、これまでと同じ形で送る。
+    if !request.evidence.is_empty() {
+        payload["evidence"] = json!(evidence_excerpts(
+            store,
+            &request.repository,
+            &request.commit,
+            &request.evidence
+        )?);
+    }
     if let Some(preview) = preview_or_check("/v1/plan", &payload, request.confirm.as_ref())? {
         return Ok(preview);
     }
