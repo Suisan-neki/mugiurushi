@@ -3,7 +3,7 @@
 // 判定と観測の状態は事例の記録（/api/v1/case）が正。流れの記録（/api/v1/flow）は画面を続けるための控え。
 // AIへ送る内容は、送る前にサーバーが組み立てた内容をそのまま表示し、人が確かめたときだけ送る。
 import { apiRequest as api } from './api.js';
-import { applyScan, applyPlan, applyInvestigation, runConcerns, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
+import { applyScan, applyPlan, applyInvestigation, runConcerns, planEvidence, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
 
 /** @param {string} tag @param {Record<string, any>} [attrs] @param {...any} children */
 function h(tag, attrs = {}, ...children) {
@@ -289,12 +289,6 @@ function bySection(/** @type {any[]} */ items) {
 function prio(/** @type {string} */ p) { return h('span', { class: `prio ${p}` }, PRIO[p] || p); }
 
 // ---------- 2 照合とヒアリング ----------
-/** 試験の案に添えるコードのファイル。照合で読んだファイルに、候補にした懸念の根拠の行があるファイルを足す（多くとも20件）。 */
-function planFiles(/** @type {any} */ r, /** @type {any[]} */ concerns) {
-  const files = [...(r.files || [])];
-  for (const c of concerns) for (const e of c.evidence || []) if (!files.includes(e.path)) files.push(e.path);
-  return files.slice(0, 20);
-}
 async function step2() {
   const r = state.record;
   const out = h('div', {});
@@ -309,7 +303,7 @@ async function step2() {
     if (!findings.length) return showError('試験で確かめられる項目がありません。');
     if (findings.length > 24) return showError('試験の案の候補は24件までです。懸念の選択を減らしてください。');
     const at = planGeneration(r);
-    return confirmAndSend(out, '/api/v1/agent/plan', { repository: state.source.repository, commit: state.source.commit, files: planFiles(r, concerns), summary: r.summary || '', answers: answersOf(r), findings, ...screenOf(r) }, async (/** @type {any} */ p) => { applyPlan(r, p, at, concerns); await saveRecord(); go(3); });
+    return confirmAndSend(out, '/api/v1/agent/plan', { repository: state.source.repository, commit: state.source.commit, files: r.files || [], evidence: planEvidence(concerns), summary: r.summary || '', answers: answersOf(r), findings, ...screenOf(r) }, async (/** @type {any} */ p) => { applyPlan(r, p, at, concerns); await saveRecord(); go(3); });
   }, 'primary');
   const scanMain = r.scan ? [
     h('h2', {}, '照合の結果：満たしていない可能性がある項目'),

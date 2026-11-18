@@ -176,6 +176,8 @@ try {
   assert.deepEqual(requests.plan[0].findings.map(f => f.id), ['f-1', 'f-2', 'c-1']);
   assert.deepEqual(requests.plan[0].findings[2], { id: 'c-1', requirement: '次のことが起きていないこと：2つ目の認証がない', how: 'ログインして一覧が出るかを見る（コードからの推定：ログインは利用者IDとパスワードだけで通す。根拠の行：app/auth.py 1〜2行）', source: 'concern' });
   assert.equal('source' in requests.plan[0].findings[0], false, 'ガイドラインの候補には出どころを付けない');
+  assert.deepEqual(requests.plan[0].files, ['app/auth.py'], '照合で読んだファイルはそのまま');
+  assert.deepEqual(requests.plan[0].evidence, [{ path: 'app/auth.py', start: 1, end: 2 }], '懸念の根拠の行は別に添える');
   await page.locator('#agree').check(); await page.getByRole('button', { name: 'この内容を送る' }).click();
 
   // 3 検証案の了承：了承した試験ごとに確認項目を作り、照合の候補を確かめる部分として登録する。
@@ -253,7 +255,8 @@ try {
   await page.locator('[data-preview]').waitFor();
   const concernPlan = requests.plan[planned];
   assert.deepEqual(concernPlan.findings.map(f => [f.id, f.source]), [['c-1', 'concern']]);
-  assert.deepEqual(concernPlan.files, ['app/auth.py'], '照合で読んだファイルがなければ、懸念の根拠のファイルを添える');
+  assert.deepEqual(concernPlan.files, [], '照合をしていなければ、読んだファイルはない');
+  assert.deepEqual(concernPlan.evidence, [{ path: 'app/auth.py', start: 1, end: 2 }], '懸念の根拠の行を添える');
   await page.locator('#agree').check(); await page.getByRole('button', { name: 'この内容を送る' }).click();
   const concernTest = page.locator('[data-test="t-concern"]'); await concernTest.waitFor();
   assert.match(await concernTest.innerText(), /確かめる項目：次のことが起きていないこと：2つ目の認証がない/);

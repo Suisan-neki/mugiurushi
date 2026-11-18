@@ -46,6 +46,14 @@ export function applyInvestigation(/** @type {any} */ record, /** @type {any} */
   return record;
 }
 
+/** 試験の案に添える、懸念の候補の根拠の行（ファイルと行の範囲）。同じ範囲は一度だけにする。
+ * ファイル丸ごとではなく根拠の行の前後だけを添えるので、照合で読むファイル（上限40件）と取り合わない。 */
+export function planEvidence(/** @type {any[]} */ concerns) {
+  const seen = new Set();
+  return concerns.flatMap((/** @type {any} */ c) => (c.evidence || []).map((/** @type {any} */ e) => ({ path: e.path, start: e.start, end: e.end })))
+    .filter((/** @type {any} */ e) => { const k = `${e.path}:${e.start}-${e.end}`; return seen.has(k) ? false : (seen.add(k), true); });
+}
+
 /** 送った時点の照合の世代。応答が返るまでに別の照合が終わっていたら、その応答は使わない。 */
 export function scanGeneration(/** @type {any} */ record) { return record?.scan?.generation ?? null; }
 /** 送った時点の照合と案の世代と、調べの記録のID。 */

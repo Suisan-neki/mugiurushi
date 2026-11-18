@@ -1599,6 +1599,7 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
             .collect(),
         confirm,
         screen_evidence: None,
+        evidence: vec![],
     };
     let preview = plan(Some(&config), &store, plan_request(vec!["f-1"], None), None).unwrap();
     let sha_plan = preview["payload_sha256"].as_str().unwrap().to_owned();
@@ -1849,6 +1850,7 @@ fn screens_join_the_scan_input_only_when_chosen_and_unsent_screen_references_are
             }],
             confirm: None,
             screen_evidence: None,
+            evidence: vec![],
         },
         Some(&input),
     )
@@ -1967,6 +1969,7 @@ fn plan_accounts_for_every_candidate_without_guessing_reasons() {
                 .collect(),
             screen_evidence: None,
             confirm,
+            evidence: vec![],
         };
         let preview = plan(Some(&config), &store, request(None), None).unwrap();
         let sha = preview["payload_sha256"].as_str().unwrap().to_owned();
@@ -2033,7 +2036,7 @@ fn plan_accounts_for_every_candidate_without_guessing_reasons() {
 
 #[test]
 fn a_concern_candidate_is_sent_to_the_plan_with_its_source() {
-    use mugiurushi::agent::{FindingSource, PlanFinding, PlanRequest, plan};
+    use mugiurushi::agent::{EvidenceRange, FindingSource, PlanFinding, PlanRequest, plan};
     let f = Fixture::new("懸念の候補を試験の案へ");
     let commit = "a".repeat(40);
     let snapshots = f.directory.join("snapshots");
@@ -2055,12 +2058,53 @@ fn a_concern_candidate_is_sent_to_the_plan_with_its_source() {
         how: String::new(),
         source,
     };
+    let request = |files: Vec<String>, evidence: Vec<EvidenceRange>| PlanRequest {
+        repository: "example/clinic".into(),
+        commit: commit.clone(),
+        files,
+        summary: String::new(),
+        answers: vec![],
+        findings: vec![candidate("c-1", Some(FindingSource::Concern))],
+        confirm: None,
+        screen_evidence: None,
+        evidence,
+    };
+    let range = |path: &str, start, end| EvidenceRange {
+        path: path.into(),
+        start,
+        end,
+    };
+    // 照合をしていない懸念だけの案は、読んだファイルなしで、根拠の行の前後を行番号つきで添える。同じ範囲は一度だけ。
+    let only = plan(
+        Some(&config),
+        &store,
+        request(
+            vec![],
+            vec![range("app/patient.py", 2, 2), range("app/patient.py", 2, 2)],
+        ),
+        None,
+    )
+    .unwrap();
+    assert_eq!(only["payload"]["system"]["excerpts"], serde_json::json!([]));
+    assert_eq!(
+        only["payload"]["evidence"],
+        serde_json::json!([{"ref": "app/patient.py:2-2", "text": "1: def save(p):\n2:     log(p.national_id)"}])
+    );
+    // 読んだファイルも根拠の行もない要求、ファイルの外の行、範囲の誤りは受け付けない。
+    for bad in [
+        request(vec![], vec![]),
+        request(vec![], vec![range("app/patient.py", 9, 9)]),
+        request(vec![], vec![range("app/patient.py", 0, 1)]),
+        request(vec![], vec![range("app/patient.py", 2, 1)]),
+    ] {
+        assert!(plan(Some(&config), &store, bad, None).is_err());
+    }
     let preview = plan(
         Some(&config),
         &store,
         PlanRequest {
             repository: "example/clinic".into(),
-            commit,
+            commit: commit.clone(),
             files: vec!["app/patient.py".into()],
             summary: String::new(),
             answers: vec![],
@@ -2070,6 +2114,7 @@ fn a_concern_candidate_is_sent_to_the_plan_with_its_source() {
             ],
             confirm: None,
             screen_evidence: None,
+            evidence: vec![],
         },
         None,
     )
@@ -2078,6 +2123,10 @@ fn a_concern_candidate_is_sent_to_the_plan_with_its_source() {
     // 出どころを書かない候補は、これまでと同じ形で送る（受け渡しの固定ファイルを変えない）。
     assert!(findings[0].get("source").is_none(), "{findings:?}");
     assert_eq!(findings[1]["source"], "concern");
+    assert!(
+        preview["payload"].get("evidence").is_none(),
+        "根拠の行がなければ、これまでと同じ形で送る"
+    );
     assert!(
         agent.received.lock().unwrap().is_empty(),
         "確認の段階では送らない"

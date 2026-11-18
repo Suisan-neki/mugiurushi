@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import {
   applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, StaleResponse,
   approve, approvedCheck, approvedTests, planForCheck, checkIdOf, startStep, migrate, fingerprint, untestedFindings,
-  applyInvestigation, runConcerns, planIsCurrent,
+  applyInvestigation, runConcerns, planIsCurrent, planEvidence,
 } from '../ui/flow-record.js';
 
 const scan = (reqs, questions = []) => ({ findings: reqs.map(requirement => ({ requirement, verification: { executable_check: true } })), questions });
@@ -185,4 +185,13 @@ test('懸念を送った後に調べを出し直していたら、遅れて返�
   const at = planGeneration(r);
   investigated(r, 'inv-2', [concern('c-1')]);
   assert.throws(() => applyPlan(r, concernPlan(), at, runConcerns(r)), StaleResponse);
+});
+
+test('試験の案には、懸念の候補の根拠の行を、同じ範囲は一度だけ添える', () => {
+  const a = { ...concern('c-1'), evidence: [{ path: 'app/a.py', start: 3, end: 5 }, { path: 'app/b.py', start: 1, end: 1 }] };
+  const b = { ...concern('c-2'), evidence: [{ path: 'app/a.py', start: 3, end: 5 }, { path: 'app/a.py', start: 9, end: 9 }] };
+  assert.deepEqual(planEvidence([a, b]), [
+    { path: 'app/a.py', start: 3, end: 5 }, { path: 'app/b.py', start: 1, end: 1 }, { path: 'app/a.py', start: 9, end: 9 },
+  ]);
+  assert.deepEqual(planEvidence([]), [], '懸念を候補にしなければ添えない');
 });
