@@ -18,6 +18,14 @@ for (const sha of [previous, commit]) await writeFile(join(data, 'snapshots', re
   inventory: [{ path: 'app/auth.py', mode: '100644' }, { path: 'tests/test_auth.py', mode: '100644' }, { path: 'README.md', mode: '100644' }, { path: 'config/.env', mode: '100644' }],
   files: { 'app/auth.py': 'def login(user, password):\n    return True\n', 'tests/test_auth.py': 'def test(): pass\n', 'README.md': '架空の診療所', 'config/.env': 'TOKEN=synthetic' }, omitted: [],
 }));
+// 一度に照合できる量を超えるリポジトリ：app/ に30件、lib/ に15件、docs/ に5件。
+const large = 'd'.repeat(40);
+const largeFiles = [...Array.from({ length: 30 }, (_, i) => `app/m${String(i).padStart(2, '0')}.py`), ...Array.from({ length: 15 }, (_, i) => `lib/u${String(i).padStart(2, '0')}.py`), ...Array.from({ length: 5 }, (_, i) => `docs/d${i}.md`)];
+await writeFile(join(data, 'snapshots', repository, large + '.json'), JSON.stringify({
+  schema: 1, fullName: repository, reference: large, commit: large,
+  inventory: largeFiles.map(path => ({ path, mode: '100644', size: 100 })),
+  files: Object.fromEntries(largeFiles.map(p => [p, '# 架空\n'])), omitted: [],
+}));
 const child = spawn(process.env.REVIEW_BINARY || join(root, 'target/debug/mugiurushi'), ['app', data, '--port', '0'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
 let browser;
 try {
@@ -324,6 +332,23 @@ try {
   const carriedPlan = requests.plan[before];
   assert.equal(carriedPlan.findings.find(f => f.id === 'c-1').requirement, '次のことが起きていないこと：2つ目の認証がない', '引き継いだ懸念は文が同じ');
   assert.deepEqual(carriedPlan.evidence, [{ path: 'app/auth.py', start: 1, end: 2, commit: previous }], '根拠の行には前のコミットを添える');
+  // 量を超える場合は送らず、ディレクトリごとに分けて照合する案を示す。1回分を選ぶと、その回のファイルだけが選ばれる。
+  const scansBefore = requests.scan.length;
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(flowUrl(large)); await page.locator('[data-files]').waitFor();
+  await page.getByRole('button', { name: '送信内容を確認する' }).click();
+  const proposal = page.locator('[data-split-proposal]'); await proposal.waitFor();
+  assert.match(await proposal.innerText(), /50件を、2回に分けて照合しましょう/);
+  assert.deepEqual(await proposal.locator('[data-round]').evaluateAll(r => r.map(x => x.querySelector('.note').textContent)), ['app/、docs/', 'lib/']);
+  assert.equal(requests.scan.length, scansBefore, '量を超えたままでは送らない');
+  await proposal.getByRole('button', { name: '2回目のファイルだけを選ぶ' }).click();
+  await page.locator('[data-split-proposal]').waitFor({ state: 'detached' });
+  assert.match(await page.locator('main').innerText(), /送るファイル 15件/);
+  await page.getByRole('button', { name: '送信内容を確認する' }).click();
+  await page.locator('[data-preview]').waitFor();
+  assert.equal(requests.scan[requests.scan.length - 1].files.length, 15, '選んだ回のファイルだけを送る内容にする');
+  await page.getByRole('button', { name: '戻る' }).click();
+
   assert.deepEqual(errors, []);
   console.log('flow smoke: ok');
 } finally {

@@ -126,6 +126,39 @@ const SECRET = /(^|\/)(\.env(\.[^/]*)?|[^/]*\.(pem|key|p12|pfx|jks|keystore|kdbx
 // 最初は外しておくファイル。全部を読む前提で、読んでも照合に役立たない依存・生成物・バイナリ・ロックファイルだけを外す。
 const SKIP = /(^|\/)(node_modules|vendor|dist|build|\.git)\/|\.(png|jpe?g|gif|webp|ico|bmp|pdf|zip|gz|tgz|jar|war|woff2?|ttf|otf|eot|mp3|mp4|mov|wasm|exe|dll|so|dylib)$|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|uv\.lock|Gemfile\.lock|composer\.lock)$/i;
 
+// 一度の照合で送れる量（src/agent.rs の MAX_FILES・MAX_FILE_CHARS・MAX_TOTAL_CHARS と同じ値）。
+// 1ファイルは先頭の2万文字までしか送らないので、量はファイルごとに2万で頭打ちにして数える。
+const SEND = { files: 40, fileChars: 20_000, totalChars: 400_000 };
+const weightOf = (/** @type {any} */ f) => Math.min(f?.size ?? SEND.fileChars, SEND.fileChars);
+/** 送れる量を超えたファイルを、ディレクトリのまとまりを崩さないように、1回で送れる量ずつの回に分ける。 */
+function splitRounds(/** @type {string[]} */ files, /** @type {Map<string, any>} */ byPath) {
+  /** @type {{ label: string, files: string[] }[]} */
+  const groups = [];
+  const fits = (/** @type {string[]} */ fs) => fs.length <= SEND.files && fs.reduce((n, f) => n + weightOf(byPath.get(f)), 0) <= SEND.totalChars;
+  const walk = (/** @type {string[]} */ fs, /** @type {number} */ depth, /** @type {string} */ prefix) => {
+    if (fits(fs)) return groups.push({ label: prefix || '（最上位）', files: fs });
+    const sub = new Map(), here = [];
+    for (const f of fs) { const parts = f.split('/'); if (parts.length > depth + 1) { const k = parts.slice(0, depth + 1).join('/') + '/'; sub.set(k, [...(sub.get(k) || []), f]); } else here.push(f); }
+    if (sub.size === 1 && !here.length) return walk(fs, depth + 1, [...sub.keys()][0]);
+    for (const [k, v] of [...sub].sort()) walk(v, depth + 1, k);
+    // 同じディレクトリの直下だけで送れる量を超える場合は、名前の順に区切る。
+    for (let i = 0, chunk = []; i <= here.length; i++) {
+      const f = here[i];
+      if (f === undefined || !fits([...chunk, f])) { if (chunk.length) groups.push({ label: `${prefix || '（最上位）'}の直下`, files: chunk }); chunk = f === undefined ? [] : [f]; } else chunk.push(f);
+    }
+  };
+  walk([...files].sort(), 0, '');
+  // 小さいまとまりは、送れる量に収まる範囲で同じ回にまとめる。
+  /** @type {{ labels: string[], files: string[] }[]} */
+  const rounds = [];
+  for (const g of groups) {
+    const last = rounds[rounds.length - 1];
+    if (last && fits([...last.files, ...g.files])) { last.labels.push(g.label); last.files.push(...g.files); }
+    else rounds.push({ labels: [g.label], files: [...g.files] });
+  }
+  return rounds;
+}
+
 // ---------- 1 照合の準備 ----------
 // この段の操作は「送信内容を確認する」だけ。ファイルは最初から全部を選んでおき、外したいものだけを外す。
 async function step1() {
@@ -170,6 +203,21 @@ async function step1() {
     h('div', { class: 'actions' }, btn('送信内容を確認する', () => {
       const files = [...chosen];
       if (!files.length) return showError('送るファイルを1件以上選んでください。');
+      // 一度に送れる量を超える場合は送らず、ディレクトリごとに分けて照合する案を示す。
+      const byPath = new Map(inv.map((/** @type {any} */ f) => [f.path, f]));
+      if (files.length > SEND.files || files.reduce((n, f) => n + weightOf(byPath.get(f)), 0) > SEND.totalChars) {
+        const rounds = splitRounds(files, byPath);
+        fill(out, h('div', { class: 'box', 'data-split-proposal': '' }, h('div', { class: 'pad' },
+          h('h3', {}, `${files.length}件を、${rounds.length}回に分けて照合しましょう`),
+          h('p', {}, '一度に照合できる量を超えています。ディレクトリごとに分けました。1回分を選んで照合してください。'),
+          h('ol', { class: 'rounds' }, rounds.map((r, i) => h('li', { 'data-round': i + 1 },
+            h('div', {}, h('strong', {}, `${i + 1}回目`), ` ${r.files.length}件`),
+            h('div', { class: 'note' }, r.labels.join('、')),
+            btn(`${i + 1}回目のファイルだけを選ぶ`, () => { chosen.clear(); r.files.forEach(f => chosen.add(f)); fill(out); list(); update(); })))),
+          h('p', { class: 'note' }, '分けた回の結果をまとめて比べる機能はまだありません（#243）。'))));
+        out.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        return;
+      }
       state.record = { ...(state.record || {}), files, summary: /** @type {HTMLTextAreaElement} */ (desc).value.trim() };
       const answers = answersOf(state.record), at = scanGeneration(state.record);
       return confirmAndSend(out, '/api/v1/agent/flow-scan', { repository: state.source.repository, commit: state.source.commit, files, summary: state.record.summary, answers, ...screenOf(state.record) }, async (/** @type {any} */ r) => {
