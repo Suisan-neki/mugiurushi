@@ -844,6 +844,9 @@ pub struct EvidenceRange {
     pub path: String,
     pub start: usize,
     pub end: usize,
+    /// 根拠の行があるコミット。前のコミットから引き継いだ懸念は、そのコミットの行を指す。省略は要求のコミット。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 /// 根拠の行の前後に添える行の数。
@@ -877,9 +880,15 @@ fn evidence_excerpts(
                 "根拠の行の範囲は、1以上の最初の行から{MAX_EVIDENCE_LINES}行までにしてください"
             )));
         }
+        let at = range.commit.as_deref().unwrap_or(commit);
+        if at.len() != 40 || !at.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(invalid(
+                "根拠の行のコミットは40桁の16進数で指定してください",
+            ));
+        }
         let file = store.handle(crate::understanding::UnderstandRequest::File {
             repository: repository.to_owned(),
-            commit: commit.to_owned(),
+            commit: at.to_owned(),
             path: range.path.clone(),
         })?;
         let lines: Vec<&str> = file["file"]["text"]
@@ -911,9 +920,20 @@ fn evidence_excerpts(
                 "根拠の行の抜粋が多すぎます。懸念の選択を減らしてください",
             ));
         }
-        out.push(
-            json!({"ref": format!("{}:{}-{}", range.path, range.start, range.end), "text": text}),
-        );
+        // 要求とは別のコミットの行なら、参照にそのコミットを書く（モデルが、今のコードの行と取り違えないように）。
+        let reference = match &range.commit {
+            Some(other) if other != commit => {
+                format!(
+                    "{}:{}-{}@{}",
+                    range.path,
+                    range.start,
+                    range.end,
+                    &other[..7]
+                )
+            }
+            _ => format!("{}:{}-{}", range.path, range.start, range.end),
+        };
+        out.push(json!({"ref": reference, "text": text}));
     }
     Ok(out)
 }

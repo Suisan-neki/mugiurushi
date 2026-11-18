@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import {
   applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, StaleResponse,
   approve, approvedCheck, approvedTests, planForCheck, checkIdOf, startStep, migrate, fingerprint, untestedFindings,
-  applyInvestigation, runConcerns, planIsCurrent, planEvidence,
+  applyInvestigation, runConcerns, planIsCurrent, planEvidence, carryableConcerns, carriedInvestigation,
 } from '../ui/flow-record.js';
 
 const scan = (reqs, questions = []) => ({ findings: reqs.map(requirement => ({ requirement, verification: { executable_check: true } })), questions });
@@ -194,4 +194,20 @@ test('試験の案には、懸念の候補の根拠の行を、同じ範囲は�
     { path: 'app/a.py', start: 3, end: 5 }, { path: 'app/b.py', start: 1, end: 1 }, { path: 'app/a.py', start: 9, end: 9 },
   ]);
   assert.deepEqual(planEvidence([]), [], '懸念を候補にしなければ添えない');
+});
+
+test('前のコミットで了承した試験に入った懸念だけを、根拠のコミットを付けて引き継ぐ', () => {
+  const prev = investigated({}, 'inv-1', [concern('c-1'), concern('c-2')]);
+  applyPlan(prev, concernPlan(), planGeneration(prev), runConcerns(prev));
+  const records = { a: { repository: 'x/y', commit: 'a'.repeat(40), record: prev } };
+  assert.equal(carryableConcerns(records, 'x/y', 'b'.repeat(40)), null, '了承していなければ引き継がない');
+  approve(prev, prev.plan.tests[0], 'flow-a-tc');
+  const carry = carryableConcerns(records, 'x/y', 'b'.repeat(40));
+  assert.deepEqual(carry.concerns.map(c => [c.id, c.commit]), [['c-1', 'a'.repeat(40)]], '試験に入っていない c-2 は引き継がない');
+  assert.equal(carryableConcerns(records, 'x/y', 'a'.repeat(40)), null, '同じコミットからは引き継がない');
+  assert.equal(carryableConcerns(records, 'x/z', 'b'.repeat(40)), null, '別のリポジトリからは引き継がない');
+  // 引き継いだ懸念で案を作ると、根拠の行に前のコミットを添える。
+  const now = applyInvestigation({}, carriedInvestigation(carry));
+  assert.equal(now.investigation.result.stopped_by, 'carried');
+  assert.deepEqual(planEvidence(runConcerns(now)), [{ path: 'app/auth.py', start: 3, end: 5, commit: 'a'.repeat(40) }]);
 });
