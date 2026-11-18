@@ -62,7 +62,7 @@ try {
   const u = new URL(url + '/flow'); u.search = new URLSearchParams({ url: 'https://github.com/' + repository, ref: commit }).toString();
   await page.goto(u.href);
   await page.locator('[data-files]').waitFor();
-  await page.getByRole('button', { name: /照合を始める/ }).click(); await send();
+  await page.getByRole('button', { name: '送信内容を確認する' }).click(); await send();
   await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
 
   // 未知ID・両方への重複：サーバーが受け取らず、案は記録しない。
@@ -74,15 +74,15 @@ try {
 
   // 空の案：試験は0件で、送った3件すべてが未分類として残る。
   await planOnce();
-  await page.getByRole('heading', { name: '試験の案（0件）' }).waitFor();
-  assert.match(await page.locator('[data-unclassified]').innerText(), /未分類[\s\S]*担当外に出さない、操作の記録を残す、保存先の外に書かない/);
+  await page.locator('[data-plan-count]', { hasText: '0件の試験' }).waitFor();
+  assert.match(await page.locator('[data-unclassified]').innerText(), /試験の案に含まれず、理由もない項目：担当外に出さない、操作の記録を残す、保存先の外に書かない/);
 
   // 欠落：AIが試験にしなかった候補は理由つき、どちらにも入らなかった候補は未分類として残す。
   await planOnce();
   await page.locator('[data-test="t-一覧"]').waitFor();
   assert.match(await page.locator('[data-not-planned]').innerText(), /操作の記録を残す（AIの理由：本番の構成による）/);
   assert.match(await page.locator('[data-unclassified]').innerText(), /保存先の外に書かない/);
-  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+  await page.getByRole('button', { name: '了承して試験を設定する' }).click();
   await page.locator('[data-untested-section]').waitFor();
   assert.deepEqual(await page.locator('[data-result]').evaluateAll(r => r.map(x => x.getAttribute('data-result'))), ['pending'], '試験は未実行として出す');
   assert.deepEqual(await page.locator('[data-untested]').evaluateAll(r => r.map(x => [x.getAttribute('data-untested'), x.children[1].textContent])),
@@ -96,7 +96,7 @@ try {
   await planOnce();
   await page.locator('[data-test="t-記録"]').waitFor();
   await page.locator('[data-test="t-記録"] input[type=checkbox]').uncheck();
-  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+  await page.getByRole('button', { name: '了承して試験を設定する' }).click();
   await page.locator('[data-untested-section]').waitFor();
   assert.deepEqual(await page.locator('[data-untested]').evaluateAll(r => r.map(x => [x.getAttribute('data-untested'), x.children[1].textContent])),
     [['not_approved', '操作の記録を残す'], ['not_planned', '保存先の外に書かない']]);

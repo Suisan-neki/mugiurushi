@@ -134,8 +134,10 @@ pub fn status(config: Option<&Config>) -> Value {
             "status": "not_configured",
             "message": "AIエージェントは設定されていません。確認項目・試験・判定はAIなしで使えます。",
         }),
-        Some(_) => json!({
+        // 送る前の確認で、コードが手元を出て行く先を示すため、運営者が設定した接続先を返す。
+        Some(config) => json!({
             "status": "configured",
+            "endpoint": config.base_url,
             "message": "AIエージェントの案は下書きです。採用するまで確認項目には入らず、判定には使いません。",
         }),
     }
@@ -648,6 +650,19 @@ fn clip_excerpt(text: &str) -> (String, String) {
     (text.chars().take(kept).collect(), note)
 }
 
+/// 秘密の値を持つことが多い種類のファイル（`.env`、鍵ファイルなど）は、照合でも送らない。
+/// 判定はコードをたどる往復と同じ既定の指定（`code_tree::DEFAULT_EXCLUSIONS`）を使う。
+/// 画面は最初から全ファイルを選ぶので、画面の外しそこないに頼らず、ここで拒否する。
+fn refuse_secret_files(files: &[String]) -> io::Result<()> {
+    let exclusions = crate::code_tree::Exclusions::new(&[])?;
+    match files.iter().find(|path| exclusions.excludes(path)) {
+        Some(path) => Err(invalid(format!(
+            "{path} は秘密の値を持つことが多い種類のファイルなので、AIエージェントへ送りません。選択から外してください"
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn excerpts(
     store: &crate::understanding::Store,
     repository: &str,
@@ -659,6 +674,7 @@ fn excerpts(
             "照合に使うファイルを1〜{MAX_FILES}件選んでください"
         )));
     }
+    refuse_secret_files(files)?;
     let mut total = 0;
     let mut out = vec![];
     for path in files {
@@ -1150,6 +1166,22 @@ mod tests {
         Config::new(url, PathBuf::from("unused"))
     }
 
+    /// 秘密の値を持つことが多い種類のファイルは、どの階層にあっても照合で送らない。
+    /// 名前に secret を含むだけのコードのファイルは送る。
+    #[test]
+    fn secret_files_are_refused_before_reading_excerpts() {
+        for path in [
+            ".env",
+            "app/.env.production",
+            "deploy/server.pem",
+            "home/id_rsa",
+        ] {
+            let err = refuse_secret_files(&["app/main.py".into(), path.into()]).unwrap_err();
+            assert!(err.to_string().contains(path), "{path}");
+        }
+        assert!(refuse_secret_files(&["app/secret_handler.py".into(), "README.md".into()]).is_ok());
+    }
+
     /// 長いファイルの抜粋は、切ったことの注記を含めて上限以内にする。短いファイルはそのまま送る。
     #[test]
     fn clipped_excerpt_with_its_note_stays_within_the_agent_limit() {
@@ -1198,6 +1230,17 @@ mod tests {
             config("http://127.0.0.1:8787/").unwrap().base_url,
             "http://127.0.0.1:8787"
         );
+    }
+
+    /// 送る前の確認で示す接続先は、運営者が設定したものをそのまま返す。
+    #[test]
+    fn status_shows_the_configured_endpoint() {
+        let configured = config("http://127.0.0.1:8787/").unwrap();
+        assert_eq!(
+            status(Some(&configured))["endpoint"],
+            "http://127.0.0.1:8787"
+        );
+        assert!(status(None).get("endpoint").is_none());
     }
 
     #[test]

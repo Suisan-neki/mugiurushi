@@ -72,14 +72,14 @@ try {
 
   // 1回目：照合 → 回答 → 案 → 了承して登録。
   await page.locator('[data-files]').waitFor();
-  await page.getByRole('button', { name: /照合を始める/ }).click(); await send();
+  await page.getByRole('button', { name: '送信内容を確認する' }).click(); await send();
   await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
   await page.locator('[data-question="q1"] input[type=radio]').first().check();
   await page.getByRole('button', { name: '試験の案を作る' }).click(); await send();
   assert.deepEqual(sent.plan[0].answers, [{ question: '院外から使いますか', answer: 'はい' }]);
   await page.locator('[data-test="t-same"]').waitFor();
   // 連打：2回続けて押しても、確認項目は1つだけ作る。
-  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click({ clickCount: 2, delay: 0 });
+  await page.getByRole('button', { name: '了承して試験を設定する' }).click({ clickCount: 2, delay: 0 });
   await page.locator('[data-result]').first().waitFor();
   let view = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await page.locator('meta[name=review-token]').getAttribute('content') } })).json();
   assert.equal(view.workspace.checks.filter(c => c.id.startsWith('flow-')).length, 1, '連打で確認項目を二重に作らない');
@@ -96,7 +96,7 @@ try {
   assert.equal(await stepEnabled(3), false, '新しい照合ではまだ試験の案がない');
   assert.equal(await stepEnabled(4), false, '前の了承で結果へ進めない');
   await page.reload(); await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
-  assert.equal(await page.locator('#steps button[aria-current=step]').innerText(), '▸ 2 照合とヒアリング', '読み込み直しても前の了承で結果へ飛ばない');
+  assert.equal(await page.locator('#steps button[aria-current=step]').innerText(), '2 照合とヒアリング', '読み込み直しても前の了承で結果へ飛ばない');
   await page.getByRole('button', { name: '試験の案を作る' }).click(); await send();
   assert.deepEqual(sent.scan[1].answers, [{ question: '院外から使いますか', answer: 'はい' }], '照合し直すときに回答を送る');
   assert.deepEqual(sent.plan[1].answers, [{ question: '院外から使いますか', answer: 'はい' }],
@@ -114,14 +114,14 @@ try {
     if (failOnce && route.request().postDataJSON()?.action?.op === 'set_aspects') { failOnce = false; return route.fulfill({ status: 500, json: { error: '合成の失敗' } }); }
     return route.continue();
   });
-  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+  await page.getByRole('button', { name: '了承して試験を設定する' }).click();
   await page.locator('#alert .alert').waitFor();
   const token2 = await page.locator('meta[name=review-token]').getAttribute('content');
   let mid = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': token2 } })).json();
   const half = mid.workspace.checks.filter(c => c.id.startsWith('flow-') && c.id !== firstCheck);
   assert.deepEqual(half.map(c => c.aspects.length), [0], '前提：確認項目だけ作られて部分は未登録');
   assert.equal(await stepEnabled(4), false, '登録しきれていない試験を了承済みにしない');
-  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+  await page.getByRole('button', { name: '了承して試験を設定する' }).click();
   await page.locator('[data-result]').first().waitFor();
   view = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await page.locator('meta[name=review-token]').getAttribute('content') } })).json();
   const flows = view.workspace.checks.filter(c => c.id.startsWith('flow-'));

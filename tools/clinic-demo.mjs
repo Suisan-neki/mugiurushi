@@ -91,7 +91,7 @@ try {
   await page.goto(flowUrl.href);
   await page.locator('[data-files]').waitFor();
   await page.locator('#desc').fill('架空の診療所で、職員が患者ごとの連絡タスク（架空の患者ID・内容）を追加し、一覧で読み直す。職員はそれぞれ担当する患者のタスクだけを扱う。');
-  await page.getByRole('button', { name: /照合を始める/ }).click();
+  await page.getByRole('button', { name: '送信内容を確認する' }).click();
   const scan = await send();
   await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
   record.scan = { findings: scan.findings.length, testable: scan.findings.filter(f => f.verification.executable_check).map(f => ({ requirement: f.requirement, priority: f.priority, observation: f.verification.method, source: f.citations[0]?.document })), questions: scan.questions.length, model_call: scan.model_call };
@@ -109,7 +109,7 @@ try {
   record.plan = { tests: plan.tests.map(t => ({ name: t.name, observation: t.observation, steps: t.steps, pass: t.pass, findings: t.finding_ids })), model_call: plan.model_call };
   await shot('2-plan');
   stage('試験の案：実際のAIから受け取った', { tests: plan.tests.length });
-  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+  await page.getByRole('button', { name: '了承して試験を設定する' }).click();
   await page.locator('[data-result]').first().waitFor({ timeout: 60000 });
   stage('了承して確認項目に登録した');
 

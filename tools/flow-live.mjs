@@ -88,7 +88,7 @@ try {
 
   // 4. 照合：選んだファイルの抜粋と説明を送る。
   await page.locator('#desc').fill('架空の診療所で、職員が患者ごとの連絡タスク（架空の氏名・電話番号・内容）を管理するのに使う。');
-  await page.getByRole('button', { name: /照合を始める/ }).click();
+  await page.getByRole('button', { name: '送信内容を確認する' }).click();
   const scanPreview = await (async () => { await page.locator('[data-preview]').waitFor(); return sent.at(-1).body; })();
   const checked = await page.locator('[data-files] tbody tr').evaluateAll(rows => rows.filter(r => r.querySelector('input').checked).map(r => r.children[1].textContent));
   assert.deepEqual(scanPreview.payload.system.excerpts.map(e => e.ref), checked, '選んだファイルだけを送る');
@@ -110,8 +110,8 @@ try {
   await shot('3-plan');
   stage('3 検証案：実際のAIから試験の案を受け取った', record.plan);
 
-  // 6. 了承して確認項目に登録する。登録した確認項目の確かめる部分は、照合の候補と同じ数。
-  await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+  // 6. 了承して試験を設定する（確認項目に登録する）。登録した確認項目の確かめる部分は、照合の候補と同じ数。
+  await page.getByRole('button', { name: '了承して試験を設定する' }).click();
   await page.locator('[data-result]').first().waitFor({ timeout: 60000 });
   const view = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await page.locator('meta[name=review-token]').getAttribute('content') } })).json();
   const checks = view.workspace.checks.filter(c => c.id.startsWith('flow-'));

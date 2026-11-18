@@ -69,11 +69,11 @@ try {
   const flowUrl = sha => { const u = new URL(url + '/flow'); u.search = new URLSearchParams({ url: 'https://github.com/' + repository, ref: sha }).toString(); return u.href; };
   const flowToResults = async sha => {
     await page.goto(flowUrl(sha)); await page.locator('[data-files]').waitFor();
-    await page.getByRole('button', { name: /照合を始める/ }).click(); await send();
+    await page.getByRole('button', { name: '送信内容を確認する' }).click(); await send();
     await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
     await page.getByRole('button', { name: '試験の案を作る' }).click(); await send();
     await page.locator('[data-test="t-log"]').waitFor();
-    await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+    await page.getByRole('button', { name: '了承して試験を設定する' }).click();
     await page.locator('[data-result]').first().waitFor();
   };
   const row = requirement => page.locator('[data-result]', { hasText: requirement });
