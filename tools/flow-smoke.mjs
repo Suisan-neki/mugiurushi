@@ -41,7 +41,8 @@ try {
     requests[name].push(body);
     return body.confirm ? answer : { stage: 'preview', destination: '合成のAIエージェント', path: '/v1/' + name, bytes: 42, payload_sha256: 'e'.repeat(64), note: '合成', payload: preview };
   };
-  await page.route('**/api/v1/agent', route => route.fulfill({ json: { status: 'configured', message: '合成' } }));
+  let agentStatus = { status: 'configured', endpoint: 'http://127.0.0.1:8787', model: 'fake-model', model_error: null, message: '合成' };
+  await page.route('**/api/v1/agent', route => route.fulfill({ json: agentStatus }));
   await page.route('**/api/v1/agent/flow-scan', route => {
     const body = route.request().postDataJSON();
     return route.fulfill({ json: sendOrPreview('scan', body, { system: { summary: body.summary, excerpts: body.files.map(f => ({ ref: f, text: '…' })) }, answers: body.answers }, {
@@ -83,7 +84,7 @@ try {
   await page.route('**/api/v1/case', async route => {
     const response = await route.fetch(); const json = await response.json();
     if (override) for (const cv of json.checks) for (const a of cv.coverage?.aspects || []) {
-      if (a.id === 'f-1') Object.assign(a, { status: 'contradicted', status_label: '期待と異なる', detail: 'IDとパスワードだけで一覧が表示された', trial_checks: [{ id: 'c2', label: '2つ目の認証を求める画面が出る（ブラウザの表示）' }] });
+      if (a.id === 'f-1') Object.assign(a, { status: 'contradicted', status_label: '期待と異なる', detail: 'IDとパスワードだけで一覧が表示された。判定条件 c1（アプリのログ）: 期待どおり、判定条件 c2（ブラウザの表示）: 期待と異なる', trial_checks: [{ id: 'c1', label: 'ログインの記録が残る（アプリのログ）' }, { id: 'c2', label: '2つ目の認証を求める画面が出る（ブラウザの表示）' }] });
       if (a.id === 'c-1' && concernNg) Object.assign(a, { status: 'contradicted', status_label: '期待と異なる', detail: 'IDとパスワードだけで一覧が表示された', trial_checks: [{ id: 'c9', label: '2つ目の認証を求める画面が出る（ブラウザの表示）' }] });
       if (a.id === 'f-2') Object.assign(a, unlinked ? { status: 'unlinked', status_label: 'どの判定条件が答えるか未対応づけ', detail: 'この部分に答える判定条件を選んでいない' } : { status: 'observed', status_label: '観測した', detail: '記録に残った' });
       cv.evidence = [{ id: 'ev-1', run_id: 'run-1', applicable: true, invalidated_by: [], observed: {} }]; cv.selected_evidence = 'ev-1';
@@ -116,8 +117,20 @@ try {
   assert.match(await page.locator('[data-files-shown]').innerText(), /全4件中、外した3件と、「auth」を含む送る1件を表示/);
   await page.locator('#file-filter').fill('');
   await page.locator('#desc').fill('合成の診療所のタスク管理');
+  // その先のモデルを確かめられない場合は、送れない。
+  agentStatus = { ...agentStatus, model: null, model_error: 'AIエージェントに接続できません: 合成' };
   await page.getByRole('button', { name: '送信内容を確認する' }).click();
   await page.locator('[data-preview]').waitFor();
+  assert.match(await page.locator('[data-agent-model-missing]').innerText(), /その先のモデルを確かめられないため、送れません。AIエージェントに接続できません/);
+  await page.locator('#agree').check();
+  assert.equal(await page.getByRole('button', { name: 'この内容を送る' }).isDisabled(), true, 'モデルが分からなければ送らせない');
+  await page.getByRole('button', { name: '戻る' }).click();
+  await page.locator('[data-preview]').waitFor({ state: 'detached' });
+  agentStatus = { ...agentStatus, model: 'fake-model', model_error: null };
+  requests.scan.length = 0;
+  await page.getByRole('button', { name: '送信内容を確認する' }).click();
+  await page.locator('[data-preview]').waitFor();
+  assert.match(await page.locator('[data-preview]').innerText(), /送信先\s+照合用のAIエージェント http:\/\/127\.0\.0\.1:8787\s+その先のモデル fake-model/);
   assert.equal(requests.scan.length, 1); assert.equal(requests.scan[0].confirm, undefined, '確認の段階では送らない');
   assert.deepEqual(requests.scan[0].files, ['app/auth.py']);
   assert.equal('screen_evidence' in requests.scan[0], false);
@@ -228,6 +241,8 @@ try {
   await page.locator('[data-result="unconfirmed"]').waitFor({ state: 'detached' });
   await page.locator('[data-ng-count="1"]').waitFor();
   assert.match(await page.locator('[data-result="ng"]').innerText(), /二要素認証[\s\S]*期待と異なる/);
+  // 複数の判定条件のうち、期待どおりだった c1 ではなく、期待と異なった c2 の合格の条件を示す。
+  assert.match(await page.locator('[data-result="ng"]').innerText(), /合格の条件「2つ目の認証を求める画面が出る（ブラウザの表示）」と異なる結果を観測した/);
   assert.match(await page.locator('main').innerText(), /試験で期待どおりだった項目：アクセス記録の保存/);
   assert.match(await page.locator('[data-detail]').innerText(), /多要素認証を可能な限り早期に採用すべきである[\s\S]*IDとパスワードだけで一覧が表示された/);
 

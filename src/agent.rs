@@ -85,47 +85,64 @@ impl Config {
     }
     pub(crate) fn post(&self, path: &str, body: &Value) -> io::Result<Value> {
         let token = self.token()?;
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .tls_config(
-                ureq::tls::TlsConfig::builder()
-                    .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                    .build(),
-            )
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(300)))
-            .build()
-            .into();
         let bytes = serde_json::to_vec(body).map_err(io::Error::other)?;
-        let mut response = agent
+        let response = http_agent(Duration::from_secs(300))
             .post(format!("{}{path}", self.base_url))
             .header("Content-Type", "application/json")
             .header(TOKEN_HEADER, &token)
             .send(bytes.as_slice())
             .map_err(|e| io::Error::other(format!("AIエージェントに接続できません: {e}")))?;
-        let status = response.status().as_u16();
-        let text = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_RESPONSE)
-            .read_to_string()
-            .map_err(|_| io::Error::other("AIエージェントの応答を読み取れません"))?;
-        if status != 200 {
-            let detail: String = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| v["detail"].as_str().map(str::to_owned))
-                .unwrap_or_default()
-                .replace(&token, "（共有トークン）")
-                .chars()
-                .take(500)
-                .collect();
-            return Err(io::Error::other(format!(
-                "AIエージェントが処理できませんでした（HTTP {status}）{detail}"
-            )));
-        }
-        serde_json::from_str(&text)
-            .map_err(|_| io::Error::other("AIエージェントの応答がJSONではありません"))
+        read_answer(response, &token)
     }
+    /// 送る前の確認で使う短い問い合わせ。応答が遅くても画面を長く止めない。
+    fn get(&self, path: &str) -> io::Result<Value> {
+        let token = self.token()?;
+        let response = http_agent(Duration::from_secs(5))
+            .get(format!("{}{path}", self.base_url))
+            .header(TOKEN_HEADER, &token)
+            .call()
+            .map_err(|e| io::Error::other(format!("AIエージェントに接続できません: {e}")))?;
+        read_answer(response, &token)
+    }
+}
+
+fn http_agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .timeout_global(Some(timeout))
+        .build()
+        .into()
+}
+
+fn read_answer(mut response: ureq::http::Response<ureq::Body>, token: &str) -> io::Result<Value> {
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_RESPONSE)
+        .read_to_string()
+        .map_err(|_| io::Error::other("AIエージェントの応答を読み取れません"))?;
+    if status != 200 {
+        let detail: String = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v["detail"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+            .replace(token, "（共有トークン）")
+            .chars()
+            .take(500)
+            .collect();
+        return Err(io::Error::other(format!(
+            "AIエージェントが処理できませんでした（HTTP {status}）{detail}"
+        )));
+    }
+    serde_json::from_str(&text)
+        .map_err(|_| io::Error::other("AIエージェントの応答がJSONではありません"))
 }
 
 pub fn status(config: Option<&Config>) -> Value {
@@ -134,12 +151,28 @@ pub fn status(config: Option<&Config>) -> Value {
             "status": "not_configured",
             "message": "AIエージェントは設定されていません。確認項目・試験・判定はAIなしで使えます。",
         }),
-        // 送る前の確認で、コードが手元を出て行く先を示すため、運営者が設定した接続先を返す。
-        Some(config) => json!({
-            "status": "configured",
-            "endpoint": config.base_url,
-            "message": "AIエージェントの案は下書きです。採用するまで確認項目には入らず、判定には使いません。",
-        }),
+        // 送る前の確認で、コードが手元を出て行く先を示すため、運営者が設定した接続先と、
+        // その先のモデル（AIエージェントの /v1/health が答えるもの）を返す。モデルを確かめられない場合は
+        // model を null にし、理由を model_error に入れる。画面はこのとき送らせない（AGENTS.md）。
+        Some(config) => {
+            let (model, model_error) = match config.get("/v1/health") {
+                Ok(health) => match health["model"].as_str().filter(|m| !m.trim().is_empty()) {
+                    Some(m) => (Value::from(m), Value::Null),
+                    None => (
+                        Value::Null,
+                        Value::from("AIエージェントにモデルが設定されていません"),
+                    ),
+                },
+                Err(e) => (Value::Null, Value::from(e.to_string())),
+            };
+            json!({
+                "status": "configured",
+                "endpoint": config.base_url,
+                "model": model,
+                "model_error": model_error,
+                "message": "AIエージェントの案は下書きです。採用するまで確認項目には入らず、判定には使いません。",
+            })
+        }
     }
 }
 
@@ -1166,6 +1199,22 @@ mod tests {
         Config::new(url, PathBuf::from("unused"))
     }
 
+    /// 実際に問い合わせる試験用。共有トークンのファイルを一時ディレクトリに置く。
+    fn reachable(url: &str) -> Config {
+        let dir = std::env::temp_dir().join(format!(
+            "mugiurushi-agent-token-{}-{}",
+            std::process::id(),
+            url.rsplit(':')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('/')
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = dir.join("token");
+        std::fs::write(&token, "synthetic-token-0123456789").unwrap();
+        Config::new(url, token).unwrap()
+    }
+
     /// 秘密の値を持つことが多い種類のファイルは、どの階層にあっても照合で送らない。
     /// 名前に secret を含むだけのコードのファイルは送る。
     #[test]
@@ -1235,12 +1284,49 @@ mod tests {
     /// 送る前の確認で示す接続先は、運営者が設定したものをそのまま返す。
     #[test]
     fn status_shows_the_configured_endpoint() {
-        let configured = config("http://127.0.0.1:8787/").unwrap();
-        assert_eq!(
-            status(Some(&configured))["endpoint"],
-            "http://127.0.0.1:8787"
+        // 接続できない送信先：接続先は示し、モデルは確かめられなかったとして理由を添える。
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let configured = reachable(&format!("http://127.0.0.1:{port}/"));
+        let shown = status(Some(&configured));
+        assert_eq!(shown["endpoint"], format!("http://127.0.0.1:{port}"));
+        assert!(shown["model"].is_null());
+        assert!(
+            shown["model_error"]
+                .as_str()
+                .unwrap()
+                .contains("接続できません")
         );
         assert!(status(None).get("endpoint").is_none());
+    }
+
+    #[test]
+    fn status_shows_the_model_the_agent_reports() {
+        let model = |answer: &'static str| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 2048];
+                let n = stream.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /v1/health "));
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len()).unwrap();
+            });
+            let shown = status(Some(&reachable(&format!("http://127.0.0.1:{port}"))));
+            server.join().unwrap();
+            shown
+        };
+        let shown = model(r#"{"model":"gpt-test","model_status":"configured"}"#);
+        assert_eq!(shown["model"], "gpt-test");
+        assert!(shown["model_error"].is_null());
+        let shown = model(r#"{"model":null,"model_status":"not_configured"}"#);
+        assert!(shown["model"].is_null());
+        assert_eq!(
+            shown["model_error"],
+            "AIエージェントにモデルが設定されていません"
+        );
     }
 
     #[test]

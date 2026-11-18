@@ -35,7 +35,7 @@ const state = { step: 1, source: null, view: null, flow: null, record: null, age
 // 記録者はこの画面では聞かない。名前が保存されていなければ、理解と試験の画面（ui/app.js）と同じ既定の名前を記録に使う。
 function person() { try { return JSON.parse(sessionStorage.getItem('eel-person') || 'null')?.name || '開発者（本人確認なし）'; } catch { return '開発者（本人確認なし）'; } }
 /** 読み込んだブランチ。コミットを直接指定して開いた場合はコミットを示す。 */
-function branch() { const r = state.source?.reference || ''; return !r || r === state.source?.commit ? `コミット ${short(state.source?.commit || '')}` : `ブランチ ${r}`; }
+function branch() { const r = state.source?.reference || ''; return !r || r === state.source?.commit || /^[0-9a-f]{7,40}$/i.test(r) ? `コミット ${short(state.source?.commit || '')}` : `ブランチ ${r}`; }
 function setStatus(/** @type {string} */ t) { $('status').textContent = t; }
 function showError(/** @type {any} */ e) { fill($('alert'), h('div', { class: 'alert' }, e instanceof Error ? e.message : String(e))); }
 async function guarded(/** @type {() => Promise<any>} */ f) { $('alert').replaceChildren(); try { return await f(); } catch (e) { showError(e); } }
@@ -75,6 +75,8 @@ function confirmAndSend(/** @type {HTMLElement} */ out, /** @type {string} */ pa
   return guarded(async () => {
     setStatus('送る内容を組み立てています。');
     const preview = await api('POST', path, body);
+    // 送信先のモデルは送る直前の状態を問い合わせる。運営者がAIエージェントの設定を変えている場合があるため。
+    state.agent = await api('GET', '/api/v1/agent').catch(() => state.agent);
     setStatus('');
     fill(out);
     const dialog = /** @type {HTMLDialogElement} */ (h('dialog', { class: 'send-dialog', 'data-preview': '', 'aria-labelledby': 'send-title' }));
@@ -90,10 +92,14 @@ function confirmAndSend(/** @type {HTMLElement} */ out, /** @type {string} */ pa
       await onSent(r); setStatus('');
     }), 'primary');
     send.setAttribute('disabled', '');
-    agree.addEventListener('change', () => agree.checked ? send.removeAttribute('disabled') : send.setAttribute('disabled', ''));
     const endpoint = state.agent?.endpoint;
+    // モデルを確かめられない場合は送らせない。送信先を示してから送る規則のため（AGENTS.md）。
+    const model = state.agent?.model;
+    agree.addEventListener('change', () => agree.checked && model ? send.removeAttribute('disabled') : send.setAttribute('disabled', ''));
     const rows = [
-      ['送信先', [endpoint ? ['照合用のAIエージェント ', h('span', { class: 'code' }, endpoint)] : '照合用のAIエージェント', h('div', { class: 'note' }, 'そこから OpenAI API へ送られます')]],
+      ['送信先', [endpoint ? ['照合用のAIエージェント ', h('span', { class: 'code' }, endpoint)] : '照合用のAIエージェント', model
+        ? h('div', { 'data-agent-model': '' }, 'その先のモデル ', h('span', { class: 'code' }, model))
+        : h('div', { class: 'alert', 'data-agent-model-missing': '' }, `その先のモデルを確かめられないため、送れません。${state.agent?.model_error || ''}`)]],
       body.files?.length ? ['ファイル', body.files.map((/** @type {string} */ f, /** @type {number} */ i) => [i ? '、' : '', h('span', { class: 'code' }, f)])] : null,
       body.summary ? ['説明文', body.summary] : null,
       body.question ? ['質問', body.question] : null,
@@ -582,7 +588,8 @@ function resultHeading(/** @type {any[]} */ _items) { return '試験で起きた
 /** 試験で起きたこと。期待と異なった判定条件の説明（範囲と期待）を使う。要求の文（期待した動作）を結果として書かない。 */
 function happened(/** @type {any} */ f) {
   const a = f.res.aspect;
-  const id = /判定条件 (\S+?)（/.exec(a?.detail || '')?.[1];
+  // 複数の判定条件を対応づけた場合、詳細には期待どおりの条件も並ぶ（src/coverage.rs の status_of）。期待と異なると書かれた条件だけを選び、見つからなければ一般の文にする。
+  const id = /判定条件 (\S+?)（[^）]*）: 期待と異なる/.exec(a?.detail || '')?.[1];
   const label = (a?.trial_checks || []).find((/** @type {any} */ l) => l.id === id)?.label;
   return label ? `合格の条件「${label}」と異なる結果を観測した` : '期待と異なる結果を観測した';
 }
@@ -639,8 +646,13 @@ async function step6() {
   const records = Object.values(state.flow?.records || {}).filter((/** @type {any} */ x) => x.repository === state.source.repository && x.record?.results);
   const others = records.filter((/** @type {any} */ x) => x.commit !== state.source.commit);
   // ブランチで開いた場合は、同じブランチの最新を読み込み直す。コミットを直接指定して開いた場合だけ、読み込むブランチを書いてもらう。
-  const reference = state.source.reference && state.source.reference !== state.source.commit ? state.source.reference : '';
+  // コミットのSHA（短縮を含む）で開いた場合は、読み直しても同じ版になるので、ブランチを書いてもらう。
+  // タグで開いた場合も同じ版になるが、ブランチと見分けられないので、読み直すボタンに加えて、別のブランチを書く欄を折りたたみで出す。
+  const requested = state.source.reference || '';
+  const reference = requested && requested !== state.source.commit && !/^[0-9a-f]{7,40}$/i.test(requested) ? requested : '';
   const ref = h('input', { type: 'text', id: 'ref', placeholder: '例：main', style: 'width:280px' });
+  const refForm = () => [h('label', { for: 'ref', style: 'font-weight:700' }, '読み込むブランチ'), ' ', ref, ' ',
+    btn('読み込む', () => { const v = /** @type {HTMLInputElement} */ (ref).value.trim(); if (!v) return showError('ブランチ名を入力してください。'); reload(v); }, 'primary')];
   const reload = (/** @type {string} */ v) => { const u = new URL(location.href); u.search = new URLSearchParams({ url: `https://github.com/${state.source.repository}`, ref: v }).toString(); location.href = u.toString(); };
   const current = state.record?.results || {};
   const prev = byLatestSave(others)[0];
@@ -657,9 +669,9 @@ async function step6() {
   fill($('main'), h('div', { class: 'pad' },
     h('h2', {}, '修正後の再試験'),
     reference
-      ? h('div', { class: 'actions' }, btn(`${reference} の最新を読み込み直す`, () => reload(reference), 'primary'))
-      : [h('label', { for: 'ref', style: 'font-weight:700' }, '読み込むブランチ'), ' ', ref, ' ',
-        btn('読み込む', () => { const v = /** @type {HTMLInputElement} */ (ref).value.trim(); if (!v) return showError('ブランチ名を入力してください。'); reload(v); }, 'primary')],
+      ? [h('div', { class: 'actions' }, btn(`${reference} の最新を読み込み直す`, () => reload(reference), 'primary')),
+        h('details', { 'data-other-ref': '' }, h('summary', {}, '別のブランチを読み込む'), refForm())]
+      : refForm(),
     prev ? [h('h3', {}, `前回 ${short(prev.commit)} と、今回 ${short(state.source.commit)} の比較`),
       h('div', { class: 'scroll' }, h('table', { 'data-compare-table': '' }, h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, '項目'), h('th', { scope: 'col', style: 'width:140px' }, `前回 ${short(prev.commit)}`), h('th', { scope: 'col', style: 'width:140px' }, `今回 ${short(state.source.commit)}`), h('th', { scope: 'col', style: 'width:120px' }, '変化'))), h('tbody', {}, rows)))]
       : h('p', { class: 'note' }, 'このリポジトリで比べられる前のコミットの結果はまだありません。')));

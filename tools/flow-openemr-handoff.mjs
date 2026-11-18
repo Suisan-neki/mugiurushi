@@ -42,7 +42,7 @@ const planAnswer = { tests: [
 const agent = createServer((req, res) => {
   let body = ''; req.on('data', d => { body += d; });
   req.on('end', () => {
-    const answer = req.url === '/v1/scan' ? scanAnswer : req.url === '/v1/plan' ? { ...planAnswer, model_call: { response_id: 'fake-plan' } } : null;
+    const answer = req.url === '/v1/health' ? { model: 'fake-model', model_status: 'configured' } : req.url === '/v1/scan' ? scanAnswer : req.url === '/v1/plan' ? { ...planAnswer, model_call: { response_id: 'fake-plan' } } : null;
     res.writeHead(answer ? 200 : 404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(answer || {}));
   });
 }).listen(0, '127.0.0.1');

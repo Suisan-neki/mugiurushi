@@ -50,7 +50,7 @@ try {
     if (!body.confirm) return { stage: 'preview', destination: '合成', path: '/v1/' + name, bytes: 1, payload_sha256: 'e'.repeat(64), note: '合成', payload: body };
     sent[name].push(body); return answer(sent[name].length - 1);
   };
-  await page.route('**/api/v1/agent', route => route.fulfill({ json: { status: 'configured', message: '合成' } }));
+  await page.route('**/api/v1/agent', route => route.fulfill({ json: { status: 'configured', endpoint: 'http://127.0.0.1:8787', model: 'fake-model', message: '合成' } }));
   await page.route('**/api/v1/agent/flow-scan', route => route.fulfill({ json: reply('scan', route.request().postDataJSON(), n => ({
     stage: 'sent', status: 'candidate', ...scans[Math.min(n, 1)], sources: [], not_covered: [], priority_rule: '合成', model_call: { response_id: `fake-scan-${n + 1}`, response_model: 'fake' } })) }));
   await page.route('**/api/v1/agent/plan', route => route.fulfill({ json: reply('plan', route.request().postDataJSON(), n => ({

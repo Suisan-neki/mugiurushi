@@ -63,7 +63,7 @@ export async function verifyResultObservations(page, { url, baseView, recipe, ch
   target.hash = 'result';
   await page.route('**/api/v1/case', route => route.fulfill({ json: caseView }));
   // AIエージェントの説明（偽物）。状態は麦漆の値を写した形で返し、説明の文に書き換えの試みとHTMLを入れる。
-  await page.route('**/api/v1/agent', route => route.fulfill({ json: { status: 'configured', message: '合成' } }));
+  await page.route('**/api/v1/agent', route => route.fulfill({ json: { status: 'configured', endpoint: 'http://127.0.0.1:8787', model: 'fake-model', message: '合成' } }));
   const explainRequests = [];
   await page.route('**/api/v1/agent/explain', route => {
     const body = route.request().postDataJSON(); explainRequests.push(body);
