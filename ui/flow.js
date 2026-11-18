@@ -3,7 +3,7 @@
 // 判定と観測の状態は事例の記録（/api/v1/case）が正。流れの記録（/api/v1/flow）は画面を続けるための控え。
 // AIへ送る内容は、送る前にサーバーが組み立てた内容をそのまま表示し、人が確かめたときだけ送る。
 import { apiRequest as api } from './api.js';
-import { applyScan, applyPlan, applyInvestigation, runConcerns, planEvidence, carryableConcerns, carriedInvestigation, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
+import { applyScan, applyPlan, applyInvestigation, runConcerns, planEvidence, carryableConcerns, carriedInvestigation, byLatestSave, concernSource, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
 
 /** @param {string} tag @param {Record<string, any>} [attrs] @param {...any} children */
 function h(tag, attrs = {}, ...children) {
@@ -39,6 +39,8 @@ function showError(/** @type {any} */ e) { fill($('alert'), h('div', { class: 'a
 async function guarded(/** @type {() => Promise<any>} */ f) { $('alert').replaceChildren(); try { return await f(); } catch (e) { showError(e); } }
 function key() { return `${state.source.repository}@${state.source.commit}`; }
 async function saveRecord() {
+  // 保存日時を残す。引き継ぎ元と再試験の「前回」を、最後に保存した記録から選ぶため（byLatestSave）。
+  if (state.record) state.record.saved_at = new Date().toISOString();
   state.flow = await api('POST', '/api/v1/flow', { repository: state.source.repository, commit: state.source.commit, record: state.record });
 }
 async function loadCase() { state.view = await api('GET', '/api/v1/case'); }
@@ -416,10 +418,10 @@ function candidatesOf(/** @type {any} */ r) {
 /** 試験の結果をコードへたどれるように、案の候補が関係するとしたファイル（なければ照合で読んだ最初のファイル）を対応づける。
  * 懸念の候補は、根拠の最初の行の範囲を対応づける。 */
 function codeRef(/** @type {any} */ t, /** @type {Record<string, any>} */ findings) {
-  const evidence = t.finding_ids.map((/** @type {string} */ id) => findings[id]?.concern?.evidence?.[0]).find(Boolean);
-  const carried = t.finding_ids.some((/** @type {string} */ id) => { const c = findings[id]?.concern; return c?.commit && c.commit !== state.source.commit; });
-  // 引き継いだ懸念の根拠の行は前のコミットの行なので、このコミットではファイルの先頭を参照先にする。
-  if (evidence) return { repository: state.source.repository, commit: state.source.commit, path: evidence.path, line: carried ? 1 : evidence.start, end_line: carried ? 1 : evidence.end };
+  const concerns = t.finding_ids.map((/** @type {string} */ id) => findings[id]?.concern).filter(Boolean);
+  const paths = (state.source.inventory || []).map((/** @type {any} */ f) => f.path).filter(Boolean);
+  const at = concerns.length ? concernSource(concerns, state.source.commit, paths) : null;
+  if (at) return { repository: state.source.repository, commit: state.source.commit, ...at };
   const files = state.record.files || [];
   const refs = t.finding_ids.flatMap((/** @type {string} */ id) => findings[id]?.system_refs || []);
   const path = refs.find((/** @type {string} */ p) => files.includes(p)) || files[0];
@@ -613,7 +615,7 @@ async function step6() {
   const others = records.filter((/** @type {any} */ x) => x.commit !== state.source.commit);
   const ref = h('input', { type: 'text', id: 'ref', placeholder: 'ブランチ名・タグ・コミット', style: 'width:280px;padding:6px;border:1px solid #8A9199' });
   const current = state.record?.results || {};
-  const prev = others[others.length - 1];
+  const prev = byLatestSave(others)[0];
   // 別の版の試験は、結果がない場合（—）と区別して示す。このコミットを試験していない理由が、比較表でも分かるようにする。
   const label = { ok: '期待どおり', ng: '不足を確認', pending: '未実行', unconfirmed: '未確認', other_version: '別の版の試験' };
   const rows = prev ? [...new Set([...Object.values(prev.record.results), ...Object.values(current)].map((/** @type {any} */ x) => x.requirement))].map(req => {
