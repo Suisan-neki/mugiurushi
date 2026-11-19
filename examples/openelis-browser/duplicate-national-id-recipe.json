@@ -1,0 +1,617 @@
+{
+  "schema_version": 1,
+  "check_id": "openelis-duplicate-national-id",
+  "source": {
+    "repository": "DIGI-UW/openelis-docker",
+    "commit": "6fb4a9e9223f9e04cafbb916d6d5260801ba819e",
+    "path": "docker-compose.yml",
+    "line": 1,
+    "end_line": 1
+  },
+  "runtime": "browser",
+  "entrypoint": "/",
+  "args": [],
+  "input": {
+    "workflow": "synthetic duplicate national id registration",
+    "scope": "not clinical data or clinical validation"
+  },
+  "criterion": {
+    "assertion": "eel.trial",
+    "subject": "openelis"
+  },
+  "timeout_ms": 300000,
+  "trial": {
+    "schema_version": 1,
+    "fault": "normal",
+    "storage": null,
+    "readback": null,
+    "checks": [
+      {
+        "id": "duplicate-rejected",
+        "scope": "同じ国民識別番号での2人目の登録が拒否される",
+        "method": "browser_response",
+        "target": "duplicate-save",
+        "expect": "contains",
+        "text": "status=400"
+      },
+      {
+        "id": "duplicate-response-no-name",
+        "scope": "拒否の応答の本文に、既存の患者の姓（Yamada）が含まれない",
+        "method": "browser_response",
+        "target": "duplicate-save",
+        "expect": "contains",
+        "text": "body_match=false"
+      },
+      {
+        "id": "duplicate-log-no-name",
+        "scope": "アプリのコンテナのログ（標準出力・標準エラー）に、既存の患者の姓（Yamada）が出ない",
+        "method": "container_log",
+        "target": "oe",
+        "expect": "not_contains",
+        "text": "Yamada"
+      }
+    ]
+  },
+  "containers": {
+    "services": [
+      {
+        "name": "db",
+        "image": "itechuw/openelis-global-2-database:3.3.0@sha256:4a85cb299cfaa769657b91b7a629f49e9987f65f7ffd702582e28bdcfbdc906e",
+        "role": "database",
+        "expose": 5432,
+        "env": {
+          "POSTGRES_USER": "postgres",
+          "POSTGRES_PASSWORD": "admin",
+          "POSTGRES_DB": "clinlims",
+          "POSTGRES_INITDB_ARGS": "--auth-host=md5",
+          "DB_PASSWORD": "clinlims",
+          "DB_SUPERUSER_PASSWORD": "superuser"
+        },
+        "volumes": [
+          {
+            "name": "dbdata",
+            "path": "/var/lib/postgresql/data"
+          }
+        ],
+        "command": [],
+        "ready": {
+          "exec": {
+            "args": [
+              "pg_isready",
+              "-q",
+              "-h",
+              "127.0.0.1",
+              "-d",
+              "clinlims",
+              "-U",
+              "clinlims"
+            ]
+          }
+        },
+        "ready_timeout_ms": 180000,
+        "engine": "postgres",
+        "aliases": [
+          "db.openelis.org"
+        ]
+      },
+      {
+        "name": "certs",
+        "image": "itechuw/certgen:main@sha256:cadf558ddafefd58db076abb21c753a421bc9f7910f1dc20e5c44bdf904987e7",
+        "role": "other",
+        "env": {
+          "KEYSTORE_PW": "kspass",
+          "TRUSTSTORE_PW": "tspass"
+        },
+        "volumes": [
+          {
+            "name": "kts",
+            "path": "/etc/openelis-global"
+          },
+          {
+            "name": "keys",
+            "path": "/etc/ssl/private"
+          },
+          {
+            "name": "certs",
+            "path": "/etc/ssl/certs"
+          }
+        ],
+        "command": [
+          "/bin/bash",
+          "/opt/openelis/ensure-stores.sh"
+        ],
+        "ready": "completed",
+        "ready_timeout_ms": 60000,
+        "files": [
+          {
+            "from": "configs/certs/ensure-stores.sh",
+            "to": "/opt/openelis/ensure-stores.sh"
+          }
+        ]
+      },
+      {
+        "name": "frontend",
+        "image": "itechuw/openelis-global-2-frontend:3.3.0@sha256:2e9a288a493788d7de1437153c760f6321217325dbe44e4fdd49a69b4de48c20",
+        "role": "other",
+        "expose": 80,
+        "env": {},
+        "volumes": [],
+        "command": [],
+        "ready": {
+          "http": {
+            "path": "/",
+            "tls": false
+          }
+        },
+        "ready_timeout_ms": 60000,
+        "aliases": [
+          "frontend.openelis.org"
+        ]
+      },
+      {
+        "name": "oe",
+        "image": "itechuw/openelis-global-2:3.3.0@sha256:b69b2cb7f75642f6be97896ad368767ac5c6383d718a3189be0580eeb2b5171e",
+        "role": "app",
+        "expose": 8443,
+        "env": {
+          "SSL_KEYSTORE_PATH": "/etc/openelis-global/keystore",
+          "SSL_KEYSTORE_PASSWORD": "kspass",
+          "SSL_TRUSTSTORE_PATH": "/etc/openelis-global/truststore",
+          "SSL_TRUSTSTORE_PASSWORD": "tspass",
+          "DEFAULT_PW": "adminADMIN!",
+          "TZ": "America/New_York",
+          "OE_ENCRYPTION_PASSWORD": "kspass",
+          "ANALYZER_BRIDGE_PAIRING_CODE": "",
+          "ORG_OPENELISGLOBAL_FHIRSTORE_URI": "",
+          "ANALYZER_BRIDGE_URL": "",
+          "CATALINA_OPTS": " -Ddatasource.url=jdbc:postgresql://db.openelis.org:5432/clinlims -Ddatasource.username=clinlims -Ddatasource.password=clinlims -Doe.ssl.truststorepath=/etc/openelis-global/truststore -Doe.ssl.truststorepassword=tspass -Doe.ssl.keystorepath=/etc/openelis-global/keystore -Doe.ssl.keystorepassword=kspass"
+        },
+        "volumes": [
+          {
+            "name": "kts",
+            "path": "/etc/openelis-global"
+          },
+          {
+            "name": "lucene",
+            "path": "/var/lib/lucene_index"
+          }
+        ],
+        "command": [],
+        "ready": {
+          "http": {
+            "path": "/api/OpenELIS-Global/health",
+            "tls": true
+          }
+        },
+        "ready_timeout_ms": 600000,
+        "aliases": [
+          "oe.openelis.org"
+        ],
+        "start_after": [
+          "certs"
+        ],
+        "files": [
+          {
+            "from": "configs/properties/common.properties",
+            "to": "/run/secrets/common.properties"
+          }
+        ]
+      },
+      {
+        "name": "proxy",
+        "image": "itechuw/openelis-global-2-proxy:3.3.0@sha256:1cdb0a5aa8529c6ddb88ff5fe634c3ca206c9599deb7a0a4decb8d1d6d33185a",
+        "role": "other",
+        "expose": 443,
+        "env": {
+          "OE_NGINX_CERT": "apache-selfsigned.crt",
+          "OE_NGINX_KEY": "apache-selfsigned.key",
+          "OE_HTTPS_PORT": "443"
+        },
+        "volumes": [
+          {
+            "name": "certs",
+            "path": "/etc/nginx/certs"
+          },
+          {
+            "name": "keys",
+            "path": "/etc/nginx/keys"
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-c",
+          "envsubst '$OE_NGINX_CERT $OE_NGINX_KEY $OE_HTTPS_PORT' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"
+        ],
+        "ready": {
+          "http": {
+            "path": "/",
+            "tls": true
+          }
+        },
+        "ready_timeout_ms": 60000,
+        "start_after": [
+          "certs",
+          "frontend",
+          "oe"
+        ],
+        "files": [
+          {
+            "from": "configs/nginx/nginx.conf",
+            "to": "/etc/nginx/nginx.conf.template"
+          }
+        ]
+      }
+    ]
+  },
+  "browser": {
+    "service": "proxy",
+    "tls": true,
+    "start_path": "/",
+    "expected_version": "151.0.7922.34",
+    "preparation": [
+      {
+        "id": "username",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#loginName"
+          }
+        },
+        "value": {
+          "source": "secret",
+          "key": "username"
+        }
+      },
+      {
+        "id": "password",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#password"
+          }
+        },
+        "value": {
+          "source": "secret",
+          "key": "password"
+        }
+      },
+      {
+        "id": "login",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "button[type=submit]:has-text(\"Login\")"
+          }
+        }
+      },
+      {
+        "id": "home",
+        "action": "read_text",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#menu_home_nav"
+          }
+        },
+        "contains": null
+      },
+      {
+        "id": "open-patient-config",
+        "action": "goto",
+        "path": "/MasterListsPage/PatientConfigurationMenu"
+      },
+      {
+        "id": "select-duplicate-national-ids",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "tr:has-text(\"Allow duplicate national ids\") label"
+          }
+        }
+      },
+      {
+        "id": "modify-config",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "button:has-text(\"Modify\")"
+          }
+        }
+      },
+      {
+        "id": "choose-false",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "label[for=radio-2]"
+          }
+        }
+      },
+      {
+        "id": "save-config",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "[data-cy=save-Button]"
+          }
+        }
+      },
+      {
+        "id": "config-is-false",
+        "action": "read_text",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "tr:has-text(\"Allow duplicate national ids\")"
+          }
+        },
+        "contains": "false"
+      },
+      {
+        "id": "existing-open-patients",
+        "action": "goto",
+        "path": "/PatientManagement"
+      },
+      {
+        "id": "existing-new-patient",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#newPatient"
+          }
+        }
+      },
+      {
+        "id": "existing-national-id",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#nationalId"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "{{test_value}}"
+        }
+      },
+      {
+        "id": "existing-last-name",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#lastName"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "Yamada"
+        }
+      },
+      {
+        "id": "existing-first-name",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#firstName"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "Taro"
+        }
+      },
+      {
+        "id": "existing-sex",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "label[for=radio-1]"
+          }
+        }
+      },
+      {
+        "id": "existing-age",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#years"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "40"
+        }
+      },
+      {
+        "id": "existing-leave-age",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#firstName"
+          }
+        }
+      },
+      {
+        "id": "existing-save",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#submit"
+          }
+        },
+        "wait_response": "existing-save"
+      }
+    ],
+    "actions": [
+      {
+        "id": "duplicate-open-patients",
+        "action": "goto",
+        "path": "/PatientManagement"
+      },
+      {
+        "id": "duplicate-new-patient",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#newPatient"
+          }
+        }
+      },
+      {
+        "id": "duplicate-national-id",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#nationalId"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "{{test_value}}"
+        }
+      },
+      {
+        "id": "duplicate-last-name",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#lastName"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "Suzuki"
+        }
+      },
+      {
+        "id": "duplicate-first-name",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#firstName"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "Hanako"
+        }
+      },
+      {
+        "id": "duplicate-sex",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "label[for=radio-1]"
+          }
+        }
+      },
+      {
+        "id": "duplicate-age",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#years"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "40"
+        }
+      },
+      {
+        "id": "duplicate-leave-age",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#firstName"
+          }
+        }
+      },
+      {
+        "id": "duplicate-save",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#submit"
+          }
+        },
+        "wait_response": "duplicate-save"
+      }
+    ],
+    "responses": [
+      {
+        "id": "existing-save",
+        "method": "POST",
+        "path": "/api/OpenELIS-Global/rest/PatientManagement"
+      },
+      {
+        "id": "duplicate-save",
+        "method": "POST",
+        "path": "/api/OpenELIS-Global/rest/PatientManagement",
+        "contains": "Yamada"
+      }
+    ],
+    "database": [
+      {
+        "id": "patient",
+        "service": "db",
+        "database": "clinlims",
+        "table": "patient",
+        "match_column": "national_id",
+        "columns": [
+          "national_id",
+          "person_id"
+        ],
+        "schema": "clinlims"
+      }
+    ]
+  }
+}

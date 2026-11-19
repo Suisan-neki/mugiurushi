@@ -874,3 +874,51 @@ fn the_relay_cut_fault_and_the_cut_point_must_be_declared_together() {
     assert!(recipe("normal", with_cut.clone()).is_err());
     assert!(recipe("database_stopped", with_cut).is_err());
 }
+
+#[test]
+fn validates_the_openelis_recipes_for_concerns_from_the_code() {
+    // コードから出た懸念（#230）を確かめるレシピ。起動の設定は患者登録のレシピと同じものを使う。
+    let read = |text: &str| -> mugiurushi::execution::Recipe {
+        let recipe = serde_json::from_str(text).unwrap();
+        mugiurushi::execution::validate_recipe(&recipe).unwrap();
+        recipe
+    };
+    let duplicate = read(include_str!(
+        "../examples/openelis-browser/duplicate-national-id-recipe.json"
+    ));
+    let browser = duplicate.browser.as_ref().unwrap();
+    // 配布物の初期データは国民識別番号の重複を許すので、準備で禁止に変えてから、既存の患者を登録する。
+    let ids: Vec<_> = browser.preparation.iter().map(|s| s.id.as_str()).collect();
+    let forbid = ids.iter().position(|id| *id == "config-is-false").unwrap();
+    let existing = ids.iter().position(|id| *id == "existing-save").unwrap();
+    assert!(forbid < existing);
+    // 操作は、同じ番号で別の氏名の患者を登録するだけ。拒否の応答に既存の患者の姓があるかを見る。
+    assert!(
+        browser
+            .actions
+            .iter()
+            .all(|s| s.id.starts_with("duplicate-"))
+    );
+    let watch = browser
+        .responses
+        .iter()
+        .find(|w| w.id == "duplicate-save")
+        .unwrap();
+    assert_eq!(watch.contains.as_deref(), Some("Yamada"));
+
+    let access = read(include_str!(
+        "../examples/openelis-browser/national-id-access-log-recipe.json"
+    ));
+    let browser = access.browser.as_ref().unwrap();
+    // 重複確認の要求は、番号の欄からマウスが離れたときに送られる。欄を押してから次の欄を押す。
+    let ids: Vec<_> = browser.actions.iter().map(|s| s.id.as_str()).collect();
+    let point = ids
+        .iter()
+        .position(|id| *id == "patient-point-national-id")
+        .unwrap();
+    assert_eq!(ids[point + 1], "patient-leave-national-id");
+    assert_eq!(
+        browser.actions[point + 1].wait_response.as_deref(),
+        Some("number-check")
+    );
+}
