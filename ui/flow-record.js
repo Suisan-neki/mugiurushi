@@ -46,6 +46,20 @@ export function applyInvestigation(/** @type {any} */ record, /** @type {any} */
   return record;
 }
 
+/** 懸念の候補の要求の文。懸念は「こうなると問題」という形なので、「その懸念が起きていないこと」にする。 */
+export function concernRequirement(/** @type {any} */ c) { return `次のことが起きていないこと：${c.concern}`.slice(0, 2000); }
+
+/** 懸念の根拠の行の書き方。前のコミットから引き継いだ懸念は、そのコミットを添える。 */
+export function concernEvidenceText(/** @type {any} */ c, /** @type {string} */ commit) {
+  const at = c.commit && c.commit !== commit ? `（コミット ${c.commit.slice(0, 7)}）` : '';
+  return (c.evidence || []).map((/** @type {any} */ e) => `${e.path} ${e.start}〜${e.end}行`).join('、') + at;
+}
+
+/** 懸念を、試験の案のAPIの候補にする（画面と、実際のモデルで試すスクリプトで同じ形にする）。 */
+export function concernPlanCandidate(/** @type {any} */ c, /** @type {string} */ commit) {
+  return { id: c.id, requirement: concernRequirement(c), how: `${c.check?.detail || ''}（コードからの推定：${c.estimate}。根拠の行：${concernEvidenceText(c, commit)}）`.slice(0, 2000), source: 'concern' };
+}
+
 /** 試験の案に添える、懸念の候補の根拠の行（ファイルと行の範囲）。同じ範囲は一度だけにする。
  * ファイル丸ごとではなく根拠の行の前後だけを添えるので、照合で読むファイル（上限40件）と取り合わない。 */
 export function planEvidence(/** @type {any[]} */ concerns) {

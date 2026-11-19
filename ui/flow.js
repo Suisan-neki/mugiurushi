@@ -3,7 +3,7 @@
 // 判定と観測の状態は事例の記録（/api/v1/case）が正。流れの記録（/api/v1/flow）は画面を続けるための控え。
 // AIへ送る内容は、送る前にサーバーが組み立てた内容をそのまま表示し、人が確かめたときだけ送る。
 import { apiRequest as api } from './api.js';
-import { applyScan, applyPlan, applyInvestigation, runConcerns, planEvidence, carryableConcerns, carriedInvestigation, byLatestSave, concernSource, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
+import { applyScan, applyPlan, applyInvestigation, runConcerns, planEvidence, carryableConcerns, carriedInvestigation, byLatestSave, concernSource, concernRequirement, concernEvidenceText, concernPlanCandidate, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
 
 /** @param {string} tag @param {Record<string, any>} [attrs] @param {...any} children */
 function h(tag, attrs = {}, ...children) {
@@ -333,14 +333,8 @@ function investigationResult(/** @type {any} */ saved) {
 // 確かめ方が「麦漆で動かす」の懸念だけを候補にする。「人に聞く」「さらに読む」の懸念は、試験にしても麦漆で観測できないので示すだけにする。
 // 懸念は「こうなると問題」という形なので、候補の要求の文は「その懸念が起きていないこと」にする。
 const concernChosen = new Map();
-function concernRequirement(/** @type {any} */ c) { return `次のことが起きていないこと：${c.concern}`.slice(0, 2000); }
-function evidenceText(/** @type {any} */ c) {
-  const at = c.commit && c.commit !== state.source.commit ? `（コミット ${short(c.commit)}）` : '';
-  return (c.evidence || []).map((/** @type {any} */ e) => `${e.path} ${e.start}〜${e.end}行`).join('、') + at;
-}
-function concernCandidate(/** @type {any} */ c) {
-  return { id: c.id, requirement: concernRequirement(c), how: `${c.check?.detail || ''}（コードからの推定：${c.estimate}。根拠の行：${evidenceText(c)}）`.slice(0, 2000), source: 'concern' };
-}
+function evidenceText(/** @type {any} */ c) { return concernEvidenceText(c, state.source.commit); }
+function concernCandidate(/** @type {any} */ c) { return concernPlanCandidate(c, state.source.commit); }
 function chosenConcerns(/** @type {any} */ r) {
   const id = r?.investigation?.result?.record;
   return runConcerns(r).filter((/** @type {any} */ c) => concernChosen.get(`${id}:${c.id}`) !== false);
