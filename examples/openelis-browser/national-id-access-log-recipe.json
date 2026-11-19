@@ -1,0 +1,468 @@
+{
+  "schema_version": 1,
+  "check_id": "openelis-national-id-access-log",
+  "source": {
+    "repository": "DIGI-UW/openelis-docker",
+    "commit": "6fb4a9e9223f9e04cafbb916d6d5260801ba819e",
+    "path": "docker-compose.yml",
+    "line": 1,
+    "end_line": 1
+  },
+  "runtime": "browser",
+  "entrypoint": "/",
+  "args": [],
+  "input": {
+    "workflow": "synthetic national id duplicate check request",
+    "scope": "not clinical data or clinical validation"
+  },
+  "criterion": {
+    "assertion": "eel.trial",
+    "subject": "openelis"
+  },
+  "timeout_ms": 300000,
+  "trial": {
+    "schema_version": 1,
+    "fault": "normal",
+    "storage": null,
+    "readback": null,
+    "checks": [
+      {
+        "id": "number-check-sent",
+        "scope": "欄からマウスが離れたときに、重複確認の要求が送られた",
+        "method": "browser_response",
+        "target": "number-check",
+        "expect": "contains",
+        "text": "status=200"
+      },
+      {
+        "id": "proxy-log-no-number",
+        "scope": "入口（nginx）のコンテナのログに、国民識別番号が出ない",
+        "method": "container_log",
+        "target": "proxy",
+        "expect": "not_contains",
+        "text": "{{test_value}}"
+      },
+      {
+        "id": "app-log-no-number",
+        "scope": "アプリのコンテナのログ（標準出力・標準エラー）に、国民識別番号が出ない",
+        "method": "container_log",
+        "target": "oe",
+        "expect": "not_contains",
+        "text": "{{test_value}}"
+      }
+    ]
+  },
+  "containers": {
+    "services": [
+      {
+        "name": "db",
+        "image": "itechuw/openelis-global-2-database:3.3.0@sha256:4a85cb299cfaa769657b91b7a629f49e9987f65f7ffd702582e28bdcfbdc906e",
+        "role": "database",
+        "expose": 5432,
+        "env": {
+          "POSTGRES_USER": "postgres",
+          "POSTGRES_PASSWORD": "admin",
+          "POSTGRES_DB": "clinlims",
+          "POSTGRES_INITDB_ARGS": "--auth-host=md5",
+          "DB_PASSWORD": "clinlims",
+          "DB_SUPERUSER_PASSWORD": "superuser"
+        },
+        "volumes": [
+          {
+            "name": "dbdata",
+            "path": "/var/lib/postgresql/data"
+          }
+        ],
+        "command": [],
+        "ready": {
+          "exec": {
+            "args": [
+              "pg_isready",
+              "-q",
+              "-h",
+              "127.0.0.1",
+              "-d",
+              "clinlims",
+              "-U",
+              "clinlims"
+            ]
+          }
+        },
+        "ready_timeout_ms": 180000,
+        "engine": "postgres",
+        "aliases": [
+          "db.openelis.org"
+        ]
+      },
+      {
+        "name": "certs",
+        "image": "itechuw/certgen:main@sha256:cadf558ddafefd58db076abb21c753a421bc9f7910f1dc20e5c44bdf904987e7",
+        "role": "other",
+        "env": {
+          "KEYSTORE_PW": "kspass",
+          "TRUSTSTORE_PW": "tspass"
+        },
+        "volumes": [
+          {
+            "name": "kts",
+            "path": "/etc/openelis-global"
+          },
+          {
+            "name": "keys",
+            "path": "/etc/ssl/private"
+          },
+          {
+            "name": "certs",
+            "path": "/etc/ssl/certs"
+          }
+        ],
+        "command": [
+          "/bin/bash",
+          "/opt/openelis/ensure-stores.sh"
+        ],
+        "ready": "completed",
+        "ready_timeout_ms": 60000,
+        "files": [
+          {
+            "from": "configs/certs/ensure-stores.sh",
+            "to": "/opt/openelis/ensure-stores.sh"
+          }
+        ]
+      },
+      {
+        "name": "frontend",
+        "image": "itechuw/openelis-global-2-frontend:3.3.0@sha256:2e9a288a493788d7de1437153c760f6321217325dbe44e4fdd49a69b4de48c20",
+        "role": "other",
+        "expose": 80,
+        "env": {},
+        "volumes": [],
+        "command": [],
+        "ready": {
+          "http": {
+            "path": "/",
+            "tls": false
+          }
+        },
+        "ready_timeout_ms": 60000,
+        "aliases": [
+          "frontend.openelis.org"
+        ]
+      },
+      {
+        "name": "oe",
+        "image": "itechuw/openelis-global-2:3.3.0@sha256:b69b2cb7f75642f6be97896ad368767ac5c6383d718a3189be0580eeb2b5171e",
+        "role": "app",
+        "expose": 8443,
+        "env": {
+          "SSL_KEYSTORE_PATH": "/etc/openelis-global/keystore",
+          "SSL_KEYSTORE_PASSWORD": "kspass",
+          "SSL_TRUSTSTORE_PATH": "/etc/openelis-global/truststore",
+          "SSL_TRUSTSTORE_PASSWORD": "tspass",
+          "DEFAULT_PW": "adminADMIN!",
+          "TZ": "America/New_York",
+          "OE_ENCRYPTION_PASSWORD": "kspass",
+          "ANALYZER_BRIDGE_PAIRING_CODE": "",
+          "ORG_OPENELISGLOBAL_FHIRSTORE_URI": "",
+          "ANALYZER_BRIDGE_URL": "",
+          "CATALINA_OPTS": " -Ddatasource.url=jdbc:postgresql://db.openelis.org:5432/clinlims -Ddatasource.username=clinlims -Ddatasource.password=clinlims -Doe.ssl.truststorepath=/etc/openelis-global/truststore -Doe.ssl.truststorepassword=tspass -Doe.ssl.keystorepath=/etc/openelis-global/keystore -Doe.ssl.keystorepassword=kspass"
+        },
+        "volumes": [
+          {
+            "name": "kts",
+            "path": "/etc/openelis-global"
+          },
+          {
+            "name": "lucene",
+            "path": "/var/lib/lucene_index"
+          }
+        ],
+        "command": [],
+        "ready": {
+          "http": {
+            "path": "/api/OpenELIS-Global/health",
+            "tls": true
+          }
+        },
+        "ready_timeout_ms": 600000,
+        "aliases": [
+          "oe.openelis.org"
+        ],
+        "start_after": [
+          "certs"
+        ],
+        "files": [
+          {
+            "from": "configs/properties/common.properties",
+            "to": "/run/secrets/common.properties"
+          }
+        ]
+      },
+      {
+        "name": "proxy",
+        "image": "itechuw/openelis-global-2-proxy:3.3.0@sha256:1cdb0a5aa8529c6ddb88ff5fe634c3ca206c9599deb7a0a4decb8d1d6d33185a",
+        "role": "other",
+        "expose": 443,
+        "env": {
+          "OE_NGINX_CERT": "apache-selfsigned.crt",
+          "OE_NGINX_KEY": "apache-selfsigned.key",
+          "OE_HTTPS_PORT": "443"
+        },
+        "volumes": [
+          {
+            "name": "certs",
+            "path": "/etc/nginx/certs"
+          },
+          {
+            "name": "keys",
+            "path": "/etc/nginx/keys"
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-c",
+          "envsubst '$OE_NGINX_CERT $OE_NGINX_KEY $OE_HTTPS_PORT' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"
+        ],
+        "ready": {
+          "http": {
+            "path": "/",
+            "tls": true
+          }
+        },
+        "ready_timeout_ms": 60000,
+        "start_after": [
+          "certs",
+          "frontend",
+          "oe"
+        ],
+        "files": [
+          {
+            "from": "configs/nginx/nginx.conf",
+            "to": "/etc/nginx/nginx.conf.template"
+          }
+        ]
+      }
+    ]
+  },
+  "browser": {
+    "service": "proxy",
+    "tls": true,
+    "start_path": "/",
+    "expected_version": "151.0.7922.34",
+    "preparation": [
+      {
+        "id": "username",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#loginName"
+          }
+        },
+        "value": {
+          "source": "secret",
+          "key": "username"
+        }
+      },
+      {
+        "id": "password",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#password"
+          }
+        },
+        "value": {
+          "source": "secret",
+          "key": "password"
+        }
+      },
+      {
+        "id": "login",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "button[type=submit]:has-text(\"Login\")"
+          }
+        }
+      },
+      {
+        "id": "home",
+        "action": "read_text",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#menu_home_nav"
+          }
+        },
+        "contains": null
+      }
+    ],
+    "actions": [
+      {
+        "id": "patient-open-patients",
+        "action": "goto",
+        "path": "/PatientManagement"
+      },
+      {
+        "id": "patient-new-patient",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#newPatient"
+          }
+        }
+      },
+      {
+        "id": "patient-national-id",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#nationalId"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "{{test_value}}"
+        }
+      },
+      {
+        "id": "patient-point-national-id",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#nationalId"
+          }
+        }
+      },
+      {
+        "id": "patient-leave-national-id",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#lastName"
+          }
+        },
+        "wait_response": "number-check"
+      },
+      {
+        "id": "patient-last-name",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#lastName"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "Yamada"
+        }
+      },
+      {
+        "id": "patient-first-name",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#firstName"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "Taro"
+        }
+      },
+      {
+        "id": "patient-sex",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "label[for=radio-1]"
+          }
+        }
+      },
+      {
+        "id": "patient-age",
+        "action": "fill",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#years"
+          }
+        },
+        "value": {
+          "source": "literal",
+          "value": "40"
+        }
+      },
+      {
+        "id": "patient-leave-age",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#firstName"
+          }
+        }
+      },
+      {
+        "id": "patient-save",
+        "action": "click",
+        "target": {
+          "frames": [],
+          "locator": {
+            "by": "css",
+            "selector": "#submit"
+          }
+        },
+        "wait_response": "patient-save"
+      }
+    ],
+    "responses": [
+      {
+        "id": "patient-save",
+        "method": "POST",
+        "path": "/api/OpenELIS-Global/rest/PatientManagement"
+      },
+      {
+        "id": "number-check",
+        "method": "GET",
+        "path": "/api/OpenELIS-Global/rest/subjectNumberValidationProvider"
+      }
+    ],
+    "database": [
+      {
+        "id": "patient",
+        "service": "db",
+        "database": "clinlims",
+        "table": "patient",
+        "match_column": "national_id",
+        "columns": [
+          "national_id",
+          "person_id"
+        ],
+        "schema": "clinlims"
+      }
+    ]
+  }
+}

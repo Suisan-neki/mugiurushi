@@ -110,6 +110,23 @@ EEL_BROWSER_SECRETS_FILE=/tmp/eel-openelis-secrets.json node tools/recipe-live.m
 
 IPv6のあるホストで、置き換えなしの実行は確かめていない。
 
+## コードから出た懸念を確かめるレシピ（#230）
+
+コードをたどって出た懸念（[記録](../../docs/validation-concern-tests-openelis-2026-11-19.md)）のうち2件を、患者登録のレシピと同じ起動の設定で確かめる。どちらも、懸念が起きていないことを判定条件にしている。
+
+| レシピ | 懸念 | 準備 | 操作 | 判定条件 |
+| --- | --- | --- | --- | --- |
+| `duplicate-national-id-recipe.json` | 国民識別番号の重複を拒否する文に、既存の患者の氏名と生年月日が入る | 管理画面の Patient Entry Configuration で「Allow duplicate national ids」を false にし、既存の患者（Yamada Taro）を登録する | 同じ番号で別の氏名（Suzuki Hanako）の患者を登録する | 拒否される（`status=400`）。拒否の応答の本文とアプリのコンテナのログに `Yamada` が無い |
+| `national-id-access-log-recipe.json` | 重複確認の要求が番号を問い合わせ文字列に載せ、アクセスログに残る | なし | 番号の欄を押してから次の欄を押し、欄からマウスが離れたときの重複確認を起こしてから登録する | 重複確認の要求が送られた。入口とアプリのコンテナのログに試験値が無い |
+
+配布物の初期データ（liquibase の `national_id_config.xml`）は「Allow duplicate national ids」を true にしている。アプリのコードの既定値（false）ではない。そのままでは重複が許され、拒否の文は作られないので、準備で設定を変える。
+
+重複確認の要求は、欄からマウスが離れたとき（`onMouseOut`）に送られる。レシピの操作にマウスを重ねるだけの操作はないので、欄を押してから次の欄を押して、マウスを欄から外す。
+
+ログの判定条件が見るのは、コンテナの標準出力と標準エラーだけである。アプリのTomcatが書くアクセスログ（コンテナ内の `/usr/local/tomcat/logs/localhost_access_log.*.txt`）は見ていない。
+
+緊急連絡先を空欄にしても空の連絡先の行ができる、という懸念は、レシピで書けなかった。DBの読み出しは試験値に一致する行だけを読むので、患者の行のIDから `patient_contact` の行をたどれない。
+
 ## 確かめていないこと
 
 - 故障を入れた条件（DBの停止、切断、読み取り専用）。
