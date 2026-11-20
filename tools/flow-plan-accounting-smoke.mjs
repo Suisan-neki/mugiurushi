@@ -56,21 +56,25 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } }); page.setDefaultTimeout(15000);
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(() => sessionStorage.setItem('eel-person', JSON.stringify({ name: '合成の開発者', role: 'developer' })));
-  const send = async () => { await page.locator('[data-preview]').waitFor(); await page.locator('#agree').check(); await page.getByRole('button', { name: 'この内容を送る' }).click(); };
-  const planOnce = async () => { await page.locator('#steps button').nth(1).click(); await page.getByRole('button', { name: '試験の案を作る' }).click(); await send(); };
+  const send = async name => { await page.locator('[data-preview]').waitFor(); await page.locator('#agree').check(); await page.getByRole('button', { name, exact: true }).click(); };
+  const toPlan = async () => { await page.locator('[data-screen=scan]').waitFor(); await page.getByRole('button', { name: /^次へ/ }).click(); await page.getByRole('button', { name: '試験の案を作る' }).click(); await send('試験の案を作る'); };
+  // 送れなかったときは、送る前の画面（ヒアリング）に戻る。そこから送り直す。
+  const planOnce = async () => {
+    if (!(await page.locator('[data-screen=hearing]').count())) { await page.locator('.stepper button', { hasText: '照合とヒアリング' }).click(); await page.locator('[data-screen=scan]').waitFor(); await page.getByRole('button', { name: /^次へ/ }).click(); }
+    await page.getByRole('button', { name: '試験の案を作る' }).click(); await send('試験の案を作る');
+  };
   const alert = async () => { await page.locator('#alert .alert').waitFor(); const text = await page.locator('#alert .alert').innerText(); await page.locator('#alert').evaluate(e => e.replaceChildren()); return text; };
   const u = new URL(url + '/flow'); u.search = new URLSearchParams({ url: 'https://github.com/' + repository, ref: commit }).toString();
   await page.goto(u.href);
   await page.locator('[data-files]').waitFor();
-  await page.getByRole('button', { name: '送信内容を確認する' }).click(); await send();
-  await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
+  await page.getByRole('button', { name: '次へ' }).click(); await page.getByRole('button', { name: '次へ' }).click(); await send('照合を始める');
 
   // 未知ID・両方への重複：サーバーが受け取らず、案は記録しない。
-  await page.getByRole('button', { name: '試験の案を作る' }).click(); await send();
+  await toPlan();
   assert.match(await alert(), /渡していない候補/);
   await planOnce();
   assert.match(await alert(), /試験と、試験にしなかった候補の両方/);
-  assert.equal(await page.locator('#steps button').nth(2).isDisabled(), true, '受け取らなかった案で次へ進めない');
+  assert.equal(await page.locator('.stepper > li:nth-child(3) button').count(), 0, '受け取らなかった案で次へ進めない');
 
   // 空の案：試験は0件で、送った3件すべてが未分類として残る。
   await planOnce();
@@ -82,12 +86,12 @@ try {
   await page.locator('[data-test="t-一覧"]').waitFor();
   assert.match(await page.locator('[data-not-planned]').innerText(), /操作の記録を残す（AIの理由：本番の構成による）/);
   assert.match(await page.locator('[data-unclassified]').innerText(), /保存先の外に書かない/);
-  await page.getByRole('button', { name: '了承して試験を設定する' }).click();
+  await page.getByRole('button', { name: '了承して登録する' }).click();
   await page.locator('[data-untested-section]').waitFor();
   assert.deepEqual(await page.locator('[data-result]').evaluateAll(r => r.map(x => x.getAttribute('data-result'))), ['pending'], '試験は未実行として出す');
-  assert.deepEqual(await page.locator('[data-untested]').evaluateAll(r => r.map(x => [x.getAttribute('data-untested'), x.children[1].textContent])),
+  assert.deepEqual(await page.locator('[data-untested]').evaluateAll(r => r.map(x => [x.getAttribute('data-untested'), x.querySelector('[data-untested-text]').textContent])),
     [['not_planned', '操作の記録を残す'], ['unclassified', '保存先の外に書かない']]);
-  const untested = await page.locator('[data-untested-section]').innerText();
+  const untested = await page.locator('[data-untested-section]').textContent();
   assert.match(untested, /合否は付けていません[\s\S]*AIが試験にしなかった[\s\S]*AIの理由：本番の構成による[\s\S]*AIの試験の案に含まれなかった（未分類）/);
   assert.doesNotMatch(untested, /運用の手順書/, '試験の案に送っていない候補（試験で確かめられない候補）はこの表の対象外');
   assert.doesNotMatch(untested, /未実行|未確認|不足|期待どおり/, '未実行・未確認・合否と混ぜない');
@@ -96,9 +100,9 @@ try {
   await planOnce();
   await page.locator('[data-test="t-記録"]').waitFor();
   await page.locator('[data-test="t-記録"] input[type=checkbox]').uncheck();
-  await page.getByRole('button', { name: '了承して試験を設定する' }).click();
+  await page.getByRole('button', { name: '了承して登録する' }).click();
   await page.locator('[data-untested-section]').waitFor();
-  assert.deepEqual(await page.locator('[data-untested]').evaluateAll(r => r.map(x => [x.getAttribute('data-untested'), x.children[1].textContent])),
+  assert.deepEqual(await page.locator('[data-untested]').evaluateAll(r => r.map(x => [x.getAttribute('data-untested'), x.querySelector('[data-untested-text]').textContent])),
     [['not_approved', '操作の記録を残す'], ['not_planned', '保存先の外に書かない']]);
   assert.equal(planCalls, 5);
   assert.deepEqual(errors, []);

@@ -123,6 +123,7 @@ jobs:
       - run: npm run test:flow-rescan
       - run: npm run test:flow-plan
       - run: npm run test:flow-openemr
+      - run: npm run test:flow-auto
       - run: npm run test:user-trial
       - name: Keep synthetic review screenshots
         if: always()

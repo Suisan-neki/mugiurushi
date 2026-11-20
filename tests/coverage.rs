@@ -1584,6 +1584,7 @@ fn guideline_flow_reads_chosen_files_and_validates_plans_and_answers() {
 
     let plan_request = |findings: Vec<&str>, confirm| PlanRequest {
         repository: "example/clinic".into(),
+        run: false,
         commit: commit.clone(),
         files: vec!["app/auth.py".into()],
         summary: String::new(),
@@ -1838,6 +1839,7 @@ fn screens_join_the_scan_input_only_when_chosen_and_unsent_screen_references_are
         &store,
         mugiurushi::agent::PlanRequest {
             repository: "example/clinic".into(),
+            run: false,
             commit: commit.clone(),
             files: vec!["app/auth.py".into()],
             summary: String::new(),
@@ -1954,6 +1956,7 @@ fn plan_accounts_for_every_candidate_without_guessing_reasons() {
         let config = agent.config();
         let request = |confirm| PlanRequest {
             repository: "example/clinic".into(),
+            run: false,
             commit: commit.clone(),
             files: vec!["app/tasks.py".into()],
             summary: String::new(),
@@ -2060,6 +2063,7 @@ fn a_concern_candidate_is_sent_to_the_plan_with_its_source() {
     };
     let request = |files: Vec<String>, evidence: Vec<EvidenceRange>| PlanRequest {
         repository: "example/clinic".into(),
+        run: false,
         commit: commit.clone(),
         files,
         summary: String::new(),
@@ -2139,6 +2143,7 @@ fn a_concern_candidate_is_sent_to_the_plan_with_its_source() {
         &store,
         PlanRequest {
             repository: "example/clinic".into(),
+            run: false,
             commit: commit.clone(),
             files: vec!["app/patient.py".into()],
             summary: String::new(),

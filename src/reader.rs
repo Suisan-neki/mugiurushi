@@ -99,6 +99,17 @@ fn parse_token(text: &str) -> io::Result<String> {
 }
 const MAX_TOKEN: usize = 4096;
 
+/// GitHubのURLからリポジトリ名（所有者/名前）を取り出す。認証情報・クエリ・ファイルのURLは拒否する。
+pub fn repository_name(url: &str) -> io::Result<String> {
+    snapshot::repository(url)
+}
+
+/// 公開リポジトリの既定のブランチと、ブランチの一覧（名前・最新のコミット）をGitHubから読む。
+pub fn branches(url: &str) -> io::Result<(String, Vec<(String, String)>)> {
+    let budget = budget::Budget::new();
+    github::branches(&github::Github::new(budget.until)?, url)
+}
+
 pub fn read(request: ReaderRequest) -> io::Result<Value> {
     if serde_json::to_vec(&request)
         .map_err(io::Error::other)?

@@ -55,6 +55,8 @@ pub struct App {
     pub dify: Option<crate::system_diagram::dialogue::DifyConfig>,
     /// 照合でコードをたどるために取得した、固定したコミットの置き場所。
     pub checkouts: std::path::PathBuf,
+    /// 試験用に取得したリポジトリの置き場所。GitHubから読めないときのブランチの一覧に使う。
+    pub repositories: std::path::PathBuf,
 }
 
 struct Request {
@@ -320,6 +322,18 @@ fn handle_request(
                         .transpose()?;
                     crate::agent::plan(app.agent.as_ref(), &app.store, r, screens.as_ref())
                 });
+                return result_response(stream, result);
+            }
+            ("POST", "/api/v1/branches") => {
+                // 読み取りだけ。ブランチの一覧を返し、対象のコードは読まない。
+                let result = parse_body::<crate::branches::BranchesRequest>(&request.body)
+                    .and_then(|r| crate::branches::list(&r, &app.repositories));
+                return result_response(stream, result);
+            }
+            ("POST", "/api/v1/runnable") => {
+                // 読み取りだけ。読み取ったコードから、依存の少ないアプリとして動かせるかを判定する。対象は起動しない。
+                let result = parse_body::<crate::runnable::RunnableRequest>(&request.body)
+                    .and_then(|r| crate::runnable::assess(&app.store, &r));
                 return result_response(stream, result);
             }
             ("GET", "/api/v1/flow") => {
@@ -619,6 +633,7 @@ pub fn serve_app(
         agent: crate::agent::Config::from_env()?,
         dify: crate::system_diagram::dialogue::DifyConfig::for_app(&data)?,
         checkouts: data.join("checkouts"),
+        repositories: data.join("repositories"),
     };
     println!(
         "データの保存先: {}\nAIによる説明: {}",

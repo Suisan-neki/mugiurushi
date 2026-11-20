@@ -184,6 +184,32 @@ pub(super) fn file(f: &impl Fetch, s: &mut Snapshot, path: &str) -> io::Result<(
     s.omitted.retain(|e| e.path != path);
     Ok(())
 }
+/// 公開リポジトリの既定のブランチと、ブランチの一覧（名前と最新のコミット）。最初の100件まで。
+pub(super) fn branches(f: &impl Fetch, url: &str) -> io::Result<(String, Vec<(String, String)>)> {
+    let name = snapshot::repository(url)?;
+    let api = format!("https://api.github.com/repos/{name}");
+    let repo = json(f, &api)?;
+    if repo["private"] != false {
+        return Err(invalid("最初の試作は公開リポジトリに対応しています。"));
+    }
+    let default = repo["default_branch"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let list = json(f, &format!("{api}/branches?per_page=100"))?;
+    let branches = list
+        .as_array()
+        .ok_or_else(|| invalid("GitHubのブランチ一覧を読み取れませんでした。"))?
+        .iter()
+        .filter_map(|b| {
+            let name = b["name"].as_str()?;
+            let sha = b["commit"]["sha"].as_str().filter(|s| snapshot::sha(s))?;
+            Some((name.to_owned(), sha.to_owned()))
+        })
+        .collect();
+    Ok((default, branches))
+}
+
 pub(super) fn scan(f: &impl Fetch, url: &str, reference: &str) -> io::Result<Snapshot> {
     let name = snapshot::repository(url)?;
     let api = format!("https://api.github.com/repos/{name}");

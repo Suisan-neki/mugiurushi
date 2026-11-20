@@ -884,6 +884,181 @@ pub struct PlanRequest {
     /// ファイル丸ごとではなく根拠の行だけを添えるので、照合で読むファイルの上限と取り合わない。
     #[serde(default)]
     pub evidence: Vec<EvidenceRange>,
+    /// 試験の設定（起動のしかた・判定の条件）も求めるか。麦漆が読み取ったコードから動かせると判定した場合だけ求める
+    /// （`src/runnable.rs`）。画面の申告だけで動かせることにはしない。
+    #[serde(default)]
+    pub run: bool,
+}
+
+/// 試験の設定で使える観測の方法。コマンドとして起動して終了を待つ試験で、麦漆が判定できるものだけ。
+const TRIAL_METHODS: &[&str] = &[
+    "exit_code",
+    "stdout",
+    "stderr",
+    "stored_file",
+    "readback_output",
+];
+const MAX_TRIAL_ARGS: usize = 40;
+
+fn safe_relative(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.contains(':')
+        && path
+            .split('/')
+            .all(|p| !p.is_empty() && p != ".." && p != ".")
+}
+
+/// AIの試験の設定を検査して、画面が実行に使える形にする。使えない設定は捨て、理由を返す（試験の案そのものは受け取る）。
+/// 対応（links）は、候補ごとに観測の方法がそろう判定条件だけに絞り、その方法を候補の観測の種類にする。
+fn trial_of(t: &Value, finding_ids: &[String], entrypoints: &[String]) -> Result<Value, String> {
+    let raw = &t["trial"];
+    if !raw.is_object() {
+        let note = t["trial_note"].as_str().unwrap_or("").trim();
+        return Err(if note.is_empty() {
+            "試験の設定はありません".into()
+        } else {
+            note.chars().take(1000).collect()
+        });
+    }
+    if t["kind"] != "cli" {
+        return Err("コマンドの試験ではないため、試験の設定は使いません".into());
+    }
+    let entry = |v: &Value| -> Result<String, String> {
+        let e = v.as_str().unwrap_or_default();
+        entrypoints
+            .iter()
+            .any(|x| x == e)
+            .then(|| e.to_owned())
+            .ok_or_else(|| format!("起動の候補にないファイルです: {e}"))
+    };
+    let args = |v: &Value| -> Result<Vec<String>, String> {
+        let list = v.as_array().map(Vec::as_slice).unwrap_or_default();
+        if list.len() > MAX_TRIAL_ARGS
+            || list.iter().any(|a| {
+                a.as_str()
+                    .is_none_or(|a| a.chars().count() > 500 || a.chars().any(char::is_control))
+            })
+        {
+            return Err("引数の数か長さが上限を超えているか、制御文字を含んでいます".into());
+        }
+        Ok(list
+            .iter()
+            .filter_map(|a| a.as_str().map(str::to_owned))
+            .collect())
+    };
+    let entrypoint = entry(&raw["entrypoint"])?;
+    let arguments = args(&raw["args"])?;
+    let storage = match &raw["storage"] {
+        Value::Null => None,
+        Value::String(p) if safe_relative(p) => Some(p.clone()),
+        _ => return Err("保存先は作業ディレクトリの中の相対パスにしてください".into()),
+    };
+    let readback = match &raw["readback"] {
+        Value::Null => None,
+        r => Some(json!({"entrypoint": entry(&r["entrypoint"])?, "args": args(&r["args"])?})),
+    };
+    let mut checks = vec![];
+    for c in raw["checks"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let method = c["method"].as_str().unwrap_or_default();
+        let expect = c["expect"].as_str().unwrap_or_default();
+        let id = c["id"].as_str().unwrap_or_default();
+        let scope: String = c["scope"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(200)
+            .collect();
+        if !TRIAL_METHODS.contains(&method) {
+            return Err(format!("使えない観測の方法です: {method}"));
+        }
+        if id.is_empty()
+            || id.len() > 16
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            || scope.is_empty()
+        {
+            return Err("判定の条件の識別子か確認する範囲が不正です".into());
+        }
+        let text = if method == "exit_code" {
+            if !matches!(expect, "zero" | "nonzero") {
+                return Err("終了コードの条件は zero か nonzero です".into());
+            }
+            Value::Null
+        } else {
+            match c["text"].as_str().map(str::trim) {
+                Some(text) if !text.is_empty() && matches!(expect, "contains" | "not_contains") => {
+                    json!(text.chars().take(1000).collect::<String>())
+                }
+                _ => {
+                    return Err(
+                        "文字列の条件には contains か not_contains と文字列が要ります".into(),
+                    );
+                }
+            }
+        };
+        if method == "stored_file" && storage.is_none() {
+            return Err("保存先を指定せずに保存先の内容を条件にしています".into());
+        }
+        if method == "readback_output" && readback.is_none() {
+            return Err("読み出しを指定せずに読み出しの出力を条件にしています".into());
+        }
+        if checks.iter().any(|x: &Value| x["id"] == id) {
+            return Err("判定の条件の識別子が重複しています".into());
+        }
+        checks.push(json!({"id": id, "scope": scope, "method": method, "expect": expect, "text": text, "target": null}));
+    }
+    if checks.is_empty() || checks.iter().all(|c| c["method"] == "exit_code") {
+        return Err("終了コードだけでは判定しません".into());
+    }
+    let method_of = |id: &str| {
+        checks
+            .iter()
+            .find(|c| c["id"] == id)
+            .and_then(|c| c["method"].as_str())
+            .map(str::to_owned)
+    };
+    let mut links = vec![];
+    for l in raw["links"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let fid = l["finding_id"].as_str().unwrap_or_default();
+        let ids = strings(&l["check_ids"]);
+        if !finding_ids.iter().any(|f| f == fid)
+            || links.iter().any(|x: &Value| x["finding_id"] == fid)
+        {
+            return Err("試験の候補と判定条件の対応が不正です".into());
+        }
+        let methods: Vec<Option<String>> = ids.iter().map(|i| method_of(i)).collect();
+        if ids.is_empty() || methods.iter().any(Option::is_none) {
+            return Err("対応に、ない判定条件が含まれています".into());
+        }
+        // 候補の観測の種類は一つなので、最初の判定条件と同じ方法の条件だけを対応づける。
+        let first = methods[0].clone().unwrap_or_default();
+        let same: Vec<&String> = ids
+            .iter()
+            .zip(&methods)
+            .filter(|(_, m)| m.as_deref() == Some(first.as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        if first == "exit_code" {
+            return Err("終了コードだけで確かめる候補があります".into());
+        }
+        links.push(json!({"finding_id": fid, "check_ids": same, "observation": first}));
+    }
+    if links.len() != finding_ids.len() {
+        return Err("判定条件に対応づけていない候補があります".into());
+    }
+    Ok(
+        json!({"entrypoint": entrypoint, "args": arguments, "storage": storage, "readback": readback, "checks": checks, "links": links}),
+    )
 }
 
 /// 根拠の行の範囲（1から数えた最初の行と最後の行）。
@@ -1022,6 +1197,26 @@ pub fn plan(
             &request.evidence
         )?);
     }
+    // 動かせると麦漆が判定したときだけ、起動の候補を添えて試験の設定を求める。判定の結果は送る内容に含めて示す。
+    let run = if request.run {
+        Some(crate::runnable::assess(
+            store,
+            &crate::runnable::RunnableRequest {
+                repository: request.repository.clone(),
+                commit: request.commit.clone(),
+            },
+        )?)
+    } else {
+        None
+    };
+    let entrypoints = run
+        .as_ref()
+        .filter(|r| r.runnable)
+        .map(|r| r.entrypoints.clone())
+        .unwrap_or_default();
+    if !entrypoints.is_empty() {
+        payload["run"] = json!({"runtime": "python3", "entrypoints": entrypoints});
+    }
     if let Some(preview) = preview_or_check("/v1/plan", &payload, request.confirm.as_ref())? {
         return Ok(preview);
     }
@@ -1055,11 +1250,21 @@ pub fn plan(
         if steps.is_empty() || pass.is_empty() {
             return Err(invalid("手順か合格の条件のない試験の案は受け取りません"));
         }
-        tests.push(json!({
+        let mut test = json!({
             "id": t["id"], "name": t["name"], "kind": t["kind"], "finding_ids": ids,
             "steps": steps, "pass": pass, "observation": observation,
             "observation_label": observation.label(),
-        }));
+        });
+        if !entrypoints.is_empty() {
+            match trial_of(t, &ids, &entrypoints) {
+                Ok(trial) => test["trial"] = trial,
+                Err(note) => {
+                    test["trial"] = Value::Null;
+                    test["trial_note"] = json!(note);
+                }
+            }
+        }
+        tests.push(test);
     }
     let (not_planned, unclassified) = account_for_findings(&request.findings, &used, &answer)?;
     Ok(json!({
@@ -1069,6 +1274,7 @@ pub fn plan(
         "not_planned": not_planned,
         "unclassified": unclassified,
         "model_call": answer["model_call"],
+        "run": run,
     }))
 }
 
@@ -1193,6 +1399,66 @@ fn strings(value: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    fn cli_test(trial: Value) -> Value {
+        json!({"kind": "cli", "trial": trial, "trial_note": ""})
+    }
+    fn good_trial() -> Value {
+        json!({
+            "entrypoint": "monshin.py",
+            "args": ["--dir", ".", "answer", "P001", "{{test_value}}"],
+            "storage": "answers.tsv",
+            "readback": {"entrypoint": "monshin.py", "args": ["--user", "reception", "show", "P001"]},
+            "checks": [
+                {"id": "c1", "scope": "保存", "method": "exit_code", "expect": "zero", "text": "x"},
+                {"id": "c2", "scope": "職員に出ない", "method": "readback_output", "expect": "not_contains", "text": "{{test_value}}"},
+                {"id": "c3", "scope": "保存先", "method": "stored_file", "expect": "contains", "text": "P001"}
+            ],
+            "links": [{"finding_id": "f1", "check_ids": ["c2", "c3"]}]
+        })
+    }
+
+    #[test]
+    fn a_trial_is_checked_and_links_keep_one_observation_method() {
+        let ids = vec!["f1".to_owned()];
+        let entry = vec!["monshin.py".to_owned()];
+        let t = super::trial_of(&cli_test(good_trial()), &ids, &entry).unwrap();
+        assert_eq!(t["checks"][0]["text"], Value::Null);
+        assert_eq!(t["links"][0]["check_ids"], json!(["c2"]));
+        assert_eq!(t["links"][0]["observation"], "readback_output");
+        let bad = |change: Value| {
+            let mut trial = good_trial();
+            for (k, v) in change.as_object().unwrap() {
+                trial[k] = v.clone();
+            }
+            super::trial_of(&cli_test(trial), &ids, &entry).unwrap_err()
+        };
+        bad(json!({"entrypoint": "../evil.py"}));
+        bad(json!({"storage": "../x"}));
+        bad(json!({"storage": "/etc/passwd"}));
+        bad(json!({"readback": null}));
+        bad(
+            json!({"checks": [{"id": "c1", "scope": "保存", "method": "exit_code", "expect": "zero", "text": null}], "links": [{"finding_id": "f1", "check_ids": ["c1"]}]}),
+        );
+        bad(
+            json!({"checks": [{"id": "c2", "scope": "s", "method": "browser_text", "expect": "contains", "text": "a"}]}),
+        );
+        bad(json!({"links": []}));
+        bad(json!({"links": [{"finding_id": "f9", "check_ids": ["c2"]}]}));
+        bad(json!({"args": ["a\nb"]}));
+        let mut browser = cli_test(good_trial());
+        browser["kind"] = json!("browser");
+        assert!(super::trial_of(&browser, &ids, &entry).is_err());
+        assert!(
+            super::trial_of(
+                &json!({"kind": "cli", "trial": null, "trial_note": "作れない"}),
+                &ids,
+                &entry
+            )
+            .unwrap_err()
+            .contains("作れない")
+        );
+    }
+
     use super::*;
 
     fn config(url: &str) -> io::Result<Config> {
