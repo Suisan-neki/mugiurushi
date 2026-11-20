@@ -27,11 +27,20 @@ ChromiumはPlaywrightに固定された通常版をheadlessモードで起動し
 | --- | --- | --- |
 | `browser_text` | `read_text`の手順ID | 完了した試験操作で読んだ表示。保存の証明とは別 |
 | `browser_response` | `responses`のID | 試験操作中の要求に対するHTTP応答。`status=200`、`body_match=true`または`body_match=false`を照合 |
-| `database_rows` | `database`のID | MariaDBから試験値に一致する行を直接読んだ結果 |
+| `database_rows` | `database`のID | DBから試験値（または`match_from`で指定した値）に一致する行を直接読んだ結果。`contains`・`not_contains`で文字列を照合するか、`zero`（0行）・`nonzero`（1行以上）で行の有無を判定する。行の有無の条件には`text`を書かない |
 
 `responses`にはID、同じ試験用オリジン内の`path`、`method`、任意の`contains`を指定する。本文は保存せず、指定文字列が含まれるかだけを記録する。Cookieの値とクエリーは記録しない。応答ヘッダーは、下の「画面の構造とHTTPのやり取りの記録」に挙げた7つの名前だけを記録する。準備時の応答は判定に使わない。200件の記録上限に達した場合は、記録できた応答だけで成功としない。同じ観測先で条件を満たす応答と満たさない応答が混じった場合は未観測扱いとする。本文が取れなかったことを「含まれない」の成功にはしない。
 
-`database`にはID、DB役の`service`、`database`、`table`、`match_column`、`columns`を指定する。PostgreSQLで表が`public`以外のスキーマにある場合は、`schema`にスキーマの名前を書く。省略すると、接続する利用者の検索の順（search_path）で表を探す。MariaDBでは`database`がスキーマにあたるので、`schema`の指定は拒否する。識別子は英数字と下線だけで、検索値は基盤が作る試行ごとの架空の値。任意のSQLは受け取らない。正常終了した読取で0行なら、その値に一致する行がないことを記録できる。DB停止・認証失敗・出力超過の場合は不在とは判定しない。MariaDB以外のDB、複数テーブルの結合、実際の業務上の閲覧権限は未対応。
+`database`にはID、DB役の`service`、`database`、`table`、`match_column`、`columns`を指定する。PostgreSQLで表が`public`以外のスキーマにある場合は、`schema`にスキーマの名前を書く。省略すると、接続する利用者の検索の順（search_path）で表を探す。MariaDBでは`database`がスキーマにあたるので、`schema`の指定は拒否する。識別子は英数字と下線だけで、検索値は基盤が作る試行ごとの架空の値。任意のSQLは受け取らない。正常終了した読取で0行なら、その値に一致する行がないことを記録できる。DB停止・認証失敗・出力超過の場合は不在とは判定しない。
+
+外部キーでつながった行（患者の行のIDから連絡先の行など）は、`match_from: {"read": "<前の読み出しのID>", "column": <その columns の位置>}` で読む。試験値の代わりに、参照先の読み出しの1行の、指定した列の値を検索値にする。
+
+- 参照先は、`database`の一覧で前にある読み出しに限る。後ろや自分自身を指す指定（循環を含む）は、レシピの検査で拒否する。`match_value`とは同時に指定できない。`before_actions`の読み出しは、参照先も`before_actions`のものに限る。
+- 基盤は一覧の順に読み、同じ回（操作の前、操作の後、故障の解除後）で先に読んだ参照先の結果を使う。
+- 参照先の読み出しが失敗した、0行か2行以上だった、列が空かNULLだった場合は、読まずに理由を残す。この読み出しを使う条件は「観測できなかった」になり、行が無かったとは扱わない。
+- 例：`examples/openelis-browser/empty-emergency-contact-recipe.json`（患者→連絡先→person の3段）。
+
+複数テーブルの結合を1つの照会で行うこと、件数を2以上の数と比べること、実際の業務上の閲覧権限は未対応。
 
 記録は`execution.json`内の`containers.browser`と`containers.database_reads`、画面写真は試行の`browser/`へ置く。途中失敗も完了した手順と停止した手順を残す。認証入力直後の画面写真を省き、その後も入力欄をマスクする。エラーや文字列では秘密の値を伏せる。ただし、対象アプリが別の場所へ秘密を反映する画面まで自動で隠す保証はない。結果画面から開く方法は後述する。
 

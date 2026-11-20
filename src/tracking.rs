@@ -1173,6 +1173,7 @@ pub fn draft(
                 match_column: hit.column.clone(),
                 columns: vec![hit.column.clone()],
                 match_value: Some(value.template.clone()),
+                match_from: None,
                 before_actions: false,
             });
             out.checks.push(check(

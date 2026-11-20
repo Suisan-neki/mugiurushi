@@ -2017,11 +2017,11 @@ impl Session {
         scan
     }
 
-    /// 試験値に一致する行だけを、読取専用の照会で読む。
+    /// 検索値に一致する行だけを、読取専用の照会で読む。検索値は `browser::read_all` が決める。
     pub fn read_database(
         &self,
         probe: &crate::browser::DatabaseProbe,
-        test_value: &str,
+        value: &str,
     ) -> crate::browser::DatabaseRead {
         let mut read = crate::browser::DatabaseRead {
             id: probe.id.clone(),
@@ -2057,7 +2057,7 @@ impl Session {
             read.detail = "DBの識別子が不正".into();
             return read;
         }
-        let sql = crate::browser::query(service.spec.engine, probe, test_value);
+        let sql = crate::browser::query(service.spec.engine, probe, value);
         let Some(client) = service
             .spec
             .engine
@@ -2075,7 +2075,13 @@ impl Session {
                 read.exit_code = output.status.code();
                 if output.status.success() && output.stdout.len() <= 8192 {
                     read.text = String::from_utf8_lossy(&output.stdout).into_owned();
-                    read.detail = "基盤が試験値に一致するDBの行を直接読み出した".into();
+                    read.detail = match &probe.match_from {
+                        Some(from) => format!(
+                            "基盤が、読み出し {} の列 {} の値に一致するDBの行を直接読み出した",
+                            from.read, from.column
+                        ),
+                        None => "基盤が試験値に一致するDBの行を直接読み出した".into(),
+                    };
                 } else {
                     read.exit_code = read.exit_code.filter(|c| *c != 0);
                     read.detail =
