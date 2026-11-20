@@ -76,43 +76,47 @@ try {
   const shot = async name => page.screenshot({ path: join(output, `flow-live-${name}.png`), fullPage: true });
   await shot('1-prepare');
   stage('1 照合の準備を開いた');
-  const send = async () => {
+  // 送る前の確認の画面で確かめて送る（name は送るボタンの名前）。
+  const send = async name => {
     const preview = page.locator('[data-preview]'); await preview.waitFor();
     const before = sent.length;
     record.previews = [...(record.previews || []), sent.at(-1)?.body && { path: sent.at(-1).path, bytes: sent.at(-1).body.bytes, payload_keys: Object.keys(sent.at(-1).body.payload || {}) }];
-    await preview.locator('#agree').check();
-    await preview.getByRole('button', { name: 'この内容を送る' }).click();
+    await page.locator('#agree').check();
+    await page.getByRole('button', { name, exact: true }).click();
     for (let i = 0; i < 330 && sent.length === before; i++) await new Promise(r => setTimeout(r, 1000));
     const res = sent.at(-1); assert.equal(res.status, 200, JSON.stringify(res.body)); return res.body;
   };
 
   // 4. 照合：選んだファイルの抜粋と説明を送る。
+  const checked = await page.locator('[data-files] .file-row').evaluateAll(rows => rows.filter(r => !r.querySelector('input').checked).map(r => r.querySelector('.code').textContent));
+  await page.getByRole('button', { name: '次へ' }).click();
   await page.locator('#desc').fill('架空の診療所で、職員が患者ごとの連絡タスク（架空の氏名・電話番号・内容）を管理するのに使う。');
-  await page.getByRole('button', { name: '送信内容を確認する' }).click();
+  await page.getByRole('button', { name: '次へ' }).click();
   const scanPreview = await (async () => { await page.locator('[data-preview]').waitFor(); return sent.at(-1).body; })();
-  const checked = await page.locator('[data-files] tbody tr').evaluateAll(rows => rows.filter(r => r.querySelector('input').checked).map(r => r.children[1].textContent));
   assert.deepEqual(scanPreview.payload.system.excerpts.map(e => e.ref), checked, '選んだファイルだけを送る');
   record.files = checked;
-  const scan = await send();
+  const scan = await send('照合を始める');
   record.scan = { findings: scan.findings.length, testable: scan.findings.filter(f => f.verification.executable_check).length, questions: scan.questions, priorities: scan.findings.map(f => f.priority), model_call: scan.model_call,
     used_sources: scan.sources.filter(s => s.status === 'used').map(s => s.source_id) };
-  await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
+  await page.locator('[data-screen=scan]').waitFor();
   await shot('2-scan');
   stage('2 照合とヒアリング：実際のAIから受け取った', record.scan);
 
   // 5. ヒアリングに1件答え、試験の案を作る。
+  await page.getByRole('button', { name: /^次へ/ }).click();
+  await page.locator('[data-screen=hearing]').waitFor();
   const firstQuestion = page.locator('[data-question]').first();
   if (await firstQuestion.count()) await firstQuestion.locator('input[type=radio]').first().check();
   await page.getByRole('button', { name: '試験の案を作る' }).click();
-  const plan = await send();
+  const plan = await send('試験の案を作る');
   record.plan = { tests: plan.tests.map(t => ({ name: t.name, kind: t.kind, findings: t.finding_ids.length, observation: t.observation, steps: t.steps.length })), not_planned: plan.not_planned.length, model_call: plan.model_call };
   await page.locator('[data-test]').first().waitFor();
   await shot('3-plan');
   stage('3 検証案：実際のAIから試験の案を受け取った', record.plan);
 
-  // 6. 了承して試験を設定する（確認項目に登録する）。登録した確認項目の確かめる部分は、照合の候補と同じ数。
-  await page.getByRole('button', { name: '了承して試験を設定する' }).click();
-  await page.locator('[data-result]').first().waitFor({ timeout: 60000 });
+  // 6. 了承する（確認項目に登録し、試験の設定がある試験は実行する）。登録した確認項目の確かめる部分は、照合の候補と同じ数。
+  await page.getByRole('button', { name: /^了承して(実行|登録)する$/ }).click();
+  await page.locator('[data-result]').first().waitFor({ timeout: 600000 });
   const view = await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await page.locator('meta[name=review-token]').getAttribute('content') } })).json();
   const checks = view.workspace.checks.filter(c => c.id.startsWith('flow-'));
   assert.equal(checks.length, plan.tests.length, '了承した試験ごとに確認項目を登録する');

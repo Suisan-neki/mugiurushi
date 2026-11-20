@@ -77,11 +77,12 @@ try {
   await page.addInitScript(() => sessionStorage.setItem('eel-person', JSON.stringify({ name: '架空の開発者', role: 'developer' })));
   const poster = async (name, locator) => { if (locator) await locator.scrollIntoViewIfNeeded(); else await page.evaluate(() => window.scrollTo(0, 0)); await page.screenshot({ path: join(output, `poster-${name}.png`) }); };
   const shot = async (name, locator) => (locator || page).screenshot({ path: join(output, `clinic-demo-${name}.png`), ...(locator ? {} : { fullPage: true }) });
-  const send = async () => {
+  // 送る前の確認の画面で確かめて送る（name は送るボタンの名前）。
+  const send = async name => {
     const preview = page.locator('[data-preview]'); await preview.waitFor();
     const before = sent.length;
-    await preview.locator('#agree').check();
-    await preview.getByRole('button', { name: 'この内容を送る' }).click();
+    await page.locator('#agree').check();
+    await page.getByRole('button', { name, exact: true }).click();
     for (let i = 0; i < 330 && sent.length === before; i++) await new Promise(r => setTimeout(r, 1000));
     const res = sent.at(-1); assert.equal(res.status, 200, JSON.stringify(res.body)); return res.body;
   };
@@ -90,27 +91,32 @@ try {
   // 3. ガイドラインとの照合（1・2）。
   await page.goto(flowUrl.href);
   await page.locator('[data-files]').waitFor();
+  await page.getByRole('button', { name: '次へ' }).click();
   await page.locator('#desc').fill('架空の診療所で、職員が患者ごとの連絡タスク（架空の患者ID・内容）を追加し、一覧で読み直す。職員はそれぞれ担当する患者のタスクだけを扱う。');
-  await page.getByRole('button', { name: '送信内容を確認する' }).click();
-  const scan = await send();
-  await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
+  await page.getByRole('button', { name: '次へ' }).click();
+  const scan = await send('照合を始める');
+  await page.locator('[data-screen=scan]').waitFor();
   record.scan = { findings: scan.findings.length, testable: scan.findings.filter(f => f.verification.executable_check).map(f => ({ requirement: f.requirement, priority: f.priority, observation: f.verification.method, source: f.citations[0]?.document })), questions: scan.questions.length, model_call: scan.model_call };
   await shot('1-scan');
   await poster('1-guideline-scan');
   stage('照合：実際のAIから候補を受け取った', { findings: scan.findings.length, testable: record.scan.testable.length, questions: scan.questions.length });
   assert(record.scan.testable.length > 0, '試験で確かめられる候補が無い');
+  await page.getByRole('button', { name: /^次へ/ }).click();
+  await page.locator('[data-screen=hearing]').waitFor();
   const q = page.locator('[data-question]').first();
   if (await q.count()) await q.locator('input[type=radio]').first().check();
 
   // 4. 試験の案と了承（3）。
   await page.getByRole('button', { name: '試験の案を作る' }).click();
-  const plan = await send();
+  const plan = await send('試験の案を作る');
   await page.locator('[data-test]').first().waitFor();
   record.plan = { tests: plan.tests.map(t => ({ name: t.name, observation: t.observation, steps: t.steps, pass: t.pass, findings: t.finding_ids })), model_call: plan.model_call };
   await shot('2-plan');
   stage('試験の案：実際のAIから受け取った', { tests: plan.tests.length });
-  await page.getByRole('button', { name: '了承して試験を設定する' }).click();
-  await page.locator('[data-result]').first().waitFor({ timeout: 60000 });
+  // 試験の設定がAIの案にある試験は、了承すると自動で実行する。ない試験は登録だけして、下で人が設定する。
+  await page.getByRole('button', { name: /^了承して(実行|登録)する$/ }).click();
+  await page.locator('[data-result]').first().waitFor({ timeout: 600000 });
+  record.plan.auto = plan.tests.filter(t => t.trial).map(t => t.name);
   stage('了承して確認項目に登録した');
 
   // 5. 試験の設定と実行。結果の画面の「試験を設定して実行する」から設定画面を開き、人が入力する内容を入力する。
@@ -132,6 +138,9 @@ try {
     // 結果の画面のこの試験の行にある「試験を設定して実行する」のリンクから開く。
     await page.goto(flowUrl.href); await page.locator('[data-result]').first().waitFor();
     const checkId = (await view(page, url)).flowChecks[n];
+    // 自動で実行した試験は、人が設定し直さない。
+    if (test.trial) { const v = await view(page, url); const cv = v.view.checks.find(c => c.check_id === checkId); record.trials.push({ test: test.name, config: 'auto', executed: cv.evidence.some(e => e.applicable), verdict: cv.verdict, aspects: cv.coverage.aspects.map(a => ({ id: a.id, status: a.status })) }); continue; }
+    for (const summary of await page.locator('[data-result] details:not([open]) > summary').all()) await summary.click();
     const anchor = page.locator(`[data-result] a[href*="check=${encodeURIComponent(checkId)}"]`).first();
     assert(await anchor.count(), `結果の画面に ${checkId} の設定へのリンクが無い`);
     await anchor.click();

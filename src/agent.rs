@@ -1056,6 +1056,19 @@ fn trial_of(t: &Value, finding_ids: &[String], entrypoints: &[String]) -> Result
     if links.len() != finding_ids.len() {
         return Err("判定条件に対応づけていない候補があります".into());
     }
+    // 実行の要求（/api/v1/execute）と同じ検査を、案を受け取る段階で行う。了承した後に実行で拒否される設定を、自動で実行できる案として示さない。
+    let spec: crate::trial::TrialSpec = serde_json::from_value(json!({
+        "schema_version": 1, "fault": "normal", "storage": storage, "readback": readback, "checks": checks,
+    }))
+    .map_err(|e| format!("試験の設定の形が不正です: {e}"))?;
+    crate::trial::validate(&spec, false, false, false, |p| {
+        if safe_relative(p) {
+            Ok(())
+        } else {
+            Err(invalid("作業ディレクトリの中の相対パスにしてください"))
+        }
+    })
+    .map_err(|e| format!("麦漆が実行できない設定です: {e}"))?;
     Ok(
         json!({"entrypoint": entrypoint, "args": arguments, "storage": storage, "readback": readback, "checks": checks, "links": links}),
     )
@@ -1445,6 +1458,13 @@ mod tests {
         bad(json!({"links": []}));
         bad(json!({"links": [{"finding_id": "f9", "check_ids": ["c2"]}]}));
         bad(json!({"args": ["a\nb"]}));
+        // 実行側の上限（確認する範囲は200バイト、文字列は1024バイト）を超える日本語の設定も、案の段階で捨てる。
+        bad(
+            json!({"checks": [{"id": "c2", "scope": "あ".repeat(70), "method": "readback_output", "expect": "not_contains", "text": "{{test_value}}"}], "links": [{"finding_id": "f1", "check_ids": ["c2"]}]}),
+        );
+        bad(
+            json!({"checks": [{"id": "c2", "scope": "範囲", "method": "readback_output", "expect": "not_contains", "text": "あ".repeat(400)}], "links": [{"finding_id": "f1", "check_ids": ["c2"]}]}),
+        );
         let mut browser = cli_test(good_trial());
         browser["kind"] = json!("browser");
         assert!(super::trial_of(&browser, &ids, &entry).is_err());

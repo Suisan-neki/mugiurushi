@@ -179,6 +179,8 @@ async function repoScreen() {
 
 /** リポジトリを読み込み、動かせるかを判定してから、続きの画面へ進む。commit はブランチの一覧で見たコミット。 */
 async function openRepository(/** @type {string} */ url, /** @type {string} */ branch, /** @type {string} */ commit) {
+  // 別の対象を読み込むので、前の対象で外したファイルの選択は使わない（読み込んだ対象の記録か既定の規則から作り直す）。
+  skipped = null;
   state.url = url; state.branch = branch;
   const name = url.replace(/^https:\/\/github\.com\//, '').replace(/\/$/, '');
   const w = waiting({ sub: '1 照合の準備', title: 'リポジトリを読み込んでいます', lead: `${name} の ${branch} ブランチを読み込んでいます。`,
@@ -780,10 +782,14 @@ let registering = false;
 async function runApproved() {
   if (registering) return; // 連打で同じ試験を二重に登録しない
   const r = state.record; const findings = candidatesOf(r);
-  const tests = r.plan.tests.filter((/** @type {any} */ t) => r.chosen?.[t.id] !== false && !approvedCheck(r, t));
-  if (!tests.length && approvedTests(r).length) return go('result');
-  if (!tests.length) throw Error('了承する試験を選んでください。');
-  const runs = tests.filter((/** @type {any} */ t) => t.trial);
+  await loadCase();
+  const chosen = r.plan.tests.filter((/** @type {any} */ t) => r.chosen?.[t.id] !== false);
+  // 登録と実行を分けて扱う。前回、登録の後に取得や実行で止まった試験は、登録し直さずに実行だけをやり直す。
+  const executed = (/** @type {any} */ t) => { const id = approvedCheck(r, t); return !!id && !!state.view.checks.find((/** @type {any} */ c) => c.check_id === id)?.evidence?.some((/** @type {any} */ e) => e.applicable); };
+  const tests = chosen.filter((/** @type {any} */ t) => !approvedCheck(r, t));
+  const runs = chosen.filter((/** @type {any} */ t) => t.trial && !executed(t));
+  if (!tests.length && !runs.length && approvedTests(r).length) return go('result');
+  if (!tests.length && !runs.length) throw Error('了承する試験を選んでください。');
   registering = true;
   const w = waiting({ sub: '4 結果', title: runs.length ? '検証しています' : '確認項目に登録しています',
     lead: runs.length ? '検証基盤が試験環境でアプリを動かし、出力と保存先を記録しています。' : '了承した試験を確認項目に登録しています。',
@@ -794,6 +800,13 @@ async function runApproved() {
     /** @type {Map<string, any>} */ const recipes = new Map();
     // 1件ずつ登録して控える。途中で失敗しても、登録できた分は了承済みとして残り、やり直しで二重に作らない。
     for (const t of tests) { const { id, recipe } = await register(t, findings); approve(r, t, id); if (recipe) recipes.set(t.id, recipe); await saveRecord(); }
+    // 登録済みで未実行の試験は、登録した確認項目と了承した試験の設定から、実行の要求を作り直す。
+    for (const t of runs) if (!recipes.has(t.id)) {
+      await loadCase();
+      const id = /** @type {string} */ (approvedCheck(r, t));
+      const check = state.view.workspace.checks.find((/** @type {any} */ c) => c.id === id);
+      recipes.set(t.id, recipeOf(check, t.trial, { assertion: 'eel.trial', subject: id }));
+    }
     if (runs.length) await api('POST', '/api/v1/prepare', { repository: state.source.repository, commit: state.source.commit });
     w.next();
     for (const t of runs) {
@@ -982,7 +995,7 @@ async function retestScreen() {
   const load = primary('このブランチを読み込む', () => guarded(async () => {
     const b = list?.branches.find((/** @type {any} */ x) => x.name === /** @type {HTMLSelectElement} */ (select).value);
     if (!b) throw Error('ブランチを選んでください。');
-    skipped = null; await openRepository(`https://github.com/${state.source.repository}`, b.name, b.commit);
+    await openRepository(`https://github.com/${state.source.repository}`, b.name, b.commit);
   }));
   screen({
     sub: '5 修正用のプロンプト　再試験', title: '修正したブランチで試験し直す', lead: '修正したブランチを読み込むと、同じ流れで照合と試験をやり直し、前回の結果と比べられます。',

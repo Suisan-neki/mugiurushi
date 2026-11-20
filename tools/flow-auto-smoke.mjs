@@ -133,10 +133,18 @@ try {
   await page.locator('[data-test=t-access] details summary').click();
   assert.match(await page.locator('[data-test=t-access] [data-trial=auto]').innerText(), /python3 monshin\.py --dir \. --user P001 answer P001 "\{\{test_value\}\}"/);
   await shot('5-plan');
+  // 固定コミットの取得が一度だけ失敗した場合：登録した試験は残り、もう一度押すと、登録し直さずに実行だけをやり直す。
+  let failPrepare = true;
+  await page.route('**/api/v1/prepare', route => { if (failPrepare) { failPrepare = false; return route.fulfill({ status: 500, json: { error: '合成の取得の失敗' } }); } return route.continue(); });
+  await page.getByRole('button', { name: '了承して実行する' }).click();
+  await page.locator('#alert .alert', { hasText: '合成の取得の失敗' }).waitFor();
+  await page.locator('[data-screen=plan]').waitFor();
   await page.getByRole('button', { name: '了承して実行する' }).click();
   // 実行中の画面で、試験ごとに完了の印が付く。
   await page.locator('[data-screen=waiting] [data-progress]').first().waitFor();
   await page.locator('[data-screen=result]').waitFor({ timeout: 120000 });
+  const registered = (await (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await page.locator('meta[name=review-token]').getAttribute('content') } })).json()).workspace.checks.filter(c => c.id.startsWith('flow-'));
+  assert.equal(registered.length, 2, 'やり直しで確認項目を二重に作らない');
   const states = await page.locator('[data-result]').evaluateAll(rows => rows.map(r => [r.getAttribute('data-finding'), r.getAttribute('data-result')]));
   assert.deepEqual(states, [['f-1', 'ng'], ['f-2', 'ok']], JSON.stringify(states));
   assert.match(await page.locator('h1').innerText(), /満たさない項目が1件/);
