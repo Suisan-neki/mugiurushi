@@ -2,7 +2,8 @@
 // AIエージェントの応答は偽物に差し替えるが、ブランチの一覧・読み込み・動かせるかの判定・試験の実行（local方式）・判定は本物。
 // リポジトリの登録 → 読み込み → ファイルを外す → 説明 → 送る内容の確認 → 照合 → ヒアリング → 試験の案 → 了承して実行 →
 // 結果（受付の職員にも回答が見える版なので、閲覧の試験は「満たさない」、保存先の試験は「満たす」）→ 修正用のプロンプト →
-// 修正版のブランチで同じ試験を実行し、閲覧の試験が「満たす」に変わることを確かめる。
+// 修正版のブランチで、了承した試験を引き継いで実行し直し、閲覧の試験が「満たす」に変わることを確かめる。
+// そのあと、同じブランチで照合からやり直す操作も残っていることを確かめる。
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
@@ -78,7 +79,7 @@ try {
       { id: 't-access', name: '権限のない職員で、問診の回答を開く', kind: 'cli', finding_ids: ['f-1'], steps: ['患者P001として問診に答える', '受付の職員として回答を表示する'], pass: ['回答の内容が表示されない'], observation: 'readback_output', observation_label: '読み出しの出力',
         trial: { entrypoint: 'monshin.py', args: args('--user', 'P001', 'answer', 'P001', '{{test_value}}'), storage: null, readback: { entrypoint: 'monshin.py', args: args('--user', 'reception_b', 'show', 'P001') },
           checks: [{ id: 'c1', scope: '回答を保存できる', method: 'exit_code', expect: 'zero', text: null, target: null }, { id: 'c2', scope: '受付の職員に回答が出ない', method: 'readback_output', expect: 'not_contains', text: '{{test_value}}', target: null }],
-          links: [{ finding_id: 'f-1', check_ids: ['c2'], observation: 'readback_output' }] } },
+          links: [{ finding_id: 'f-1', check_ids: ['c2'], observation: 'readback_output' }] }, trial_note: '医師による表示は確かめない' },
       { id: 't-store', name: '回答の保存先を確かめる', kind: 'cli', finding_ids: ['f-2'], steps: ['患者P001として問診に答える', '保存先の記録を読み出す'], pass: ['回答がP001の記録に保存される'], observation: 'stored_file', observation_label: '保存先',
         trial: { entrypoint: 'monshin.py', args: args('--user', 'P001', 'answer', 'P001', '{{test_value}}'), storage: 'answers/P001.tsv', readback: null,
           checks: [{ id: 'c1', scope: 'P001の記録に保存される', method: 'stored_file', expect: 'contains', text: '{{test_value}}', target: null }],
@@ -122,8 +123,18 @@ try {
   await page.getByRole('button', { name: '次へ：質問に答える' }).click();
   await page.getByRole('heading', { name: '院外から使いますか' }).waitFor();
   await page.getByLabel('いいえ').check();
-  await page.getByRole('button', { name: '試験の案を作る' }).click();
-  await page.locator('[data-preview]').waitFor();
+  // 送る内容の確認は、ヒアリングの画面の中に出る（画面を増やさない）。確かめた印を付けるまで送れない。回答を変えたら確かめ直す。
+  const makePlan = page.getByRole('button', { name: '試験の案を作る' });
+  await makePlan.click();
+  await page.locator('[data-screen=hearing] [data-plan-send] [data-preview]').waitFor();
+  assert.match(await page.locator('[data-plan-send]').innerText(), /回答\s*院外から使いますか：いいえ/);
+  assert(await makePlan.isDisabled(), '確かめる前は送れない');
+  assert.equal(requests.plan.filter(b => b.confirm).length, 0, '確かめる前は送らない');
+  await page.getByLabel('はい').check();
+  assert.equal(await page.locator('[data-preview]').count(), 0, '回答を変えたら、確かめ直す');
+  await page.getByLabel('いいえ').check();
+  await makePlan.click();
+  await page.locator('[data-screen=hearing] [data-plan-send] [data-preview]').waitFor();
   assert.equal(requests.plan.at(-1).run, true, '動かせると判定したので、試験の設定も求める');
   await page.locator('#agree').check();
   await page.getByRole('button', { name: '試験の案を作る' }).click();
@@ -132,6 +143,12 @@ try {
   assert.deepEqual(requests.plan.at(-1).answers, [{ question: '院外から使いますか', answer: 'いいえ' }]);
   await page.locator('[data-test=t-access] details summary').click();
   assert.match(await page.locator('[data-test=t-access] [data-trial=auto]').innerText(), /python3 monshin\.py --dir \. --user P001 answer P001 "\{\{test_value\}\}"/);
+  // 合否は対応づけた判定条件だけで決まる。合否に使わない条件を、了承の前に示す。候補が1つの試験では、候補の名前は繰り返さない。
+  assert.match(await page.locator('[data-test=t-access] [data-trial-check=c1]').innerText(), /記録するだけで、合否には使いません/);
+  assert.equal(await page.locator('[data-test=t-access] [data-trial-check=c2] [data-unlinked]').count(), 0);
+  assert.equal(await page.locator('[data-test=t-access] [data-trial-link]').count(), 0);
+  assert.match(await page.locator('[data-test=t-access] [data-trial-note]').innerText(), /AIの注記：医師による表示は確かめない/);
+  assert.equal(await page.locator('[data-test=t-store] [data-trial-note]').count(), 0);
   await shot('5-plan');
   // 固定コミットの取得が一度だけ失敗した場合：登録した試験は残り、もう一度押すと、登録し直さずに実行だけをやり直す。
   let failPrepare = true;
@@ -161,24 +178,20 @@ try {
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), prompt);
   await shot('7-prompt');
 
-  // 2. 修正版のブランチを読み込み、同じ流れで試験し直す。前回との比較で「解消」になる。
+  // 2. 修正版のブランチを読み込み、了承した試験をそのまま実行し直す。照合と試験の案は作り直さない（AIへ送らない）。前回との比較で「解消」になる。
   await page.getByRole('link', { name: '再試験へ' }).click();
   await page.locator('#retest-branch option[value="fix/answer-access"]').waitFor({ state: 'attached' });
   await page.locator('#retest-branch').selectOption('fix/answer-access');
-  await page.getByRole('button', { name: 'このブランチを読み込む' }).click();
-  await page.locator('[data-screen=files]').waitFor({ timeout: 30000 });
+  const sent = [requests.scan.length, requests.plan.length];
+  await page.getByRole('button', { name: '了承した試験を、このブランチで実行し直す' }).click();
+  await page.locator('[data-screen=plan]').waitFor({ timeout: 30000 });
   assert.equal(await page.locator('[data-branch]').innerText(), 'fix/answer-access');
-  await page.getByRole('button', { name: '次へ' }).click();
-  await page.getByRole('button', { name: '次へ' }).click();
-  await page.locator('#agree').check(); await page.getByRole('button', { name: '照合を始める' }).click();
-  await page.locator('[data-screen=scan]').waitFor({ timeout: 30000 });
-  await page.getByRole('button', { name: '次へ：質問に答える' }).click();
-  await page.getByLabel('いいえ').check();
-  await page.getByRole('button', { name: '試験の案を作る' }).click();
-  await page.locator('#agree').check(); await page.getByRole('button', { name: '試験の案を作る' }).click();
-  await page.locator('[data-test]').first().waitFor({ timeout: 30000 });
+  assert.match(await page.locator('[data-carried]').innerText(), new RegExp(`前のコミット ${commits.main.slice(0, 7)} のコードから作ったものを引き継いでいます`));
+  assert.equal(await page.locator('[data-test]').count(), 2);
+  assert.equal(await page.locator('[data-test] a', { hasText: '登録済み' }).count(), 0, '了承は引き継がない');
   await page.getByRole('button', { name: '了承して実行する' }).click();
   await page.locator('[data-screen=result]').waitFor({ timeout: 120000 });
+  assert.deepEqual([requests.scan.length, requests.plan.length], sent, '実行し直しでは、照合も試験の案もAIへ送らない');
   const after = await page.locator('[data-result]').evaluateAll(rows => rows.map(r => r.getAttribute('data-result')));
   assert.deepEqual(after, ['ok', 'ok'], JSON.stringify(after));
   await page.locator('.stepper button', { hasText: '修正用のプロンプト' }).count().then(n => assert.equal(n, 1));
@@ -186,7 +199,14 @@ try {
   await page.getByRole('link', { name: '再試験へ' }).click();
   await page.locator('[data-compare-table]').waitFor();
   assert.equal(await page.locator('[data-compare=解消]').count(), 1);
+  assert.match(await page.locator('[data-compare=解消]').innerText(), /閲覧の権限がない職員に、問診の回答を表示しない/);
   await shot('8-retest');
+  // 3. 照合からやり直す操作も残す。main を読み込み直すと、main の記録（結果の画面）に戻る。
+  await page.locator('#retest-branch').selectOption('main');
+  await page.getByRole('button', { name: '照合からやり直す' }).click();
+  await page.locator('[data-screen=result]').waitFor({ timeout: 30000 });
+  assert.equal(await page.locator('[data-branch]').innerText(), 'main');
+  assert.equal(await page.locator('[data-carried]').count(), 0);
   assert.deepEqual(errors, []);
   console.log('flow-auto-smoke: ok');
 } catch (e) {

@@ -5,7 +5,7 @@
 // 試験の設定（起動のしかた・判定の条件）をAIが案に含めた場合は、試験の案の画面で中身を示し、了承した試験だけを
 // 既存の試験の設定画面と同じAPIの順（確認項目の登録 → 判定条件の対応づけ → 固定コミットの取得 → 実行）で実行する。
 import { apiRequest as api } from './api.js';
-import { applyScan, applyPlan, applyInvestigation, runConcerns, planEvidence, carryableConcerns, carriedInvestigation, byLatestSave, concernSource, concernRequirement, concernEvidenceText, concernPlanCandidate, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
+import { applyScan, applyPlan, applyInvestigation, runConcerns, planEvidence, carryableConcerns, carriedInvestigation, carryablePlan, carriedPlan, byLatestSave, concernSource, concernRequirement, concernEvidenceText, concernPlanCandidate, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
 
 /** @param {string} tag @param {Record<string, any>} [attrs] @param {...any} children */
 function h(tag, attrs = {}, ...children) {
@@ -33,7 +33,7 @@ const PRIO = { high: '高', medium: '中', low: '低' };
 const PRIO_ORDER = { high: 0, medium: 1, low: 2 };
 const STEPS = ['照合の準備', '照合とヒアリング', '検証案の了承', '結果', '修正用のプロンプト'];
 /** 画面ごとの手順の番号。 */
-const STEP_OF = { repo: 1, loading: 1, files: 1, describe: 1, confirmScan: 1, scan: 2, hearing: 2, confirmPlan: 2, plan: 3, result: 4, prompt: 5, retest: 5 };
+const STEP_OF = { repo: 1, loading: 1, files: 1, describe: 1, confirmScan: 1, scan: 2, hearing: 2, plan: 3, result: 4, prompt: 5, retest: 5 };
 const METHOD_LABEL = { exit_code: '終了コード', stdout: '標準出力', stderr: '標準エラー', stored_file: '保存先のファイル', readback_output: '読み出しの出力' };
 const EXPECT_LABEL = (/** @type {any} */ c) => ({ zero: '0で終わる', nonzero: '0以外で終わる', contains: `「${c.text}」を含む`, not_contains: `「${c.text}」を含まない` })[/** @type {'zero'} */ (c.expect)] || c.expect;
 
@@ -77,7 +77,7 @@ function renderChrome() {
 function go(/** @type {string} */ screen) { state.screen = screen; render(); window.scrollTo(0, 0); }
 function render() {
   renderChrome();
-  const f = /** @type {any} */ ({ repo: repoScreen, files: filesScreen, describe: describeScreen, confirmScan: confirmScanScreen, scan: scanScreen, hearing: hearingScreen, confirmPlan: confirmPlanScreen, plan: planScreen, result: resultScreen, prompt: promptScreen, retest: retestScreen })[state.screen];
+  const f = /** @type {any} */ ({ repo: repoScreen, files: filesScreen, describe: describeScreen, confirmScan: confirmScanScreen, scan: scanScreen, hearing: hearingScreen, plan: planScreen, result: resultScreen, prompt: promptScreen, retest: retestScreen })[state.screen];
   if (f) guarded(async () => { await f(); });
 }
 
@@ -178,7 +178,7 @@ async function repoScreen() {
 }
 
 /** リポジトリを読み込み、動かせるかを判定してから、続きの画面へ進む。commit はブランチの一覧で見たコミット。 */
-async function openRepository(/** @type {string} */ url, /** @type {string} */ branch, /** @type {string} */ commit) {
+async function openRepository(/** @type {string} */ url, /** @type {string} */ branch, /** @type {string} */ commit, carry = false) {
   // 別の対象を読み込むので、前の対象で外したファイルの選択は使わない（読み込んだ対象の記録か既定の規則から作り直す）。
   skipped = null;
   state.url = url; state.branch = branch;
@@ -194,9 +194,18 @@ async function openRepository(/** @type {string} */ url, /** @type {string} */ b
     state.runnable = await api('POST', '/api/v1/runnable', { repository: state.source.repository, commit: state.source.commit }).catch((/** @type {any} */ e) => ({ runnable: false, blockers: [e instanceof Error ? e.message : String(e)], entrypoints: [], notes: [] }));
     w.next(state.runnable.runnable ? '動かせる' : '動かせない');
     await loadFlow();
+    // 再試験：前のコミットで了承した試験の案を引き継ぐ。このコミットに照合や案の記録があれば、それを残して引き継がない。
+    /** @type {string} */ let notCarried = '';
+    if (carry) {
+      const c = carryablePlan(state.flow?.records, state.source.repository, state.source.commit);
+      if (!c) notCarried = '引き継げる了承済みの試験がないため、照合から進めます。';
+      else if (state.record?.scan || state.record?.plan) notCarried = 'このコミットには照合か試験の案の記録があるため、前回の試験は引き継ぎませんでした。';
+      else { state.record = carriedPlan(c.record, c.from, (state.source.inventory || []).map((/** @type {any} */ f) => f.path), state.runnable?.entrypoints || []); await saveRecord(); }
+    }
     const u = new URL(location.href); u.search = new URLSearchParams({ url, ref: state.source.commit, branch }).toString(); history.replaceState(null, '', u);
     await w.done(`${name} の ${branch} ブランチを読み込みました。${state.runnable.runnable ? '試験環境で動かせます。' : 'コードから確かめます。'}`);
     go(resumeScreen());
+    if (notCarried) showError(notCarried);
   } catch (e) { go('repo'); showError(e); }
 }
 async function loadFlow() {
@@ -323,44 +332,54 @@ function howToCheck() {
 
 /** 送る前の確認の画面。サーバーが組み立てた内容をそのまま示し、確かめたときだけ送る。
  * SHA-256は人が読み比べる値ではないので「技術的な詳細」に置き、送るときは画面が同じ値を添える（AGENTS.md）。 */
-async function confirmScreen(/** @type {{ sub: string, title: string, lead: string, path: string, body: any, rows: any[], send: string, back: () => any, wait: { sub: string, title: string, lead: string, items: string[], note: string }, done: (r: any) => Promise<{ lead: string, next: string }> }} */ o) {
-  setStatus('送る内容を組み立てています。');
-  const preview = await api('POST', o.path, o.body);
-  // 送信先のモデルは送る直前の状態を問い合わせる。運営者がAIエージェントの設定を変えている場合があるため。
-  state.agent = await api('GET', '/api/v1/agent').catch(() => state.agent);
-  setStatus('');
+/** 送る前の確認の中身：送信先（AIエージェントと、その先のモデル）、送るもの、大きさ、送る内容の全文、SHA-256、確かめた印。
+ * 印を付け、モデルを確かめられたときだけ、送るボタン（send）を押せるようにする。送信先を示してから送る規則のため（AGENTS.md）。 */
+function confirmPanel(/** @type {any} */ preview, /** @type {any[]} */ extraRows, /** @type {HTMLElement} */ send) {
   const model = state.agent?.model, endpoint = state.agent?.endpoint;
   const agree = h('input', { type: 'checkbox', id: 'agree' });
-  const send = primary(o.send, () => guarded(async () => {
-    const w = waiting(o.wait);
-    try {
-      w.next();
-      const r = await api('POST', o.path, { ...o.body, confirm: { payload_sha256: preview.payload_sha256, synthetic_only: /** @type {HTMLInputElement} */ (agree).checked } });
-      w.next();
-      const after = await o.done(r);
-      await w.done(after.lead);
-      go(after.next);
-    } catch (e) { o.back(); throw e; }
-  }));
   send.setAttribute('disabled', '');
-  // モデルを確かめられない場合は送らせない。送信先を示してから送る規則のため（AGENTS.md）。
   agree.addEventListener('change', () => /** @type {HTMLInputElement} */ (agree).checked && model ? send.removeAttribute('disabled') : send.setAttribute('disabled', ''));
   const rows = [
     ['送信先', [endpoint ? ['照合用のAIエージェント ', h('span', { class: 'code' }, endpoint)] : '照合用のAIエージェント', model
       ? h('div', { 'data-agent-model': '' }, 'その先のモデル ', h('span', { class: 'code' }, model))
       : h('div', { class: 'alert', 'data-agent-model-missing': '' }, `その先のモデルを確かめられないため、送れません。${state.agent?.model_error || ''}`)]],
-    ...o.rows,
+    ...extraRows,
     ['大きさ', `${count(preview.bytes)}バイト`],
   ].filter(Boolean);
-  screen({
-    sub: o.sub, title: o.title, lead: o.lead, name: 'confirm',
-    body: [card({ 'data-preview': '' }, h('dl', { class: 'facts' }, rows.map((/** @type {any} */ [k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
-      h('details', {}, h('summary', {}, '送る内容をすべて見る'), h('pre', { class: 'payload' }, JSON.stringify(preview.payload, null, 2))),
-      h('details', { class: 'tech' }, h('summary', {}, '技術的な詳細'),
-        h('p', { class: 'note' }, '送信記録と照らし合わせるための値（SHA-256）'), h('p', { class: 'code', 'data-payload-sha256': '' }, preview.payload_sha256))),
-      h('label', { class: 'agree' }, agree, h('span', {}, '公開してよいコードと架空のデータだけで、実在の患者の情報・認証情報・生のログを含まないことを確かめました'))],
-    back: o.back, primary: send,
-  });
+  return { agree, nodes: [card({ 'data-preview': '' }, h('dl', { class: 'facts' }, rows.map((/** @type {any} */ [k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
+    h('details', {}, h('summary', {}, '送る内容をすべて見る'), h('pre', { class: 'payload' }, JSON.stringify(preview.payload, null, 2))),
+    h('details', { class: 'tech' }, h('summary', {}, '技術的な詳細'),
+      h('p', { class: 'note' }, '送信記録と照らし合わせるための値（SHA-256）'), h('p', { class: 'code', 'data-payload-sha256': '' }, preview.payload_sha256))),
+  h('label', { class: 'agree' }, agree, h('span', {}, '公開してよいコードと架空のデータだけで、実在の患者の情報・認証情報・生のログを含まないことを確かめました'))] };
+}
+/** 送る内容を組み立て、送信先のモデルを問い合わせる。モデルは送る直前の状態を問い合わせる（運営者がAIエージェントの設定を変えている場合があるため）。 */
+async function loadPreview(/** @type {string} */ path, /** @type {any} */ body) {
+  setStatus('送る内容を組み立てています。');
+  try {
+    const preview = await api('POST', path, body);
+    state.agent = await api('GET', '/api/v1/agent').catch(() => state.agent);
+    return preview;
+  } finally { setStatus(''); }
+}
+/** 人が確かめた内容（SHA-256）を添えて送り、待つ画面を出して、終わったら次の画面へ進む。失敗したら back で元の画面に戻る。 */
+async function sendConfirmed(/** @type {{ path: string, body: any, back: () => any, wait: { sub: string, title: string, lead: string, items: string[], note: string }, done: (r: any) => Promise<{ lead: string, next: string }> }} */ o, /** @type {any} */ preview, /** @type {HTMLElement} */ agree) {
+  const synthetic = /** @type {HTMLInputElement} */ (agree).checked;
+  const w = waiting(o.wait);
+  try {
+    w.next();
+    const r = await api('POST', o.path, { ...o.body, confirm: { payload_sha256: preview.payload_sha256, synthetic_only: synthetic } });
+    w.next();
+    const after = await o.done(r);
+    await w.done(after.lead);
+    go(after.next);
+  } catch (e) { o.back(); throw e; }
+}
+async function confirmScreen(/** @type {{ sub: string, title: string, lead: string, path: string, body: any, rows: any[], send: string, back: () => any, wait: { sub: string, title: string, lead: string, items: string[], note: string }, done: (r: any) => Promise<{ lead: string, next: string }> }} */ o) {
+  const preview = await loadPreview(o.path, o.body);
+  /** @type {any} */ let panel = null;
+  const send = primary(o.send, () => guarded(() => sendConfirmed(o, preview, panel.agree)));
+  panel = confirmPanel(preview, o.rows, send);
+  screen({ sub: o.sub, title: o.title, lead: o.lead, name: 'confirm', body: panel.nodes, back: o.back, primary: send });
 }
 const fileList = (/** @type {string[]} */ files) => h('details', { class: 'inline' }, h('summary', {}, `${files.length}件（`, h('span', { class: 'code' }, files[0] || ''), files.length > 1 ? ' ほか）' : '）'),
   h('p', { class: 'code small' }, files.join('、')));
@@ -549,7 +568,7 @@ async function scanScreen() {
     sub: '2 照合とヒアリング　1/2',
     title: r.scan ? (found.length ? `不足がありそうな点が${found.length}件見つかりました` : '試験で確かめられる点は見つかりませんでした') : 'コードから出た懸念',
     lead: r.scan ? 'ガイドラインとコードを照らし合わせ、満たしていない可能性がある項目を優先度の順に並べました。' : '',
-    body: [h('div', { class: 'stack' }, list), r.scan ? h('p', { class: 'note small', 'data-scan-count': '' }, `候補 ${(r.scan.findings || []).length}件のうち、試験で確かめられる ${found.length}件を示しています${other ? `（文書の確認などで確かめる ${other}件は除いています）` : ''}。${r.scan.priority_rule || '優先度は決まった規則で付けています'}`) : null,
+    body: [carriedNote(r.scan?.carried_from, 'この照合の結果'), h('div', { class: 'stack' }, list), r.scan ? h('p', { class: 'note small', 'data-scan-count': '' }, `候補 ${(r.scan.findings || []).length}件のうち、試験で確かめられる ${found.length}件を示しています${other ? `（文書の確認などで確かめる ${other}件は除いています）` : ''}。${r.scan.priority_rule || '優先度は決まった規則で付けています'}`) : null,
       concernsView(r),
       h('details', { class: 'trace', 'data-trace': '', open: !r.scan || !!r.investigation }, h('summary', {}, '操作からコードをたどる（任意）'), investigationView(() => r.summary || ''))],
     back: () => go('files'),
@@ -567,17 +586,36 @@ async function hearingScreen() {
     q.why ? h('p', { class: 'note' }, q.why) : null,
     h('div', { class: 'choice-grid' }, q.options.map((/** @type {string} */ o) => {
       const radio = h('input', { type: 'radio', name: q.id, checked: answerTo(r, q) === o });
-      radio.addEventListener('change', () => setAnswer(r, q, o));
+      radio.addEventListener('change', () => { setAnswer(r, q, o); reset(); });
       return h('label', { class: 'choice' }, radio, h('span', {}, o));
     })));
   const single = qs.length === 1 && !askConcerns.length;
-  const toPlan = () => {
+  // 試験の案を作るために送る内容は、この画面の中で確かめる（画面を増やさない）。
+  // 1回目の「試験の案を作る」で送る内容を組み立てて示し、確かめた印を付けると、同じボタンで送れる。回答を変えたら、確かめ直す。
+  const sendOut = h('div', { 'data-plan-send': '' });
+  /** @type {any} */ let ready = null;
+  const reset = () => { ready = null; fill(sendOut); toPlan.removeAttribute('disabled'); };
+  const toPlan = primary('試験の案を作る', () => guarded(async () => {
+    if (ready) return sendConfirmed(ready.send, ready.preview, ready.agree);
     const concerns = chosenConcerns(r);
     const findings = [...testable().map((/** @type {any} */ f) => ({ id: f.id, requirement: f.requirement, how: f.verification.how || '' })), ...concerns.map(concernCandidate)];
     if (!findings.length) return showError('試験で確かめられる項目がありません。');
     if (findings.length > 24) return showError('試験の案の候補は24件までです。懸念の選択を減らしてください。');
-    go('confirmPlan');
-  };
+    const at = planGeneration(r);
+    const answers = answersOf(r);
+    const send = {
+      path: '/api/v1/agent/plan', back: () => go('hearing'),
+      body: { repository: state.source.repository, commit: state.source.commit, files: r.files || [], evidence: planEvidence(concerns), summary: r.summary || '', answers, findings, run: !!state.runnable?.runnable, ...screenOf(r) },
+      wait: { sub: '3 検証案の了承', title: '試験の案を作っています', lead: 'AIエージェントが、不足がありそうな点を確かめる試験を考えています。',
+        items: ['確認候補と回答をAIエージェントに送る', '試験の手順と合格の条件を待つ', '試験の案を記録する'], note: '応答までに1分ほどかかることがあります。' },
+      done: async (/** @type {any} */ p) => { applyPlan(r, p, at, concerns); await saveRecord(); return { lead: `${p.tests.length}件の試験の案ができました。`, next: 'plan' }; },
+    };
+    const preview = await loadPreview(send.path, send.body);
+    const panel = confirmPanel(preview, [['確認候補', `${findings.length}件`], ['ファイル', fileList(r.files || [])], answers.length ? ['回答', answers.map(a => `${a.question}：${a.answer}`).join('／')] : null, ['確かめ方', howToCheck()]], toPlan);
+    fill(sendOut, h('h2', {}, 'AIエージェントに送る内容を確かめる'), h('p', { class: 'note' }, '照合で読んだファイルと、確認候補と、ヒアリングの回答を送ります。確かめた印を付けて、もう一度「試験の案を作る」を押してください。'), panel.nodes);
+    ready = { send, preview, agree: panel.agree };
+    sendOut.scrollIntoView({ block: 'nearest' });
+  }));
   screen({
     sub: '2 照合とヒアリング　2/2',
     title: single ? qs[0].text : qs.length || askConcerns.length ? 'コードだけでは判断できないことに答えてください' : '確かめたいことはありません',
@@ -587,15 +625,17 @@ async function hearingScreen() {
       h('details', { 'data-ask': '', open: (r.asks || []).length > 0 }, h('summary', {}, 'ガイドラインに質問する（任意）'),
         h('label', { for: 'ask', class: 'field-label' }, '聞きたいこと'), ask,
         h('div', { class: 'actions' }, btn('質問を送る', () => {
+          reset(); // 確認のダイアログと、この画面の確認を同時に出さない
           const q = /** @type {HTMLTextAreaElement} */ (ask).value.trim(); if (!q) return showError('質問を書いてください。');
           return confirmAndSend(askOut, '/api/v1/agent/ask', { question: q }, async (/** @type {any} */ a) => { r.asks = [...(r.asks || []), { question: q, ...a }]; await saveRecord(); render(); });
         })), askOut,
         (r.asks || []).slice().reverse().map((/** @type {any} */ a) => h('div', { class: 'box', 'data-asked': '' }, h('div', { class: 'pad' }, h('strong', {}, `質問：${a.question}`), h('div', {}, a.answer),
           a.citations?.map((/** @type {any} */ c) => h('div', { class: 'note' }, `出典：${c.document}・${c.page}ページ`)))))),
-      r.plan ? h('p', { class: 'note', 'data-rescan-note': '' }, '照合し直すと、今の試験の案と結果は履歴に移ります。') : null],
+      r.plan ? h('p', { class: 'note', 'data-rescan-note': '' }, '照合し直すと、今の試験の案と結果は履歴に移ります。') : null,
+      sendOut],
     back: () => go('scan'),
     extra: r.scan ? btn('回答して照合し直す', () => go('confirmScan'), 'tertiary') : null,
-    primary: primary('試験の案を作る', toPlan),
+    primary: toPlan,
   });
 }
 
@@ -635,24 +675,6 @@ function confirmAndSend(/** @type {HTMLElement} */ out, /** @type {string} */ pa
   });
 }
 
-async function confirmPlanScreen() {
-  const r = state.record;
-  const concerns = chosenConcerns(r);
-  const findings = [...testable().map((/** @type {any} */ f) => ({ id: f.id, requirement: f.requirement, how: f.verification.how || '' })), ...concerns.map(concernCandidate)];
-  const at = planGeneration(r);
-  const answers = answersOf(r);
-  await confirmScreen({
-    sub: '2 照合とヒアリング　送る内容', title: '試験の案を作るために送る内容を確かめる', lead: '照合で読んだファイルと、確認候補と、ヒアリングの回答を送ります。',
-    path: '/api/v1/agent/plan',
-    body: { repository: state.source.repository, commit: state.source.commit, files: r.files || [], evidence: planEvidence(concerns), summary: r.summary || '', answers, findings, run: !!state.runnable?.runnable, ...screenOf(r) },
-    rows: [['確認候補', `${findings.length}件`], ['ファイル', fileList(r.files || [])], answers.length ? ['回答', answers.map(a => `${a.question}：${a.answer}`).join('／')] : null, ['確かめ方', howToCheck()]],
-    send: '試験の案を作る', back: () => go('hearing'),
-    wait: { sub: '3 検証案の了承', title: '試験の案を作っています', lead: 'AIエージェントが、不足がありそうな点を確かめる試験を考えています。',
-      items: ['確認候補と回答をAIエージェントに送る', '試験の手順と合格の条件を待つ', '試験の案を記録する'], note: '応答までに1分ほどかかることがあります。' },
-    done: async p => { applyPlan(r, p, at, concerns); await saveRecord(); return { lead: `${p.tests.length}件の試験の案ができました。`, next: 'plan' }; },
-  });
-}
-
 // ---------- 3 検証案の了承 ----------
 /** 今の案の候補（照合の候補と、案に写した懸念）。 */
 function candidatesOf(/** @type {any} */ r) {
@@ -664,14 +686,27 @@ function candidatesOf(/** @type {any} */ r) {
 const topPriority = (/** @type {any[]} */ fs) => fs.map(f => f?.priority).filter(Boolean).sort((a, b) => (/** @type {any} */ (PRIO_ORDER)[a] ?? 3) - (/** @type {any} */ (PRIO_ORDER)[b] ?? 3))[0];
 const commandOf = (/** @type {string} */ entry, /** @type {string[]} */ args) => ['python3', entry, ...args].map(a => /[\s"'{}]/.test(a) ? JSON.stringify(a) : a).join(' ');
 /** 試験の設定の表示。AIが案に含め、麦漆が検査した設定を、そのまま示す。 */
-function trialView(/** @type {any} */ t) {
+/** 前のコミットから引き継いだ照合・試験の案であることの注記。今のコミットのコードは照合していないことを示す。 */
+function carriedNote(/** @type {string | undefined} */ from, /** @type {string} */ what) {
+  return from ? h('p', { class: 'note', 'data-carried': from }, `${what}は、前のコミット ${short(from)} のコードから作ったものを引き継いでいます。今のコミット ${short(state.source.commit)} のコードは、AIと照合していません。照合し直すときは「1 照合の準備」から進めます。`) : null;
+}
+function trialView(/** @type {any} */ t, /** @type {Record<string, any>} */ findings) {
   if (!t.trial) return h('div', { class: 'full', 'data-trial': 'none' }, h('h3', {}, '実行のしかた'), h('p', {}, '自動では実行しません。了承すると確認項目に登録し、試験の設定画面で設定してから実行します。'), t.trial_note ? h('p', { class: 'note' }, `理由：${t.trial_note}`) : null);
   const tr = t.trial;
+  // 合否は、候補に対応づけた判定条件だけで決まる。合否に使わない条件にはその旨を添え、了承の前に確かめられるようにする。
+  // 候補が2つ以上の試験では、条件ごとに、どの候補の合否を決めるかも添える。
+  const owners = (/** @type {string} */ id) => tr.links.filter((/** @type {any} */ l) => l.check_ids.includes(id)).map((/** @type {any} */ l) => findings[l.finding_id]?.requirement || l.finding_id);
+  const many = t.finding_ids.length > 1;
   return [
     h('div', { class: 'full', 'data-trial': 'auto' }, h('h3', {}, '実行のしかた'), h('p', { class: 'code small' }, commandOf(tr.entrypoint, tr.args)),
       tr.readback ? h('p', { class: 'note' }, '続けて読み出す：', h('span', { class: 'code' }, commandOf(tr.readback.entrypoint, tr.readback.args))) : null,
-      h('p', { class: 'note' }, `試行ごとに新しい作業ディレクトリで起動します。{{test_value}} には麦漆が試行ごとに作る架空の値が入ります。${tr.storage ? `保存先 ${tr.storage} を麦漆が直接読み出します。` : ''}`)),
-    h('div', { class: 'full' }, h('h3', {}, '判定の条件'), h('ul', { class: 'items' }, tr.checks.map((/** @type {any} */ c) => h('li', { 'data-trial-check': c.id }, `${c.scope}：${/** @type {any} */ (METHOD_LABEL)[c.method] || c.method}が${EXPECT_LABEL(c)}`)))),
+      h('p', { class: 'note' }, `試行ごとに新しい作業ディレクトリで起動します。{{test_value}} には麦漆が試行ごとに作る架空の値が入ります。${tr.storage ? `保存先 ${tr.storage} を麦漆が直接読み出します。` : ''}`),
+      t.trial_note ? h('p', { class: 'note', 'data-trial-note': '' }, `AIの注記：${t.trial_note}`) : null),
+    h('div', { class: 'full' }, h('h3', {}, '判定の条件'), h('ul', { class: 'items' }, tr.checks.map((/** @type {any} */ c) => {
+      const of = owners(c.id);
+      return h('li', { 'data-trial-check': c.id }, `${c.scope}：${/** @type {any} */ (METHOD_LABEL)[c.method] || c.method}が${EXPECT_LABEL(c)}`,
+        !of.length ? h('span', { class: 'note', 'data-unlinked': '' }, '（記録するだけで、合否には使いません）') : many ? h('span', { class: 'note', 'data-trial-link': '' }, `（確かめる項目：${of.join('／')}）`) : null);
+    }))),
   ];
 }
 async function planScreen() {
@@ -696,14 +731,14 @@ async function planScreen() {
         h('div', { class: 'two' },
           cite ? h('div', { class: 'full' }, H3('根拠'), h('blockquote', {}, plain(cite.excerpt)), h('p', { class: 'note' }, docOf(cite))) : null,
           fs.some((/** @type {any} */ f) => f?.concern) ? h('div', { class: 'full' }, H3('コードから出た懸念'), fs.filter((/** @type {any} */ f) => f?.concern).map((/** @type {any} */ f) => h('p', {}, f.concern.concern, h('span', { class: 'note' }, `（根拠の行：${evidenceText(f.concern)}）`)))) : null,
-          trialView(t),
+          trialView(t, findings),
           h('div', {}, H3('観測するもの'), h('p', {}, t.observation_label || t.observation)),
           refs.length ? h('div', {}, H3('関係するコード'), h('p', { class: 'code small' }, refs.join('、'))) : null)));
   });
   screen({
     sub: '3 検証案の了承', title: '試験の案を確かめてください',
     lead: auto ? '不足がありそうな点を確かめる試験です。了承した試験だけを、検証基盤が試験環境で実行します。' : '不足がありそうな点を確かめる試験です。了承した試験を確認項目に登録します。',
-    body: [h('p', { class: 'note', 'data-plan-count': '' }, `${new Set(r.plan.tests.flatMap((/** @type {any} */ t) => t.finding_ids)).size}つの確認項目を、${r.plan.tests.length}件の試験で確かめます。`),
+    body: [carriedNote(r.plan.carried_from, 'この試験の案'), h('p', { class: 'note', 'data-plan-count': '' }, `${new Set(r.plan.tests.flatMap((/** @type {any} */ t) => t.finding_ids)).size}つの確認項目を、${r.plan.tests.length}件の試験で確かめます。`),
       h('div', { class: 'stack' }, cards),
       r.plan.not_planned?.length ? h('p', { class: 'note', 'data-not-planned': '' }, `試験の案に入らなかった項目：${r.plan.not_planned.map((/** @type {any} */ n) => `${findings[n.finding_id]?.requirement || n.finding_id}（AIの理由：${n.reason || '理由の記載なし'}）`).join('、')}`) : null,
       r.plan.unclassified?.length ? h('p', { class: 'note', 'data-unclassified': '' }, `試験の案に含まれず、理由もない項目：${r.plan.unclassified.map((/** @type {string} */ id) => findings[id]?.requirement || id).join('、')}`) : null],
@@ -746,7 +781,8 @@ async function register(/** @type {any} */ t, /** @type {Record<string, any>} */
   const call = r.plan.model_call || {};
   const kinds = new Set(t.finding_ids.map((/** @type {string} */ id) => findings[id]?.concern ? 'concern' : 'guideline'));
   const label = kinds.has('concern') ? (kinds.has('guideline') ? 'ガイドライン照合とコードから出た懸念の試験の案' : 'コードから出た懸念の試験の案') : 'ガイドライン照合の試験の案';
-  const origin = `${label}（${call.response_model || call.requested_model || 'AI'}・応答ID ${call.response_id || '不明'}）を${person()}が了承して登録。対象 ${state.source.repository}@${short(state.source.commit)}`;
+  const carried = r.plan.carried_from ? `。案はコミット ${short(r.plan.carried_from)} の照合から作ったものを引き継いだ` : '';
+  const origin = `${label}（${call.response_model || call.requested_model || 'AI'}・応答ID ${call.response_id || '不明'}）を${person()}が了承して登録。対象 ${state.source.repository}@${short(state.source.commit)}${carried}`;
   const text = `${t.name}：${t.pass.join('／')}`.slice(0, 1000);
   await loadCase();
   const checks = state.view.workspace.checks;
@@ -992,18 +1028,22 @@ async function retestScreen() {
   }) : [];
   const select = h('select', { id: 'retest-branch', class: 'field' }, h('option', {}, '読み込んでいます…'));
   /** @type {any} */ let list = null;
-  const load = primary('このブランチを読み込む', () => guarded(async () => {
+  const open = (/** @type {boolean} */ carry) => guarded(async () => {
     const b = list?.branches.find((/** @type {any} */ x) => x.name === /** @type {HTMLSelectElement} */ (select).value);
     if (!b) throw Error('ブランチを選んでください。');
-    await openRepository(`https://github.com/${state.source.repository}`, b.name, b.commit);
-  }));
+    await openRepository(`https://github.com/${state.source.repository}`, b.name, b.commit, carry);
+  });
+  // 了承済みの試験があれば、同じ試験の実行し直しを主な操作にする。照合からやり直す操作も残す。
+  const canCarry = approvedTests(state.record).length > 0 && !state.record?.plan?.investigation && !!state.record?.results;
+  const load = canCarry ? primary('了承した試験を、このブランチで実行し直す', () => open(true)) : primary('このブランチを読み込む', () => open(false));
   screen({
-    sub: '5 修正用のプロンプト　再試験', title: '修正したブランチで試験し直す', lead: '修正したブランチを読み込むと、同じ流れで照合と試験をやり直し、前回の結果と比べられます。',
+    sub: '5 修正用のプロンプト　再試験', title: '修正したブランチで試験し直す', lead: canCarry ? '修正したブランチを読み込み、了承した試験をそのまま実行し直すと、前回の結果と項目ごとに比べられます。試験は、読み込んだ後にもう一度確かめて了承してから実行します。' : '修正したブランチを読み込むと、同じ流れで照合と試験をやり直し、前回の結果と比べられます。',
     body: [h('label', { for: 'retest-branch', class: 'field-label' }, '読み込むブランチ'), h('div', { class: 'select-wrap' }, select),
       prev ? card({ class: 'flush' }, h('div', { class: 'card-head' }, h('strong', {}, `前回 ${short(prev.commit)} と、今回 ${short(state.source.commit)} の比較`)),
         h('div', { class: 'scroll' }, h('table', { 'data-compare-table': '' }, h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, '項目'), h('th', { scope: 'col' }, `前回 ${short(prev.commit)}`), h('th', { scope: 'col' }, `今回 ${short(state.source.commit)}`), h('th', { scope: 'col' }, '変化'))), h('tbody', {}, rows))))
         : h('p', { class: 'note' }, 'このリポジトリで比べられる前のコミットの結果はまだありません。')],
     back: () => go('prompt'), primary: load,
+    extra: canCarry ? btn('照合からやり直す', () => open(false), 'tertiary') : null,
   });
   try {
     list = await api('POST', '/api/v1/branches', { url: `https://github.com/${state.source.repository}` });

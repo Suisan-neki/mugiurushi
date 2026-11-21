@@ -112,6 +112,42 @@ export function carriedInvestigation(/** @type {any} */ carry) {
     result: { record: `carried-${carry.from.slice(0, 7)}-${carry.investigation}`, stopped_by: 'carried', rounds: 0, concerns: carry.concerns, questions: [], material: [] } };
 }
 
+/** 同じリポジトリの前のコミットの記録から、了承した試験の案を引き継げるか。最後に保存された記録から探す。
+ * 再試験で照合と案を作り直すと、AIが要求の文と試験を作り直すので、前後を比べられず、同じ試験の実行し直しにもならない。
+ * 引き継ぐのは、照合の候補だけから作った案で、結果の控えがある記録に限る（懸念の入った案は、懸念の引き継ぎから作り直す）。 */
+export function carryablePlan(/** @type {any} */ records, /** @type {string} */ repository, /** @type {string} */ commit) {
+  const others = Object.values(records || {}).filter((/** @type {any} */ x) => x.repository === repository && x.commit !== commit && x.record?.results);
+  for (const x of byLatestSave(others)) {
+    const tests = approvedTests(x.record);
+    if (tests.length && !x.record.plan.investigation) return { from: x.commit, tests: tests.length, record: x.record };
+  }
+  return null;
+}
+
+/** 前のコミットの記録（照合・回答・了承した試験）を、今のコミットの新しい記録に写す。了承と結果は写さない（人が今のコミットで了承し直す）。
+ * 照合も案も前のコミットのコードから作ったものなので、どのコミットから引き継いだかを照合と案に残す。
+ * paths は今のコミットのファイル、entrypoints は今のコミットで麦漆が判定した起動の候補。
+ * 起動するファイルが今のコミットの起動の候補にない試験は、試験の設定を外して理由を残す（自動では実行しない）。 */
+export function carriedPlan(/** @type {any} */ previous, /** @type {string} */ from, /** @type {string[]} */ paths, /** @type {string[]} */ entrypoints) {
+  const p = structuredClone(previous);
+  const exists = new Set(paths), can = new Set(entrypoints);
+  const tests = approvedTests(p).map((/** @type {any} */ t) => {
+    if (!t.trial) return t;
+    const missing = [t.trial.entrypoint, t.trial.readback?.entrypoint].find(e => e && !can.has(e));
+    return missing ? { ...t, trial: null, trial_note: `今のコミットでは、起動の候補にないファイルです: ${missing}` } : t;
+  });
+  /** @type {any} */ const record = {
+    files: (p.files || []).filter((/** @type {string} */ f) => exists.has(f)),
+    scan: { ...p.scan, generation: 1, carried_from: from },
+    plan: { ...p.plan, tests, scan_generation: 1, generation: 1, carried_from: from },
+    chosen: Object.fromEntries(tests.map((/** @type {any} */ t) => [t.id, true])),
+  };
+  if (p.summary !== undefined) record.summary = p.summary;
+  if (p.answers !== undefined) record.answers = p.answers;
+  if (p.screen_evidence !== undefined) record.screen_evidence = p.screen_evidence;
+  return record;
+}
+
 /** 送った時点の照合の世代。応答が返るまでに別の照合が終わっていたら、その応答は使わない。 */
 export function scanGeneration(/** @type {any} */ record) { return record?.scan?.generation ?? null; }
 /** 送った時点の照合と案の世代と、調べの記録のID。 */
