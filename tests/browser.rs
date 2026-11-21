@@ -909,6 +909,22 @@ fn validates_the_openelis_recipes_for_concerns_from_the_code() {
     let access = read(include_str!(
         "../examples/openelis-browser/national-id-access-log-recipe.json"
     ));
+    let contact = read(include_str!(
+        "../examples/openelis-browser/empty-emergency-contact-recipe.json"
+    ));
+    // 患者の行の id から連絡先の行を読み、連絡先の行が無いことを確かめる。
+    let reads = &contact.browser.as_ref().unwrap().database;
+    assert_eq!(
+        reads[1]
+            .match_from
+            .as_ref()
+            .map(|f| (f.read.as_str(), f.column)),
+        Some(("patient", 0))
+    );
+    let checks = &contact.trial.as_ref().unwrap().checks;
+    assert!(checks.iter().any(|c| c.target.as_deref() == Some("contact")
+        && c.expect == mugiurushi::trial::Expectation::Zero));
+
     let browser = access.browser.as_ref().unwrap();
     // 重複確認の要求は、番号の欄からマウスが離れたときに送られる。欄を押してから次の欄を押す。
     let ids: Vec<_> = browser.actions.iter().map(|s| s.id.as_str()).collect();
@@ -921,4 +937,118 @@ fn validates_the_openelis_recipes_for_concerns_from_the_code() {
         browser.actions[point + 1].wait_response.as_deref(),
         Some("number-check")
     );
+}
+
+fn chained_spec() -> BrowserSpec {
+    let mut spec = spec();
+    spec.database.push(
+        serde_json::from_value(json!({"id":"contact","service":"db","database":"trial","table":"contact",
+            "match_column":"patient_id","columns":["patient_id","person_id"],"match_from":{"read":"row","column":0}}))
+        .unwrap(),
+    );
+    spec
+}
+
+#[test]
+fn a_chained_read_must_name_an_earlier_read_and_one_of_its_columns() {
+    let containers = containers();
+    let chained = chained_spec();
+    validate(&chained, &containers).unwrap();
+    // 指定しない読み出しの保存形は変わらない。
+    assert!(
+        !serde_json::to_string(&chained.database[0])
+            .unwrap()
+            .contains("match_from")
+    );
+    let reject = |edit: &dyn Fn(&mut BrowserSpec)| {
+        let mut spec = chained.clone();
+        edit(&mut spec);
+        validate(&spec, &containers).unwrap_err().to_string()
+    };
+    // 参照先が無い・後ろにある・自分自身（循環）・列の位置が範囲外は受け付けない。
+    reject(&|s| s.database[1].match_from.as_mut().unwrap().read = "nothing".into());
+    reject(&|s| s.database.swap(0, 1));
+    reject(&|s| s.database[1].match_from.as_mut().unwrap().read = "contact".into());
+    let error = reject(&|s| s.database[1].match_from.as_mut().unwrap().column = 1);
+    assert!(error.contains("match_from"), "{error}");
+    // 試験値の置き換えとは同時に指定できない。
+    reject(&|s| s.database[1].match_value = Some("{{test_value}}".into()));
+    // 操作の前に読む場合は、参照先も操作の前に読むものに限る。
+    reject(&|s| s.database[1].before_actions = true);
+    let mut both = chained.clone();
+    both.database[0].before_actions = true;
+    both.database[1].before_actions = true;
+    validate(&both, &containers).unwrap();
+}
+
+#[test]
+fn a_chained_read_uses_the_single_row_it_refers_to_and_otherwise_does_not_read() {
+    let spec = chained_spec();
+    let read = |rows: &str| {
+        let mut asked = vec![];
+        let reads = mugiurushi::browser::read_all(&spec.database, "EEL-1", |q, value| {
+            asked.push((q.id.clone(), value.to_owned()));
+            DatabaseRead {
+                id: q.id.clone(),
+                performed: true,
+                exit_code: Some(0),
+                text: if q.id == "row" {
+                    rows.into()
+                } else {
+                    "12\t22\n".into()
+                },
+                detail: String::new(),
+            }
+        });
+        (asked, reads)
+    };
+    // 参照先の1行の列の値を検索値にする。参照先そのものは試験値で読む。
+    let (asked, reads) = read("12\n");
+    assert_eq!(
+        asked,
+        [
+            ("row".into(), "EEL-1".into()),
+            ("contact".into(), "12".into())
+        ]
+    );
+    assert!(reads[1].performed);
+    // 参照先が0行・2行以上・空の値なら、読まずに理由を残す。行が無いこととは扱わない。
+    for rows in ["", "12\n13\n", "\tx\n", "NULL\n"] {
+        let (asked, reads) = read(rows);
+        assert_eq!(asked.len(), 1, "{rows:?}");
+        assert!(!reads[1].performed, "{rows:?}");
+        assert!(reads[1].detail.contains("参照先"), "{}", reads[1].detail);
+    }
+}
+
+#[test]
+fn row_count_checks_need_a_successful_read() {
+    let zero: TrialCheck = serde_json::from_value(
+        json!({"id":"none","scope":"空の連絡先","method":"database_rows","expect":"zero","target":"contact"}),
+    )
+    .unwrap();
+    let nonzero = TrialCheck {
+        expect: Expectation::Nonzero,
+        ..zero.clone()
+    };
+    let mut p = phase();
+    // 読んでいない（参照先が1行でなかった場合を含む）なら、0行とは判定しない。
+    assert_eq!(evaluate(&zero, Some(&p), "").0, Observed::NotObserved);
+    p.database_reads.push(DatabaseRead {
+        id: "contact".into(),
+        performed: false,
+        exit_code: None,
+        text: String::new(),
+        detail: "参照先の行が1行ではない".into(),
+    });
+    assert_eq!(evaluate(&zero, Some(&p), "").0, Observed::NotObserved);
+    p.database_reads[0].performed = true;
+    p.database_reads[0].exit_code = Some(0);
+    assert_eq!(evaluate(&zero, Some(&p), "").0, Observed::Pass);
+    assert_eq!(evaluate(&nonzero, Some(&p), "").0, Observed::Fail);
+    p.database_reads[0].text = "12\t22\n".into();
+    let (observed, detail) = evaluate(&zero, Some(&p), "");
+    assert_eq!(observed, Observed::Fail);
+    assert!(detail.contains("1行"), "{detail}");
+    assert_eq!(evaluate(&nonzero, Some(&p), "").0, Observed::Pass);
 }
