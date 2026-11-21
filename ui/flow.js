@@ -35,7 +35,10 @@ const STEPS = ['照合の準備', '照合とヒアリング', '検証案の了�
 /** 画面ごとの手順の番号。 */
 const STEP_OF = { repo: 1, loading: 1, files: 1, describe: 1, confirmScan: 1, scan: 2, hearing: 2, plan: 3, result: 4, prompt: 5, retest: 5 };
 const METHOD_LABEL = { exit_code: '終了コード', stdout: '標準出力', stderr: '標準エラー', stored_file: '保存先のファイル', readback_output: '読み出しの出力' };
-const EXPECT_LABEL = (/** @type {any} */ c) => ({ zero: '0で終わる', nonzero: '0以外で終わる', contains: `「${c.text}」を含む`, not_contains: `「${c.text}」を含まない` })[/** @type {'zero'} */ (c.expect)] || c.expect;
+/** 試験の案の文の中の、試験の値の記号（{{test_value}}）を言葉にする。実行のしかたのコマンドは、記号のまま示す。 */
+const worded = (/** @type {string} */ text) => (text || '').replaceAll('「{{test_value}}」', '試験の値').replaceAll('{{test_value}}', '試験の値');
+const quoted = (/** @type {string} */ text) => text === '{{test_value}}' ? '試験の値' : `「${worded(text)}」`;
+const EXPECT_LABEL = (/** @type {any} */ c) => ({ zero: '0で終わる', nonzero: '0以外で終わる', contains: `${quoted(c.text)}を含む`, not_contains: `${quoted(c.text)}を含まない` })[/** @type {'zero'} */ (c.expect)] || c.expect;
 
 /** @type {any} */
 const state = { screen: 'repo', source: null, branch: '', url: '', view: null, flow: null, record: null, agent: null, runnable: null };
@@ -700,7 +703,7 @@ function trialView(/** @type {any} */ t, /** @type {Record<string, any>} */ find
   return [
     h('div', { class: 'full', 'data-trial': 'auto' }, h('h3', {}, '実行のしかた'), h('p', { class: 'code small' }, commandOf(tr.entrypoint, tr.args)),
       tr.readback ? h('p', { class: 'note' }, '続けて読み出す：', h('span', { class: 'code' }, commandOf(tr.readback.entrypoint, tr.readback.args))) : null,
-      h('p', { class: 'note' }, `試行ごとに新しい作業ディレクトリで起動します。{{test_value}} には麦漆が試行ごとに作る架空の値が入ります。${tr.storage ? `保存先 ${tr.storage} を麦漆が直接読み出します。` : ''}`),
+      h('p', { class: 'note' }, `試行ごとに新しい作業ディレクトリで起動します。{{test_value}} には、麦漆が試行ごとに作る架空の値（試験の値）が入ります。${tr.storage ? `保存先 ${tr.storage} を麦漆が直接読み出します。` : ''}`),
       t.trial_note ? h('p', { class: 'note', 'data-trial-note': '' }, `AIの注記：${t.trial_note}`) : null),
     h('div', { class: 'full' }, h('h3', {}, '判定の条件'), h('ul', { class: 'items' }, tr.checks.map((/** @type {any} */ c) => {
       const of = owners(c.id);
@@ -725,8 +728,8 @@ async function planScreen() {
       h('div', { class: 'pad' },
         h('div', { class: 'test-head' }, box, h('div', { class: 'grow' }, h('h2', {}, t.name), h('p', { class: 'note' }, `確かめる項目：${fs.map((/** @type {any} */ f) => f?.requirement || '').join('／')}`)), prio(topPriority(fs)),
           done(t) ? h('a', { class: 'note', href: workbenchUrl(/** @type {string} */ (done(t))) }, '登録済み') : null),
-        h('div', { class: 'two' }, h('div', {}, H3('手順'), h('ol', {}, t.steps.map((/** @type {string} */ s) => h('li', {}, s)))),
-          h('div', {}, H3('合格の条件'), t.pass.map((/** @type {string} */ p) => h('p', { class: 'strong' }, p))))),
+        h('div', { class: 'two' }, h('div', {}, H3('手順'), h('ol', {}, t.steps.map((/** @type {string} */ s) => h('li', {}, worded(s))))),
+          h('div', {}, H3('合格の条件'), t.pass.map((/** @type {string} */ p) => h('p', { class: 'strong' }, worded(p)))))),
       h('details', { class: 'more' }, h('summary', {}, '詳細'),
         h('div', { class: 'two' },
           cite ? h('div', { class: 'full' }, H3('根拠'), h('blockquote', {}, plain(cite.excerpt)), h('p', { class: 'note' }, docOf(cite))) : null,
@@ -889,7 +892,20 @@ function resultOf(/** @type {any} */ f) {
   // 対応づけた判定条件の、試行で記録した結果（麦漆の要約の文）。
   const ids = new Set((a?.trial_checks || []).map((/** @type {any} */ l) => l.id));
   const observed = (ev?.summary?.items || []).filter((/** @type {any} */ i) => ids.has(i.id));
-  return { state: st, checkId, test, aspect: a, linked, boundCommit: bound, observed, record: ev ? `試行 ${ev.run_id}` : '—' };
+  const value = testValuesOf(ev?.run_id).find(v => observed.some((/** @type {any} */ i) => (i.detail || '').includes(v)));
+  return { state: st, checkId, test, aspect: a, linked, boundCommit: bound, observed, runId: ev?.run_id, record: ev ? `試行 ${ev.run_id}${value ? `（試験で入力した値：${value}）` : ''}` : '—' };
+}
+/** 試行で使った試験の値。麦漆は試行のIDから作る（src/execution.rs：「eel-test-」か「EEL-TEST-」に、試行のIDの「run-」より後ろを続ける）。 */
+function testValuesOf(/** @type {string | undefined} */ runId) {
+  const id = (runId || '').replace(/^run-/, '');
+  return id ? [`eel-test-${id}`, `EEL-TEST-${id}`] : [];
+}
+/** 判定条件ごとの結果の説明（麦漆が記録した文）を、結果の画面で読みやすくする。記録した事実は変えない。
+ * 試行ごとに変わる試験の値は「試験で入力した値」と書き（値そのものは詳細の「記録」に示す）、読み出しの出力は試験の案の画面と同じ呼び方にする。 */
+function readable(/** @type {string} */ detail, /** @type {string | undefined} */ runId) {
+  let text = detail || '';
+  for (const v of testValuesOf(runId)) text = text.replaceAll(`「${v}」`, '試験で入力した値').replaceAll(v, '（試験で入力した値）');
+  return text.replaceAll('別のプロセスで読み出した標準出力に', '読み出しの出力に');
 }
 /** 実際に確かめた判定条件（mugiurushi の試験設定の文言）。対応づけた判定条件が無ければ書かない。 */
 function checkedBy(/** @type {any} */ aspect) {
@@ -899,7 +915,7 @@ const STATE_BADGE = { ng: ['満たさない', 'error'], ok: ['満たす', 'succe
 /** 試験で起きたこと。期待と異なった判定条件の説明を使う。要求の文（期待した動作）を結果として書かない。 */
 function happened(/** @type {any} */ f) {
   const bad = (f.res.observed || []).filter((/** @type {any} */ i) => i.observed === 'contradicted' || i.observed === 'fail');
-  if (bad.length) return bad.map((/** @type {any} */ i) => `「${i.scope}」：${i.detail}`).join('／');
+  if (bad.length) return bad.map((/** @type {any} */ i) => `「${i.scope}」：${readable(i.detail, f.res.runId)}`).join('／');
   const a = f.res.aspect;
   const id = /判定条件 (\S+?)（[^）]*）: 期待と異なる/.exec(a?.detail || '')?.[1];
   const label = (a?.trial_checks || []).find((/** @type {any} */ l) => l.id === id)?.label;
@@ -911,11 +927,11 @@ function stateLine(/** @type {any} */ f) {
 function stateText(/** @type {any} */ f) {
   const res = f.res;
   if (res.state === 'ng') return h('span', { class: 'ng-text', 'data-happened': '' }, happened(f));
-  if (res.state === 'ok') return h('span', { class: 'note' }, (res.observed || []).map((/** @type {any} */ i) => i.detail).join('／') || '期待どおりの結果を観測した');
+  if (res.state === 'ok') return h('span', { class: 'note' }, (res.observed || []).map((/** @type {any} */ i) => readable(i.detail, res.runId)).join('／') || '期待どおりの結果を観測した');
   if (res.state === 'other_version') return h('span', { class: 'note' }, `確認項目の参照先が ${short(res.boundCommit)} に変わっている（照合したのは ${short(state.source.commit)}）。このコミットの結果としては数えない`);
   if (res.state === 'pending') return h('span', { class: 'note' }, res.linked ? 'まだ実行していない' : 'まだ実行していない（試験の設定画面で設定して実行する）');
   // 判定できなかった理由は、麦漆が記録した判定条件ごとの説明を優先する（読み出しが失敗した、など）。
-  const why = (res.observed || []).map((/** @type {any} */ i) => i.detail).filter(Boolean).join('／');
+  const why = (res.observed || []).map((/** @type {any} */ i) => readable(i.detail, res.runId)).filter(Boolean).join('／');
   return h('span', { class: 'note' }, `未確認：${why || `${res.aspect?.status_label || '状態を読み取れない'}。${res.aspect?.detail || ''}`}`);
 }
 async function resultScreen() {
@@ -937,9 +953,9 @@ async function resultScreen() {
       h('details', { class: 'more' }, h('summary', {}, '詳細'), h('div', { class: 'two' },
         k ? h('div', { class: 'full' }, H3('コードから出た懸念'), h('blockquote', { 'data-detail-concern': '' }, k.concern), h('p', { class: 'note' }, `コードからの推定：${k.estimate}。根拠の行：${evidenceText(k)}`))
           : c.excerpt ? h('div', { class: 'full' }, H3('根拠'), h('blockquote', {}, plain(c.excerpt)), h('p', { class: 'note' }, docOf(c))) : null,
-        h('div', {}, H3('試験'), h('p', {}, f.res.test.name), h('ol', { class: 'note' }, f.res.test.steps.map((/** @type {string} */ s) => h('li', {}, s)))),
-        h('div', {}, H3('合格の条件と観測'), h('p', {}, `条件：${f.res.test.pass.join('／')}`),
-          (f.res.observed || []).map((/** @type {any} */ i) => h('p', { class: i.observed === 'contradicted' || i.observed === 'fail' ? 'ng-text' : i.observed === 'observed' || i.observed === 'pass' ? 'ok-text' : 'note' }, `観測（${i.scope}）：${i.detail}`)),
+        h('div', {}, H3('試験'), h('p', {}, f.res.test.name), h('ol', { class: 'note' }, f.res.test.steps.map((/** @type {string} */ s) => h('li', {}, worded(s))))),
+        h('div', {}, H3('合格の条件と観測'), h('p', {}, `条件：${worded(f.res.test.pass.join('／'))}`),
+          (f.res.observed || []).map((/** @type {any} */ i) => h('p', { class: i.observed === 'contradicted' || i.observed === 'fail' ? 'ng-text' : i.observed === 'observed' || i.observed === 'pass' ? 'ok-text' : 'note' }, `観測（${i.scope}）：${readable(i.detail, f.res.runId)}`)),
           !(f.res.observed || []).length ? h('p', { class: 'note' }, f.res.state === 'pending' ? '観測：まだ実行していない' : `観測：${f.res.aspect?.detail || '記録なし'}`) : null),
         h('div', {}, H3('記録'), h('p', {}, f.res.record)),
         h('div', {}, H3('試験の詳細'), h('a', { href: workbenchUrl(f.res.checkId) }, f.res.state === 'pending' ? '試験の設定画面で設定して実行する' : '試験の設定と記録を開く')))));
