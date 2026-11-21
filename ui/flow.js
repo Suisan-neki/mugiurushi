@@ -680,17 +680,20 @@ function carriedNote(/** @type {string | undefined} */ from, /** @type {string} 
 function trialView(/** @type {any} */ t, /** @type {Record<string, any>} */ findings) {
   if (!t.trial) return h('div', { class: 'full', 'data-trial': 'none' }, h('h3', {}, '実行のしかた'), h('p', {}, '自動では実行しません。了承すると確認項目に登録し、試験の設定画面で設定してから実行します。'), t.trial_note ? h('p', { class: 'note' }, `理由：${t.trial_note}`) : null);
   const tr = t.trial;
-  const linked = new Set(tr.links.flatMap((/** @type {any} */ l) => l.check_ids));
-  const conditionText = (/** @type {any} */ c) => c ? `${c.scope}：${/** @type {any} */ (METHOD_LABEL)[c.method] || c.method}が${EXPECT_LABEL(c)}` : '';
+  // 合否は、候補に対応づけた判定条件だけで決まる。合否に使わない条件にはその旨を添え、了承の前に確かめられるようにする。
+  // 候補が2つ以上の試験では、条件ごとに、どの候補の合否を決めるかも添える。
+  const owners = (/** @type {string} */ id) => tr.links.filter((/** @type {any} */ l) => l.check_ids.includes(id)).map((/** @type {any} */ l) => findings[l.finding_id]?.requirement || l.finding_id);
+  const many = t.finding_ids.length > 1;
   return [
     h('div', { class: 'full', 'data-trial': 'auto' }, h('h3', {}, '実行のしかた'), h('p', { class: 'code small' }, commandOf(tr.entrypoint, tr.args)),
       tr.readback ? h('p', { class: 'note' }, '続けて読み出す：', h('span', { class: 'code' }, commandOf(tr.readback.entrypoint, tr.readback.args))) : null,
-      h('p', { class: 'note' }, `試行ごとに新しい作業ディレクトリで起動します。{{test_value}} には麦漆が試行ごとに作る架空の値が入ります。${tr.storage ? `保存先 ${tr.storage} を麦漆が直接読み出します。` : ''}`)),
-    h('div', { class: 'full' }, h('h3', {}, '判定の条件'), h('ul', { class: 'items' }, tr.checks.map((/** @type {any} */ c) => h('li', { 'data-trial-check': c.id }, conditionText(c), linked.has(c.id) ? null : h('span', { class: 'note', 'data-unlinked': '' }, '（記録するだけで、合否には使いません）'))))),
-    // 合否は、候補に対応づけた判定条件だけで決まる。どの条件で決まるかを、了承の前に確かめられるようにする。
-    h('div', { class: 'full', 'data-trial-links': '' }, h('h3', {}, '確かめる項目ごとの合否の決め方'), h('ul', { class: 'items' }, tr.links.map((/** @type {any} */ l) => h('li', { 'data-trial-link': l.finding_id },
-      `${findings[l.finding_id]?.requirement || l.finding_id}：`, h('strong', {}, l.check_ids.map((/** @type {string} */ id) => conditionText(tr.checks.find((/** @type {any} */ c) => c.id === id))).join('、かつ、')))))),
-    t.trial_note ? h('div', { class: 'full', 'data-trial-note': '' }, h('h3', {}, 'この試験では確かめない範囲（AIの注記）'), h('p', { class: 'note' }, t.trial_note)) : null,
+      h('p', { class: 'note' }, `試行ごとに新しい作業ディレクトリで起動します。{{test_value}} には麦漆が試行ごとに作る架空の値が入ります。${tr.storage ? `保存先 ${tr.storage} を麦漆が直接読み出します。` : ''}`),
+      t.trial_note ? h('p', { class: 'note', 'data-trial-note': '' }, `AIの注記：${t.trial_note}`) : null),
+    h('div', { class: 'full' }, h('h3', {}, '判定の条件'), h('ul', { class: 'items' }, tr.checks.map((/** @type {any} */ c) => {
+      const of = owners(c.id);
+      return h('li', { 'data-trial-check': c.id }, `${c.scope}：${/** @type {any} */ (METHOD_LABEL)[c.method] || c.method}が${EXPECT_LABEL(c)}`,
+        !of.length ? h('span', { class: 'note', 'data-unlinked': '' }, '（記録するだけで、合否には使いません）') : many ? h('span', { class: 'note', 'data-trial-link': '' }, `（確かめる項目：${of.join('／')}）`) : null);
+    }))),
   ];
 }
 async function planScreen() {

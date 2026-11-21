@@ -133,11 +133,11 @@ try {
   assert.deepEqual(requests.plan.at(-1).answers, [{ question: '院外から使いますか', answer: 'いいえ' }]);
   await page.locator('[data-test=t-access] details summary').click();
   assert.match(await page.locator('[data-test=t-access] [data-trial=auto]').innerText(), /python3 monshin\.py --dir \. --user P001 answer P001 "\{\{test_value\}\}"/);
-  // 合否は対応づけた判定条件だけで決まる。どの条件で決まるかと、合否に使わない条件を、了承の前に示す。
-  assert.match(await page.locator('[data-test=t-access] [data-trial-link=f-1]').innerText(), /閲覧の権限がない職員に、問診の回答を表示しない：受付の職員に回答が出ない：読み出しの出力が「\{\{test_value\}\}」を含まない/);
+  // 合否は対応づけた判定条件だけで決まる。合否に使わない条件を、了承の前に示す。候補が1つの試験では、候補の名前は繰り返さない。
   assert.match(await page.locator('[data-test=t-access] [data-trial-check=c1]').innerText(), /記録するだけで、合否には使いません/);
   assert.equal(await page.locator('[data-test=t-access] [data-trial-check=c2] [data-unlinked]').count(), 0);
-  assert.match(await page.locator('[data-test=t-access] [data-trial-note]').innerText(), /医師による表示は確かめない/);
+  assert.equal(await page.locator('[data-test=t-access] [data-trial-link]').count(), 0);
+  assert.match(await page.locator('[data-test=t-access] [data-trial-note]').innerText(), /AIの注記：医師による表示は確かめない/);
   assert.equal(await page.locator('[data-test=t-store] [data-trial-note]').count(), 0);
   await shot('5-plan');
   // 固定コミットの取得が一度だけ失敗した場合：登録した試験は残り、もう一度押すと、登録し直さずに実行だけをやり直す。
