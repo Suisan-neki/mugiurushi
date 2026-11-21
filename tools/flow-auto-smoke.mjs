@@ -123,8 +123,18 @@ try {
   await page.getByRole('button', { name: '次へ：質問に答える' }).click();
   await page.getByRole('heading', { name: '院外から使いますか' }).waitFor();
   await page.getByLabel('いいえ').check();
-  await page.getByRole('button', { name: '試験の案を作る' }).click();
-  await page.locator('[data-preview]').waitFor();
+  // 送る内容の確認は、ヒアリングの画面の中に出る（画面を増やさない）。確かめた印を付けるまで送れない。回答を変えたら確かめ直す。
+  const makePlan = page.getByRole('button', { name: '試験の案を作る' });
+  await makePlan.click();
+  await page.locator('[data-screen=hearing] [data-plan-send] [data-preview]').waitFor();
+  assert.match(await page.locator('[data-plan-send]').innerText(), /回答\s*院外から使いますか：いいえ/);
+  assert(await makePlan.isDisabled(), '確かめる前は送れない');
+  assert.equal(requests.plan.filter(b => b.confirm).length, 0, '確かめる前は送らない');
+  await page.getByLabel('はい').check();
+  assert.equal(await page.locator('[data-preview]').count(), 0, '回答を変えたら、確かめ直す');
+  await page.getByLabel('いいえ').check();
+  await makePlan.click();
+  await page.locator('[data-screen=hearing] [data-plan-send] [data-preview]').waitFor();
   assert.equal(requests.plan.at(-1).run, true, '動かせると判定したので、試験の設定も求める');
   await page.locator('#agree').check();
   await page.getByRole('button', { name: '試験の案を作る' }).click();

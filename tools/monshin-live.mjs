@@ -16,7 +16,7 @@ const root = resolve(import.meta.dirname, '..');
 const REPO = 'example/monshin';
 const DESCRIPTION = process.env.MONSHIN_DESCRIPTION || '架空の診療所の問診システム。患者がコマンドで答え、医師が読む。受付の職員は、回答があるかどうかだけを確かめる。';
 // ヒアリングで選ぶ選択肢に含まれる語（先に書いた語を優先する）。説明文と同じく、デモで人が答える想定の内容。
-const ANSWERS = (process.env.MONSHIN_ANSWERS || '有無のみ,医師だけ,医師のみ').split(',').map(w => w.trim()).filter(Boolean);
+const ANSWERS = (process.env.MONSHIN_ANSWERS || '有無,医師だけ,医師のみ,医師にのみ,表示しない,読まない,読めない').split(',').map(w => w.trim()).filter(Boolean);
 const output = join(root, 'test-results'); await mkdir(output, { recursive: true });
 const record = { started_at: new Date().toISOString(), model: process.env.MUGIURUSHI_AI_MODEL, repository: REPO, description: DESCRIPTION, answer_words: ANSWERS, runs: [] };
 const demo = spawn(process.execPath, [join(root, 'tools/monshin-demo.mjs')], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });

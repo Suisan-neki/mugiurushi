@@ -33,7 +33,7 @@ const PRIO = { high: '高', medium: '中', low: '低' };
 const PRIO_ORDER = { high: 0, medium: 1, low: 2 };
 const STEPS = ['照合の準備', '照合とヒアリング', '検証案の了承', '結果', '修正用のプロンプト'];
 /** 画面ごとの手順の番号。 */
-const STEP_OF = { repo: 1, loading: 1, files: 1, describe: 1, confirmScan: 1, scan: 2, hearing: 2, confirmPlan: 2, plan: 3, result: 4, prompt: 5, retest: 5 };
+const STEP_OF = { repo: 1, loading: 1, files: 1, describe: 1, confirmScan: 1, scan: 2, hearing: 2, plan: 3, result: 4, prompt: 5, retest: 5 };
 const METHOD_LABEL = { exit_code: '終了コード', stdout: '標準出力', stderr: '標準エラー', stored_file: '保存先のファイル', readback_output: '読み出しの出力' };
 const EXPECT_LABEL = (/** @type {any} */ c) => ({ zero: '0で終わる', nonzero: '0以外で終わる', contains: `「${c.text}」を含む`, not_contains: `「${c.text}」を含まない` })[/** @type {'zero'} */ (c.expect)] || c.expect;
 
@@ -77,7 +77,7 @@ function renderChrome() {
 function go(/** @type {string} */ screen) { state.screen = screen; render(); window.scrollTo(0, 0); }
 function render() {
   renderChrome();
-  const f = /** @type {any} */ ({ repo: repoScreen, files: filesScreen, describe: describeScreen, confirmScan: confirmScanScreen, scan: scanScreen, hearing: hearingScreen, confirmPlan: confirmPlanScreen, plan: planScreen, result: resultScreen, prompt: promptScreen, retest: retestScreen })[state.screen];
+  const f = /** @type {any} */ ({ repo: repoScreen, files: filesScreen, describe: describeScreen, confirmScan: confirmScanScreen, scan: scanScreen, hearing: hearingScreen, plan: planScreen, result: resultScreen, prompt: promptScreen, retest: retestScreen })[state.screen];
   if (f) guarded(async () => { await f(); });
 }
 
@@ -332,44 +332,54 @@ function howToCheck() {
 
 /** 送る前の確認の画面。サーバーが組み立てた内容をそのまま示し、確かめたときだけ送る。
  * SHA-256は人が読み比べる値ではないので「技術的な詳細」に置き、送るときは画面が同じ値を添える（AGENTS.md）。 */
-async function confirmScreen(/** @type {{ sub: string, title: string, lead: string, path: string, body: any, rows: any[], send: string, back: () => any, wait: { sub: string, title: string, lead: string, items: string[], note: string }, done: (r: any) => Promise<{ lead: string, next: string }> }} */ o) {
-  setStatus('送る内容を組み立てています。');
-  const preview = await api('POST', o.path, o.body);
-  // 送信先のモデルは送る直前の状態を問い合わせる。運営者がAIエージェントの設定を変えている場合があるため。
-  state.agent = await api('GET', '/api/v1/agent').catch(() => state.agent);
-  setStatus('');
+/** 送る前の確認の中身：送信先（AIエージェントと、その先のモデル）、送るもの、大きさ、送る内容の全文、SHA-256、確かめた印。
+ * 印を付け、モデルを確かめられたときだけ、送るボタン（send）を押せるようにする。送信先を示してから送る規則のため（AGENTS.md）。 */
+function confirmPanel(/** @type {any} */ preview, /** @type {any[]} */ extraRows, /** @type {HTMLElement} */ send) {
   const model = state.agent?.model, endpoint = state.agent?.endpoint;
   const agree = h('input', { type: 'checkbox', id: 'agree' });
-  const send = primary(o.send, () => guarded(async () => {
-    const w = waiting(o.wait);
-    try {
-      w.next();
-      const r = await api('POST', o.path, { ...o.body, confirm: { payload_sha256: preview.payload_sha256, synthetic_only: /** @type {HTMLInputElement} */ (agree).checked } });
-      w.next();
-      const after = await o.done(r);
-      await w.done(after.lead);
-      go(after.next);
-    } catch (e) { o.back(); throw e; }
-  }));
   send.setAttribute('disabled', '');
-  // モデルを確かめられない場合は送らせない。送信先を示してから送る規則のため（AGENTS.md）。
   agree.addEventListener('change', () => /** @type {HTMLInputElement} */ (agree).checked && model ? send.removeAttribute('disabled') : send.setAttribute('disabled', ''));
   const rows = [
     ['送信先', [endpoint ? ['照合用のAIエージェント ', h('span', { class: 'code' }, endpoint)] : '照合用のAIエージェント', model
       ? h('div', { 'data-agent-model': '' }, 'その先のモデル ', h('span', { class: 'code' }, model))
       : h('div', { class: 'alert', 'data-agent-model-missing': '' }, `その先のモデルを確かめられないため、送れません。${state.agent?.model_error || ''}`)]],
-    ...o.rows,
+    ...extraRows,
     ['大きさ', `${count(preview.bytes)}バイト`],
   ].filter(Boolean);
-  screen({
-    sub: o.sub, title: o.title, lead: o.lead, name: 'confirm',
-    body: [card({ 'data-preview': '' }, h('dl', { class: 'facts' }, rows.map((/** @type {any} */ [k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
-      h('details', {}, h('summary', {}, '送る内容をすべて見る'), h('pre', { class: 'payload' }, JSON.stringify(preview.payload, null, 2))),
-      h('details', { class: 'tech' }, h('summary', {}, '技術的な詳細'),
-        h('p', { class: 'note' }, '送信記録と照らし合わせるための値（SHA-256）'), h('p', { class: 'code', 'data-payload-sha256': '' }, preview.payload_sha256))),
-      h('label', { class: 'agree' }, agree, h('span', {}, '公開してよいコードと架空のデータだけで、実在の患者の情報・認証情報・生のログを含まないことを確かめました'))],
-    back: o.back, primary: send,
-  });
+  return { agree, nodes: [card({ 'data-preview': '' }, h('dl', { class: 'facts' }, rows.map((/** @type {any} */ [k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
+    h('details', {}, h('summary', {}, '送る内容をすべて見る'), h('pre', { class: 'payload' }, JSON.stringify(preview.payload, null, 2))),
+    h('details', { class: 'tech' }, h('summary', {}, '技術的な詳細'),
+      h('p', { class: 'note' }, '送信記録と照らし合わせるための値（SHA-256）'), h('p', { class: 'code', 'data-payload-sha256': '' }, preview.payload_sha256))),
+  h('label', { class: 'agree' }, agree, h('span', {}, '公開してよいコードと架空のデータだけで、実在の患者の情報・認証情報・生のログを含まないことを確かめました'))] };
+}
+/** 送る内容を組み立て、送信先のモデルを問い合わせる。モデルは送る直前の状態を問い合わせる（運営者がAIエージェントの設定を変えている場合があるため）。 */
+async function loadPreview(/** @type {string} */ path, /** @type {any} */ body) {
+  setStatus('送る内容を組み立てています。');
+  try {
+    const preview = await api('POST', path, body);
+    state.agent = await api('GET', '/api/v1/agent').catch(() => state.agent);
+    return preview;
+  } finally { setStatus(''); }
+}
+/** 人が確かめた内容（SHA-256）を添えて送り、待つ画面を出して、終わったら次の画面へ進む。失敗したら back で元の画面に戻る。 */
+async function sendConfirmed(/** @type {{ path: string, body: any, back: () => any, wait: { sub: string, title: string, lead: string, items: string[], note: string }, done: (r: any) => Promise<{ lead: string, next: string }> }} */ o, /** @type {any} */ preview, /** @type {HTMLElement} */ agree) {
+  const synthetic = /** @type {HTMLInputElement} */ (agree).checked;
+  const w = waiting(o.wait);
+  try {
+    w.next();
+    const r = await api('POST', o.path, { ...o.body, confirm: { payload_sha256: preview.payload_sha256, synthetic_only: synthetic } });
+    w.next();
+    const after = await o.done(r);
+    await w.done(after.lead);
+    go(after.next);
+  } catch (e) { o.back(); throw e; }
+}
+async function confirmScreen(/** @type {{ sub: string, title: string, lead: string, path: string, body: any, rows: any[], send: string, back: () => any, wait: { sub: string, title: string, lead: string, items: string[], note: string }, done: (r: any) => Promise<{ lead: string, next: string }> }} */ o) {
+  const preview = await loadPreview(o.path, o.body);
+  /** @type {any} */ let panel = null;
+  const send = primary(o.send, () => guarded(() => sendConfirmed(o, preview, panel.agree)));
+  panel = confirmPanel(preview, o.rows, send);
+  screen({ sub: o.sub, title: o.title, lead: o.lead, name: 'confirm', body: panel.nodes, back: o.back, primary: send });
 }
 const fileList = (/** @type {string[]} */ files) => h('details', { class: 'inline' }, h('summary', {}, `${files.length}件（`, h('span', { class: 'code' }, files[0] || ''), files.length > 1 ? ' ほか）' : '）'),
   h('p', { class: 'code small' }, files.join('、')));
@@ -576,17 +586,36 @@ async function hearingScreen() {
     q.why ? h('p', { class: 'note' }, q.why) : null,
     h('div', { class: 'choice-grid' }, q.options.map((/** @type {string} */ o) => {
       const radio = h('input', { type: 'radio', name: q.id, checked: answerTo(r, q) === o });
-      radio.addEventListener('change', () => setAnswer(r, q, o));
+      radio.addEventListener('change', () => { setAnswer(r, q, o); reset(); });
       return h('label', { class: 'choice' }, radio, h('span', {}, o));
     })));
   const single = qs.length === 1 && !askConcerns.length;
-  const toPlan = () => {
+  // 試験の案を作るために送る内容は、この画面の中で確かめる（画面を増やさない）。
+  // 1回目の「試験の案を作る」で送る内容を組み立てて示し、確かめた印を付けると、同じボタンで送れる。回答を変えたら、確かめ直す。
+  const sendOut = h('div', { 'data-plan-send': '' });
+  /** @type {any} */ let ready = null;
+  const reset = () => { ready = null; fill(sendOut); toPlan.removeAttribute('disabled'); };
+  const toPlan = primary('試験の案を作る', () => guarded(async () => {
+    if (ready) return sendConfirmed(ready.send, ready.preview, ready.agree);
     const concerns = chosenConcerns(r);
     const findings = [...testable().map((/** @type {any} */ f) => ({ id: f.id, requirement: f.requirement, how: f.verification.how || '' })), ...concerns.map(concernCandidate)];
     if (!findings.length) return showError('試験で確かめられる項目がありません。');
     if (findings.length > 24) return showError('試験の案の候補は24件までです。懸念の選択を減らしてください。');
-    go('confirmPlan');
-  };
+    const at = planGeneration(r);
+    const answers = answersOf(r);
+    const send = {
+      path: '/api/v1/agent/plan', back: () => go('hearing'),
+      body: { repository: state.source.repository, commit: state.source.commit, files: r.files || [], evidence: planEvidence(concerns), summary: r.summary || '', answers, findings, run: !!state.runnable?.runnable, ...screenOf(r) },
+      wait: { sub: '3 検証案の了承', title: '試験の案を作っています', lead: 'AIエージェントが、不足がありそうな点を確かめる試験を考えています。',
+        items: ['確認候補と回答をAIエージェントに送る', '試験の手順と合格の条件を待つ', '試験の案を記録する'], note: '応答までに1分ほどかかることがあります。' },
+      done: async (/** @type {any} */ p) => { applyPlan(r, p, at, concerns); await saveRecord(); return { lead: `${p.tests.length}件の試験の案ができました。`, next: 'plan' }; },
+    };
+    const preview = await loadPreview(send.path, send.body);
+    const panel = confirmPanel(preview, [['確認候補', `${findings.length}件`], ['ファイル', fileList(r.files || [])], answers.length ? ['回答', answers.map(a => `${a.question}：${a.answer}`).join('／')] : null, ['確かめ方', howToCheck()]], toPlan);
+    fill(sendOut, h('h2', {}, 'AIエージェントに送る内容を確かめる'), h('p', { class: 'note' }, '照合で読んだファイルと、確認候補と、ヒアリングの回答を送ります。確かめた印を付けて、もう一度「試験の案を作る」を押してください。'), panel.nodes);
+    ready = { send, preview, agree: panel.agree };
+    sendOut.scrollIntoView({ block: 'nearest' });
+  }));
   screen({
     sub: '2 照合とヒアリング　2/2',
     title: single ? qs[0].text : qs.length || askConcerns.length ? 'コードだけでは判断できないことに答えてください' : '確かめたいことはありません',
@@ -596,15 +625,17 @@ async function hearingScreen() {
       h('details', { 'data-ask': '', open: (r.asks || []).length > 0 }, h('summary', {}, 'ガイドラインに質問する（任意）'),
         h('label', { for: 'ask', class: 'field-label' }, '聞きたいこと'), ask,
         h('div', { class: 'actions' }, btn('質問を送る', () => {
+          reset(); // 確認のダイアログと、この画面の確認を同時に出さない
           const q = /** @type {HTMLTextAreaElement} */ (ask).value.trim(); if (!q) return showError('質問を書いてください。');
           return confirmAndSend(askOut, '/api/v1/agent/ask', { question: q }, async (/** @type {any} */ a) => { r.asks = [...(r.asks || []), { question: q, ...a }]; await saveRecord(); render(); });
         })), askOut,
         (r.asks || []).slice().reverse().map((/** @type {any} */ a) => h('div', { class: 'box', 'data-asked': '' }, h('div', { class: 'pad' }, h('strong', {}, `質問：${a.question}`), h('div', {}, a.answer),
           a.citations?.map((/** @type {any} */ c) => h('div', { class: 'note' }, `出典：${c.document}・${c.page}ページ`)))))),
-      r.plan ? h('p', { class: 'note', 'data-rescan-note': '' }, '照合し直すと、今の試験の案と結果は履歴に移ります。') : null],
+      r.plan ? h('p', { class: 'note', 'data-rescan-note': '' }, '照合し直すと、今の試験の案と結果は履歴に移ります。') : null,
+      sendOut],
     back: () => go('scan'),
     extra: r.scan ? btn('回答して照合し直す', () => go('confirmScan'), 'tertiary') : null,
-    primary: primary('試験の案を作る', toPlan),
+    primary: toPlan,
   });
 }
 
@@ -641,24 +672,6 @@ function confirmAndSend(/** @type {HTMLElement} */ out, /** @type {string} */ pa
     document.body.append(dialog);
     dialog.addEventListener('cancel', close);
     dialog.showModal();
-  });
-}
-
-async function confirmPlanScreen() {
-  const r = state.record;
-  const concerns = chosenConcerns(r);
-  const findings = [...testable().map((/** @type {any} */ f) => ({ id: f.id, requirement: f.requirement, how: f.verification.how || '' })), ...concerns.map(concernCandidate)];
-  const at = planGeneration(r);
-  const answers = answersOf(r);
-  await confirmScreen({
-    sub: '2 照合とヒアリング　送る内容', title: '試験の案を作るために送る内容を確かめる', lead: '照合で読んだファイルと、確認候補と、ヒアリングの回答を送ります。',
-    path: '/api/v1/agent/plan',
-    body: { repository: state.source.repository, commit: state.source.commit, files: r.files || [], evidence: planEvidence(concerns), summary: r.summary || '', answers, findings, run: !!state.runnable?.runnable, ...screenOf(r) },
-    rows: [['確認候補', `${findings.length}件`], ['ファイル', fileList(r.files || [])], answers.length ? ['回答', answers.map(a => `${a.question}：${a.answer}`).join('／')] : null, ['確かめ方', howToCheck()]],
-    send: '試験の案を作る', back: () => go('hearing'),
-    wait: { sub: '3 検証案の了承', title: '試験の案を作っています', lead: 'AIエージェントが、不足がありそうな点を確かめる試験を考えています。',
-      items: ['確認候補と回答をAIエージェントに送る', '試験の手順と合格の条件を待つ', '試験の案を記録する'], note: '応答までに1分ほどかかることがあります。' },
-    done: async p => { applyPlan(r, p, at, concerns); await saveRecord(); return { lead: `${p.tests.length}件の試験の案ができました。`, next: 'plan' }; },
   });
 }
 
