@@ -42,7 +42,7 @@ const planAnswer = { tests: [
 const agent = createServer((req, res) => {
   let body = ''; req.on('data', d => { body += d; });
   req.on('end', () => {
-    const answer = req.url === '/v1/scan' ? scanAnswer : req.url === '/v1/plan' ? { ...planAnswer, model_call: { response_id: 'fake-plan' } } : null;
+    const answer = req.url === '/v1/health' ? { model: 'fake-model', model_status: 'configured' } : req.url === '/v1/scan' ? scanAnswer : req.url === '/v1/plan' ? { ...planAnswer, model_call: { response_id: 'fake-plan' } } : null;
     res.writeHead(answer ? 200 : 404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(answer || {}));
   });
 }).listen(0, '127.0.0.1');
@@ -65,20 +65,21 @@ try {
   await page.addInitScript(() => sessionStorage.setItem('eel-person', JSON.stringify({ name: '合成の開発者', role: 'developer' })));
   const token = async () => page.locator('meta[name=review-token]').getAttribute('content');
   const view = async () => (await page.request.get(url + '/api/v1/case', { headers: { 'X-Review-Token': await token() } })).json();
-  const send = async () => { await page.locator('[data-preview]').waitFor(); await page.locator('#agree').check(); await page.getByRole('button', { name: 'この内容を送る' }).click(); };
+  const send = async name => { await page.locator('[data-preview]').waitFor(); await page.locator('#agree').check(); await page.getByRole('button', { name, exact: true }).click(); };
   const flowUrl = sha => { const u = new URL(url + '/flow'); u.search = new URLSearchParams({ url: 'https://github.com/' + repository, ref: sha }).toString(); return u.href; };
   const flowToResults = async sha => {
     await page.goto(flowUrl(sha)); await page.locator('[data-files]').waitFor();
-    await page.getByRole('button', { name: /照合を始める/ }).click(); await send();
-    await page.getByRole('heading', { name: 'ヒアリング' }).waitFor();
-    await page.getByRole('button', { name: '試験の案を作る' }).click(); await send();
+    await page.getByRole('button', { name: '次へ' }).click(); await page.getByRole('button', { name: '次へ' }).click(); await send('照合を始める');
+    await page.locator('[data-screen=scan]').waitFor(); await page.getByRole('button', { name: /^次へ/ }).click();
+    await page.getByRole('button', { name: '試験の案を作る' }).click(); await send('試験の案を作る');
     await page.locator('[data-test="t-log"]').waitFor();
-    await page.getByRole('button', { name: '了承して確認項目に登録する' }).click();
+    await page.getByRole('button', { name: '了承して登録する' }).click();
     await page.locator('[data-result]').first().waitFor();
   };
   const row = requirement => page.locator('[data-result]', { hasText: requirement });
   // 設定画面で同梱の試験を選び、照合の候補を判定条件へ対応づけて保存する。
   const chooseLogRecipe = async (presetButton, links) => {
+    await row('ログに患者の情報を出さない').locator('details summary').click();
     await row('ログに患者の情報を出さない').getByRole('link').click();
     await page.locator('[data-flow-plan="t-log"]').waitFor();
     const preset = page.locator('[data-browser-preset="openemr-soap-logs"]'); await preset.waitFor();
@@ -102,7 +103,7 @@ try {
   // 前半：レシピの固定版のコミットで照合し、同じ版の同梱の試験を選ぶ。
   await flowToResults(pinned);
   assert.deepEqual(await page.locator('[data-result]').evaluateAll(r => r.map(x => x.getAttribute('data-result'))), ['pending', 'pending']);
-  assert.deepEqual(await page.locator('[data-untested]').evaluateAll(r => r.map(x => [x.getAttribute('data-untested'), x.children[1].textContent])),
+  assert.deepEqual(await page.locator('[data-untested]').evaluateAll(r => r.map(x => [x.getAttribute('data-untested'), x.querySelector('[data-untested-text]').textContent])),
     [['unclassified', '誰がいつ診療記録を操作したかを記録する']], '試験の案に含まれなかった候補は未分類として残る');
   await chooseLogRecipe(/^この試験を設定する：OpenEMR：SOAPの保存でログに試験値が出ないか/, ['soap-log-app', 'soap-log-db']);
   let v = await view();
@@ -138,18 +139,16 @@ try {
   }
   // /flow の結果：ログの候補は判定条件に対応づけ済み。保存の候補はまだ対応づけていない。
   await page.goto(flowUrl(pinned)); await page.locator('[data-result]').first().waitFor();
-  // 期待どおりだった項目は、結果の表には出ず、表の下の要約に項目名が出る。行がない場合は、要約で確かめる。
   const logRow = row('ログに患者の情報を出さない');
-  const logState = await logRow.count() ? await logRow.getAttribute('data-result') : 'ok';
+  const logState = await logRow.getAttribute('data-result');
   if (live) {
     assert(['ng', 'ok', 'unconfirmed'].includes(logState), `実行後のログの候補の状態: ${logState}`);
-    if (logState === 'ok') assert.match(await page.locator('main').innerText(), /試験で期待どおりだった項目：[^\n]*ログに患者の情報を出さない/);
-    liveSummary.flow_state = logState; liveSummary.flow_label = logState === 'ok' ? '期待どおり' : await logRow.locator('[data-state-label]').innerText();
+    liveSummary.flow_state = logState; liveSummary.flow_label = await logRow.locator('[data-state-label]').innerText();
   } else {
     assert.equal(logState, 'pending');
-    assert.equal(await row('ログに患者の情報を出さない').locator('[data-state-label]').innerText(), '未実行');
+    assert.equal(await row('ログに患者の情報を出さない').locator('[data-state-label]').innerText(), 'まだ実行していない');
   }
-  assert.equal(await row('診療記録を保存し、読み直せる').locator('[data-state-label]').innerText(), '未実行（判定条件への対応づけ前）');
+  assert.equal(await row('診療記録を保存し、読み直せる').locator('[data-state-label]').innerText(), 'まだ実行していない（試験の設定画面で設定して実行する）');
 
   // 後半：別のコミットで照合してから、固定した版の同梱の試験を選ぶ。参照先はレシピの版に変わり、
   // /flow はその結果を照合したコミットの結果として数えない。
@@ -160,8 +159,8 @@ try {
   assert.equal(moved.source.commit, pinned, '同梱の試験を選ぶと、参照先がレシピの版に変わる');
   await page.goto(flowUrl(other)); await page.locator('[data-result]').first().waitFor();
   assert.equal(await row('ログに患者の情報を出さない').getAttribute('data-result'), 'other_version');
-  assert.match(await row('ログに患者の情報を出さない').locator('[data-state-label]').innerText(), new RegExp(`別の版の試験：確認項目の参照先が ${pinned.slice(0, 7)} に変わっている（照合したのは ${other.slice(0, 7)}）`));
-  assert.equal(await page.locator('[data-ng-count]').count(), 0, '別の版の結果を、このコミットの不足として数えない');
+  assert.match(await row('ログに患者の情報を出さない').locator('[data-state-label]').innerText(), new RegExp(`確認項目の参照先が ${pinned.slice(0, 7)} に変わっている（照合したのは ${other.slice(0, 7)}）`));
+  assert.equal(await page.locator('[data-result="ng"]').count(), 0, '別の版の結果を、このコミットの不足として数えない');
   // 別の版の試験に実行済みの結果（期待と異なる・観測した）があっても、照合したコミットの不足・期待どおりとして数えない。
   // 事例の記録の観測の状態を差し替えて確かめる。
   let observedAs = null;
@@ -177,13 +176,14 @@ try {
     observedAs = status;
     await page.goto(flowUrl(other)); await page.locator('[data-result]').first().waitFor();
     assert.equal(await row('ログに患者の情報を出さない').getAttribute('data-result'), 'other_version', `${status}: 別の版の結果は、別の版の試験のまま示す`);
-    assert.equal(await page.locator('[data-ng-count]').count(), 0, `${status}: 不足の件数に数えない`);
+    assert.equal(await page.locator('[data-result="ng"]').count(), 0, `${status}: 満たさない件数に数えない`);
     assert.equal(await page.getByRole('button', { name: '修正用のプロンプトを作る' }).count(), 0, `${status}: 修正用のプロンプトの対象にしない`);
-    assert.doesNotMatch(await page.locator('main').innerText(), /試験で期待どおりだった項目/, `${status}: 期待どおりだった項目に入れない`);
+    assert.equal(await page.locator('[data-result="ok"]').count(), 0, `${status}: 満たす項目に入れない`);
   }
   observedAs = null;
   // 6 再試験：前のコミットとの比較表でも、別の版の試験を、結果がない場合（—）と区別して示す。
-  await page.getByRole('button', { name: /6 再試験/ }).click();
+  await page.locator('.stepper button', { hasText: '修正用のプロンプト' }).click();
+  await page.getByRole('link', { name: '再試験へ' }).click();
   const compare = page.locator('[data-compare-table]'); await compare.waitFor();
   assert.match(await compare.innerText(), /ログに患者の情報を出さない\s+\S+\s+別の版の試験/);
   assert.deepEqual(errors, []);

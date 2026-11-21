@@ -39,7 +39,7 @@ try {
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(() => sessionStorage.setItem('eel-person', JSON.stringify({ name: '合成の試験担当', role: 'developer' })));
   // AIエージェントの案（偽物）。採用は画面で人が選び、保存は麦漆の set_aspects で行う。
-  await page.route('**/api/v1/agent', route => route.fulfill({ json: { status: 'configured', message: '合成' } }));
+  await page.route('**/api/v1/agent', route => route.fulfill({ json: { status: 'configured', endpoint: 'http://127.0.0.1:8787', model: 'fake-model', message: '合成' } }));
   const proposeRequests = [];
   await page.route('**/api/v1/agent/propose', route => {
     const body = route.request().postDataJSON(); proposeRequests.push(body);

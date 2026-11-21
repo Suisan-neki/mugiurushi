@@ -81,6 +81,7 @@ npm run test:reader-native
 npm run test:flow
 npm run test:flow-record
 npm run test:flow-rescan
+npm run test:flow-auto
 ```
 
 PRのCI（`.github/workflows/rust.yml`）は、このほかにも固定フィクスチャの試験を実行します。必須の一覧はワークフローを正とします。`test:ui`は構成図と対話を実Rustサーバー・合成AIで操作します。`test:flow`系は照合の画面（`/flow`）を合成AIで操作します。
