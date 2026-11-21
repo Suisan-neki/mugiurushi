@@ -5,7 +5,7 @@
 // 試験の設定（起動のしかた・判定の条件）をAIが案に含めた場合は、試験の案の画面で中身を示し、了承した試験だけを
 // 既存の試験の設定画面と同じAPIの順（確認項目の登録 → 判定条件の対応づけ → 固定コミットの取得 → 実行）で実行する。
 import { apiRequest as api } from './api.js';
-import { applyScan, applyPlan, applyInvestigation, runConcerns, planEvidence, carryableConcerns, carriedInvestigation, byLatestSave, concernSource, concernRequirement, concernEvidenceText, concernPlanCandidate, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
+import { applyScan, applyPlan, applyInvestigation, runConcerns, planEvidence, carryableConcerns, carriedInvestigation, carryablePlan, carriedPlan, byLatestSave, concernSource, concernRequirement, concernEvidenceText, concernPlanCandidate, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, planIsCurrent, approve, approvedCheck, approvedTests, startStep, migrate, untestedFindings, UNTESTED } from './flow-record.js';
 
 /** @param {string} tag @param {Record<string, any>} [attrs] @param {...any} children */
 function h(tag, attrs = {}, ...children) {
@@ -178,7 +178,7 @@ async function repoScreen() {
 }
 
 /** リポジトリを読み込み、動かせるかを判定してから、続きの画面へ進む。commit はブランチの一覧で見たコミット。 */
-async function openRepository(/** @type {string} */ url, /** @type {string} */ branch, /** @type {string} */ commit) {
+async function openRepository(/** @type {string} */ url, /** @type {string} */ branch, /** @type {string} */ commit, carry = false) {
   // 別の対象を読み込むので、前の対象で外したファイルの選択は使わない（読み込んだ対象の記録か既定の規則から作り直す）。
   skipped = null;
   state.url = url; state.branch = branch;
@@ -194,9 +194,18 @@ async function openRepository(/** @type {string} */ url, /** @type {string} */ b
     state.runnable = await api('POST', '/api/v1/runnable', { repository: state.source.repository, commit: state.source.commit }).catch((/** @type {any} */ e) => ({ runnable: false, blockers: [e instanceof Error ? e.message : String(e)], entrypoints: [], notes: [] }));
     w.next(state.runnable.runnable ? '動かせる' : '動かせない');
     await loadFlow();
+    // 再試験：前のコミットで了承した試験の案を引き継ぐ。このコミットに照合や案の記録があれば、それを残して引き継がない。
+    /** @type {string} */ let notCarried = '';
+    if (carry) {
+      const c = carryablePlan(state.flow?.records, state.source.repository, state.source.commit);
+      if (!c) notCarried = '引き継げる了承済みの試験がないため、照合から進めます。';
+      else if (state.record?.scan || state.record?.plan) notCarried = 'このコミットには照合か試験の案の記録があるため、前回の試験は引き継ぎませんでした。';
+      else { state.record = carriedPlan(c.record, c.from, (state.source.inventory || []).map((/** @type {any} */ f) => f.path), state.runnable?.entrypoints || []); await saveRecord(); }
+    }
     const u = new URL(location.href); u.search = new URLSearchParams({ url, ref: state.source.commit, branch }).toString(); history.replaceState(null, '', u);
     await w.done(`${name} の ${branch} ブランチを読み込みました。${state.runnable.runnable ? '試験環境で動かせます。' : 'コードから確かめます。'}`);
     go(resumeScreen());
+    if (notCarried) showError(notCarried);
   } catch (e) { go('repo'); showError(e); }
 }
 async function loadFlow() {
@@ -549,7 +558,7 @@ async function scanScreen() {
     sub: '2 照合とヒアリング　1/2',
     title: r.scan ? (found.length ? `不足がありそうな点が${found.length}件見つかりました` : '試験で確かめられる点は見つかりませんでした') : 'コードから出た懸念',
     lead: r.scan ? 'ガイドラインとコードを照らし合わせ、満たしていない可能性がある項目を優先度の順に並べました。' : '',
-    body: [h('div', { class: 'stack' }, list), r.scan ? h('p', { class: 'note small', 'data-scan-count': '' }, `候補 ${(r.scan.findings || []).length}件のうち、試験で確かめられる ${found.length}件を示しています${other ? `（文書の確認などで確かめる ${other}件は除いています）` : ''}。${r.scan.priority_rule || '優先度は決まった規則で付けています'}`) : null,
+    body: [carriedNote(r.scan?.carried_from, 'この照合の結果'), h('div', { class: 'stack' }, list), r.scan ? h('p', { class: 'note small', 'data-scan-count': '' }, `候補 ${(r.scan.findings || []).length}件のうち、試験で確かめられる ${found.length}件を示しています${other ? `（文書の確認などで確かめる ${other}件は除いています）` : ''}。${r.scan.priority_rule || '優先度は決まった規則で付けています'}`) : null,
       concernsView(r),
       h('details', { class: 'trace', 'data-trace': '', open: !r.scan || !!r.investigation }, h('summary', {}, '操作からコードをたどる（任意）'), investigationView(() => r.summary || ''))],
     back: () => go('files'),
@@ -664,14 +673,24 @@ function candidatesOf(/** @type {any} */ r) {
 const topPriority = (/** @type {any[]} */ fs) => fs.map(f => f?.priority).filter(Boolean).sort((a, b) => (/** @type {any} */ (PRIO_ORDER)[a] ?? 3) - (/** @type {any} */ (PRIO_ORDER)[b] ?? 3))[0];
 const commandOf = (/** @type {string} */ entry, /** @type {string[]} */ args) => ['python3', entry, ...args].map(a => /[\s"'{}]/.test(a) ? JSON.stringify(a) : a).join(' ');
 /** 試験の設定の表示。AIが案に含め、麦漆が検査した設定を、そのまま示す。 */
-function trialView(/** @type {any} */ t) {
+/** 前のコミットから引き継いだ照合・試験の案であることの注記。今のコミットのコードは照合していないことを示す。 */
+function carriedNote(/** @type {string | undefined} */ from, /** @type {string} */ what) {
+  return from ? h('p', { class: 'note', 'data-carried': from }, `${what}は、前のコミット ${short(from)} のコードから作ったものを引き継いでいます。今のコミット ${short(state.source.commit)} のコードは、AIと照合していません。照合し直すときは「1 照合の準備」から進めます。`) : null;
+}
+function trialView(/** @type {any} */ t, /** @type {Record<string, any>} */ findings) {
   if (!t.trial) return h('div', { class: 'full', 'data-trial': 'none' }, h('h3', {}, '実行のしかた'), h('p', {}, '自動では実行しません。了承すると確認項目に登録し、試験の設定画面で設定してから実行します。'), t.trial_note ? h('p', { class: 'note' }, `理由：${t.trial_note}`) : null);
   const tr = t.trial;
+  const linked = new Set(tr.links.flatMap((/** @type {any} */ l) => l.check_ids));
+  const conditionText = (/** @type {any} */ c) => c ? `${c.scope}：${/** @type {any} */ (METHOD_LABEL)[c.method] || c.method}が${EXPECT_LABEL(c)}` : '';
   return [
     h('div', { class: 'full', 'data-trial': 'auto' }, h('h3', {}, '実行のしかた'), h('p', { class: 'code small' }, commandOf(tr.entrypoint, tr.args)),
       tr.readback ? h('p', { class: 'note' }, '続けて読み出す：', h('span', { class: 'code' }, commandOf(tr.readback.entrypoint, tr.readback.args))) : null,
       h('p', { class: 'note' }, `試行ごとに新しい作業ディレクトリで起動します。{{test_value}} には麦漆が試行ごとに作る架空の値が入ります。${tr.storage ? `保存先 ${tr.storage} を麦漆が直接読み出します。` : ''}`)),
-    h('div', { class: 'full' }, h('h3', {}, '判定の条件'), h('ul', { class: 'items' }, tr.checks.map((/** @type {any} */ c) => h('li', { 'data-trial-check': c.id }, `${c.scope}：${/** @type {any} */ (METHOD_LABEL)[c.method] || c.method}が${EXPECT_LABEL(c)}`)))),
+    h('div', { class: 'full' }, h('h3', {}, '判定の条件'), h('ul', { class: 'items' }, tr.checks.map((/** @type {any} */ c) => h('li', { 'data-trial-check': c.id }, conditionText(c), linked.has(c.id) ? null : h('span', { class: 'note', 'data-unlinked': '' }, '（記録するだけで、合否には使いません）'))))),
+    // 合否は、候補に対応づけた判定条件だけで決まる。どの条件で決まるかを、了承の前に確かめられるようにする。
+    h('div', { class: 'full', 'data-trial-links': '' }, h('h3', {}, '確かめる項目ごとの合否の決め方'), h('ul', { class: 'items' }, tr.links.map((/** @type {any} */ l) => h('li', { 'data-trial-link': l.finding_id },
+      `${findings[l.finding_id]?.requirement || l.finding_id}：`, h('strong', {}, l.check_ids.map((/** @type {string} */ id) => conditionText(tr.checks.find((/** @type {any} */ c) => c.id === id))).join('、かつ、')))))),
+    t.trial_note ? h('div', { class: 'full', 'data-trial-note': '' }, h('h3', {}, 'この試験では確かめない範囲（AIの注記）'), h('p', { class: 'note' }, t.trial_note)) : null,
   ];
 }
 async function planScreen() {
@@ -696,14 +715,14 @@ async function planScreen() {
         h('div', { class: 'two' },
           cite ? h('div', { class: 'full' }, H3('根拠'), h('blockquote', {}, plain(cite.excerpt)), h('p', { class: 'note' }, docOf(cite))) : null,
           fs.some((/** @type {any} */ f) => f?.concern) ? h('div', { class: 'full' }, H3('コードから出た懸念'), fs.filter((/** @type {any} */ f) => f?.concern).map((/** @type {any} */ f) => h('p', {}, f.concern.concern, h('span', { class: 'note' }, `（根拠の行：${evidenceText(f.concern)}）`)))) : null,
-          trialView(t),
+          trialView(t, findings),
           h('div', {}, H3('観測するもの'), h('p', {}, t.observation_label || t.observation)),
           refs.length ? h('div', {}, H3('関係するコード'), h('p', { class: 'code small' }, refs.join('、'))) : null)));
   });
   screen({
     sub: '3 検証案の了承', title: '試験の案を確かめてください',
     lead: auto ? '不足がありそうな点を確かめる試験です。了承した試験だけを、検証基盤が試験環境で実行します。' : '不足がありそうな点を確かめる試験です。了承した試験を確認項目に登録します。',
-    body: [h('p', { class: 'note', 'data-plan-count': '' }, `${new Set(r.plan.tests.flatMap((/** @type {any} */ t) => t.finding_ids)).size}つの確認項目を、${r.plan.tests.length}件の試験で確かめます。`),
+    body: [carriedNote(r.plan.carried_from, 'この試験の案'), h('p', { class: 'note', 'data-plan-count': '' }, `${new Set(r.plan.tests.flatMap((/** @type {any} */ t) => t.finding_ids)).size}つの確認項目を、${r.plan.tests.length}件の試験で確かめます。`),
       h('div', { class: 'stack' }, cards),
       r.plan.not_planned?.length ? h('p', { class: 'note', 'data-not-planned': '' }, `試験の案に入らなかった項目：${r.plan.not_planned.map((/** @type {any} */ n) => `${findings[n.finding_id]?.requirement || n.finding_id}（AIの理由：${n.reason || '理由の記載なし'}）`).join('、')}`) : null,
       r.plan.unclassified?.length ? h('p', { class: 'note', 'data-unclassified': '' }, `試験の案に含まれず、理由もない項目：${r.plan.unclassified.map((/** @type {string} */ id) => findings[id]?.requirement || id).join('、')}`) : null],
@@ -746,7 +765,8 @@ async function register(/** @type {any} */ t, /** @type {Record<string, any>} */
   const call = r.plan.model_call || {};
   const kinds = new Set(t.finding_ids.map((/** @type {string} */ id) => findings[id]?.concern ? 'concern' : 'guideline'));
   const label = kinds.has('concern') ? (kinds.has('guideline') ? 'ガイドライン照合とコードから出た懸念の試験の案' : 'コードから出た懸念の試験の案') : 'ガイドライン照合の試験の案';
-  const origin = `${label}（${call.response_model || call.requested_model || 'AI'}・応答ID ${call.response_id || '不明'}）を${person()}が了承して登録。対象 ${state.source.repository}@${short(state.source.commit)}`;
+  const carried = r.plan.carried_from ? `。案はコミット ${short(r.plan.carried_from)} の照合から作ったものを引き継いだ` : '';
+  const origin = `${label}（${call.response_model || call.requested_model || 'AI'}・応答ID ${call.response_id || '不明'}）を${person()}が了承して登録。対象 ${state.source.repository}@${short(state.source.commit)}${carried}`;
   const text = `${t.name}：${t.pass.join('／')}`.slice(0, 1000);
   await loadCase();
   const checks = state.view.workspace.checks;
@@ -992,18 +1012,22 @@ async function retestScreen() {
   }) : [];
   const select = h('select', { id: 'retest-branch', class: 'field' }, h('option', {}, '読み込んでいます…'));
   /** @type {any} */ let list = null;
-  const load = primary('このブランチを読み込む', () => guarded(async () => {
+  const open = (/** @type {boolean} */ carry) => guarded(async () => {
     const b = list?.branches.find((/** @type {any} */ x) => x.name === /** @type {HTMLSelectElement} */ (select).value);
     if (!b) throw Error('ブランチを選んでください。');
-    await openRepository(`https://github.com/${state.source.repository}`, b.name, b.commit);
-  }));
+    await openRepository(`https://github.com/${state.source.repository}`, b.name, b.commit, carry);
+  });
+  // 了承済みの試験があれば、同じ試験の実行し直しを主な操作にする。照合からやり直す操作も残す。
+  const canCarry = approvedTests(state.record).length > 0 && !state.record?.plan?.investigation && !!state.record?.results;
+  const load = canCarry ? primary('了承した試験を、このブランチで実行し直す', () => open(true)) : primary('このブランチを読み込む', () => open(false));
   screen({
-    sub: '5 修正用のプロンプト　再試験', title: '修正したブランチで試験し直す', lead: '修正したブランチを読み込むと、同じ流れで照合と試験をやり直し、前回の結果と比べられます。',
+    sub: '5 修正用のプロンプト　再試験', title: '修正したブランチで試験し直す', lead: canCarry ? '修正したブランチを読み込み、了承した試験をそのまま実行し直すと、前回の結果と項目ごとに比べられます。試験は、読み込んだ後にもう一度確かめて了承してから実行します。' : '修正したブランチを読み込むと、同じ流れで照合と試験をやり直し、前回の結果と比べられます。',
     body: [h('label', { for: 'retest-branch', class: 'field-label' }, '読み込むブランチ'), h('div', { class: 'select-wrap' }, select),
       prev ? card({ class: 'flush' }, h('div', { class: 'card-head' }, h('strong', {}, `前回 ${short(prev.commit)} と、今回 ${short(state.source.commit)} の比較`)),
         h('div', { class: 'scroll' }, h('table', { 'data-compare-table': '' }, h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, '項目'), h('th', { scope: 'col' }, `前回 ${short(prev.commit)}`), h('th', { scope: 'col' }, `今回 ${short(state.source.commit)}`), h('th', { scope: 'col' }, '変化'))), h('tbody', {}, rows))))
         : h('p', { class: 'note' }, 'このリポジトリで比べられる前のコミットの結果はまだありません。')],
     back: () => go('prompt'), primary: load,
+    extra: canCarry ? btn('照合からやり直す', () => open(false), 'tertiary') : null,
   });
   try {
     list = await api('POST', '/api/v1/branches', { url: `https://github.com/${state.source.repository}` });

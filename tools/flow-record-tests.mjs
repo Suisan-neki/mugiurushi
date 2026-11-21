@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import {
   applyScan, applyPlan, setAnswer, answerTo, answersOf, scanGeneration, planGeneration, StaleResponse,
   approve, approvedCheck, approvedTests, planForCheck, checkIdOf, startStep, migrate, fingerprint, untestedFindings,
-  applyInvestigation, runConcerns, planIsCurrent, planEvidence, carryableConcerns, carriedInvestigation, byLatestSave, concernSource,
+  applyInvestigation, runConcerns, planIsCurrent, planEvidence, carryableConcerns, carriedInvestigation, carryablePlan, carriedPlan, byLatestSave, concernSource,
 } from '../ui/flow-record.js';
 
 const scan = (reqs, questions = []) => ({ findings: reqs.map(requirement => ({ requirement, verification: { executable_check: true } })), questions });
@@ -234,4 +234,46 @@ test('引き継いだ懸念の確認項目の参照先は、今のコミット�
   assert.deepEqual(concernSource([moved], now, ['app/auth.py']), { path: 'app/auth.py', line: 1, end_line: 1 }, '消えたファイルは選ばない。行は先頭');
   assert.equal(concernSource([moved], now, ['app/other.py']), null, 'どれもなければ参照先を空にする');
   assert.deepEqual(concernSource([{ evidence: [{ path: 'app/x.py', start: 3, end: 5 }] }], now, []), { path: 'app/x.py', line: 3, end_line: 5 }, 'このコミットの懸念は根拠の行をそのまま使う');
+});
+
+test('前のコミットで了承して結果の出た試験の案を、了承と結果を除いて引き継ぐ', () => {
+  const prev = scanned(scan(['職員に回答を出さない', '記録を残す'], [q('q1', '院外から使いますか')]));
+  setAnswer(prev, prev.scan.questions[0], 'いいえ');
+  prev.files = ['app.py', 'old.py']; prev.summary = '架空の説明';
+  const trial = entrypoint => ({ entrypoint, args: [], storage: null, readback: { entrypoint, args: [] }, checks: [], links: [] });
+  applyPlan(prev, { tests: [
+    { id: 't-1', name: '閲覧の試験', kind: 'cli', finding_ids: ['f-1'], steps: ['a'], pass: ['b'], observation: 'readback_output', trial: trial('app.py') },
+    { id: 't-2', name: '記録の試験', kind: 'cli', finding_ids: ['f-2'], steps: ['a'], pass: ['b'], observation: 'stored_file', trial: trial('old.py') },
+    { id: 't-3', name: '了承しない試験', kind: 'cli', finding_ids: [], steps: ['a'], pass: ['b'], observation: 'stdout' },
+  ], not_planned: [] }, planGeneration(prev));
+  const A = 'a'.repeat(40), B = 'b'.repeat(40);
+  const records = { a: { repository: 'x/y', commit: A, record: prev } };
+  approve(prev, prev.plan.tests[0], 'flow-a-t1'); approve(prev, prev.plan.tests[1], 'flow-a-t2');
+  assert.equal(carryablePlan(records, 'x/y', B), null, '結果の控えがなければ引き継がない');
+  prev.results = { 'f-1': { requirement: '職員に回答を出さない', state: 'ng' } };
+  assert.equal(carryablePlan(records, 'x/y', A), null, '同じコミットからは引き継がない');
+  assert.equal(carryablePlan(records, 'x/z', B), null, '別のリポジトリからは引き継がない');
+  const carry = carryablePlan(records, 'x/y', B);
+  assert.deepEqual([carry.from, carry.tests], [A, 2]);
+  const now = carriedPlan(carry.record, carry.from, ['app.py'], ['app.py']);
+  assert.deepEqual(now.plan.tests.map(t => t.id), ['t-1', 't-2'], '了承した試験だけを引き継ぐ');
+  assert.equal(now.plan.tests[0].trial.entrypoint, 'app.py');
+  assert.equal(now.plan.tests[1].trial, null, '今のコミットの起動の候補にないファイルの設定は使わない');
+  assert.match(now.plan.tests[1].trial_note, /起動の候補にないファイルです: old\.py/);
+  assert.deepEqual([now.scan.carried_from, now.plan.carried_from], [A, A], 'どのコミットから引き継いだかを残す');
+  assert.deepEqual(now.scan.findings.map(f => f.requirement), ['職員に回答を出さない', '記録を残す'], '要求の文は同じなので、前後を比べられる');
+  assert.deepEqual(now.files, ['app.py'], '今のコミットにないファイルは外す');
+  assert.equal(now.summary, '架空の説明');
+  assert.equal(now.answers.q1.answer, 'いいえ');
+  assert.equal(now.approved, undefined, '了承は引き継がない'); assert.equal(now.results, undefined, '結果は引き継がない');
+  assert.equal(startStep(now), 3, '試験の案の画面から始め、人が了承し直す');
+  assert.equal(approvedTests(now).length, 0);
+  assert.equal(prev.plan.tests.length, 3, '引き継ぎ元の記録は変えない');
+});
+
+test('懸念から作った案は、試験の案の引き継ぎの対象にしない', () => {
+  const prev = investigated({}, 'inv-1', [concern('c-1')]);
+  applyPlan(prev, concernPlan(), planGeneration(prev), runConcerns(prev));
+  approve(prev, prev.plan.tests[0], 'flow-a-tc'); prev.results = { 'c-1': { requirement: 'x', state: 'ng', kind: 'concern' } };
+  assert.equal(carryablePlan({ a: { repository: 'x/y', commit: 'a'.repeat(40), record: prev } }, 'x/y', 'b'.repeat(40)), null);
 });

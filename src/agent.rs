@@ -1270,7 +1270,14 @@ pub fn plan(
         });
         if !entrypoints.is_empty() {
             match trial_of(t, &ids, &entrypoints) {
-                Ok(trial) => test["trial"] = trial,
+                Ok(trial) => {
+                    test["trial"] = trial;
+                    // 使える設定に付いた注記は、AIが書いた「この試験では確かめない範囲」。画面で設定と一緒に示す。
+                    let note = t["trial_note"].as_str().unwrap_or("").trim();
+                    if !note.is_empty() {
+                        test["trial_note"] = json!(note.chars().take(1000).collect::<String>());
+                    }
+                }
                 Err(note) => {
                     test["trial"] = Value::Null;
                     test["trial_note"] = json!(note);
