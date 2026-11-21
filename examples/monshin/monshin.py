@@ -62,6 +62,11 @@ def main(argv):
     if role not in STAFF:
         print("この利用者は問診の回答を開けません", file=sys.stderr)
         return 3
+    # 表示できるのは、登録されている患者の回答だけ。登録のない指定（「../」を含む文字列など）は、
+    # 回答がない場合と同じ表示にして、保存先の外のファイルを開かない。
+    if USERS.get(args.patient) != "patient":
+        print("回答はありません")
+        return 0
     path = answer_path(args.dir, args.patient)
     if not os.path.exists(path):
         print("回答はありません")
