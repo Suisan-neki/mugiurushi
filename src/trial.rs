@@ -402,6 +402,9 @@ pub fn validate(
                 if text_ok && check.relation.is_none() => {}
             (CheckMethod::ExitCode, Expectation::Zero | Expectation::Nonzero)
                 if check.text.is_none() => {}
+            // DBの行の条件は、読み出した行が無い（0行）か、ある（1行以上）かも選べる。
+            (CheckMethod::DatabaseRows, Expectation::Zero | Expectation::Nonzero)
+                if check.text.is_none() && check.relation.is_none() => {}
             (CheckMethod::ExitCode, _) => {
                 return Err(invalid(
                     "終了コードの条件は0か0以外を選び、文字列は指定しません",
@@ -1063,6 +1066,12 @@ pub fn describe(check: &TrialCheck, spec: &TrialSpec) -> String {
         ),
         CheckMethod::BrowserHeader => {
             format!("ブラウザが受け取ったHTTP応答のヘッダーに{text}{has}")
+        }
+        CheckMethod::DatabaseRows if check.expect == Expectation::Zero => {
+            "DBから直接読み出した行が無い（0行）".into()
+        }
+        CheckMethod::DatabaseRows if check.expect == Expectation::Nonzero => {
+            "DBから直接読み出した行がある（1行以上）".into()
         }
         CheckMethod::DatabaseRows => format!("DBから直接読み出した行に{text}{has}"),
         CheckMethod::DatabaseRelation => format!(

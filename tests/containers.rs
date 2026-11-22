@@ -1280,6 +1280,7 @@ fn visit_probe(
         match_column: match_column.into(),
         columns: vec!["reason".into(), "patient".into(), "note".into()],
         match_value: match_value.map(String::from),
+        match_from: None,
         before_actions: false,
     }
 }
@@ -1313,10 +1314,32 @@ fn postgres_rows_are_read_when_the_engine_is_declared() {
     let absent = session.read_database(&visit_probe("reason", None), "eel-test-absent");
     assert!(absent.performed);
     assert_eq!((absent.exit_code, absent.text.as_str()), (Some(0), ""));
-    // 文字列でない列も、文字列として照合できる。
-    let by_number = session.read_database(&visit_probe("patient", Some("7")), value);
+    // 文字列でない列も、文字列として照合できる。検索値は呼び出し側（read_all）が決めて渡す。
+    let by_number = session.read_database(&visit_probe("patient", None), "7");
     assert_eq!(by_number.exit_code, Some(0), "{}", by_number.detail);
     assert!(by_number.text.starts_with(value));
+    // 前の読み出しの列の値で、別の表の行を絞る（外部キーでつながった行）。
+    psql(
+        &container,
+        "CREATE TABLE contact (patient integer, name text); INSERT INTO contact VALUES (7, ''), (8, 'other')",
+    );
+    let contact = mugiurushi::browser::DatabaseProbe {
+        id: "contact".into(),
+        table: "contact".into(),
+        match_column: "patient".into(),
+        columns: vec!["patient".into(), "name".into()],
+        match_from: Some(mugiurushi::browser::MatchFrom {
+            read: "visit".into(),
+            column: 1,
+        }),
+        ..visit_probe("patient", None)
+    };
+    let reads =
+        mugiurushi::browser::read_all([&visit_probe("reason", None), &contact], value, |q, v| {
+            session.read_database(q, v)
+        });
+    assert_eq!(reads[1].exit_code, Some(0), "{}", reads[1].detail);
+    assert_eq!(reads[1].text, "7\t\n");
     // public以外のスキーマの表は、スキーマを指定すると読める。指定しないと読取の失敗で、0行とは区別される。
     // スキーマの名前は、接続する利用者（clinic）と別にする。同じ名前のスキーマは、指定しなくても探す順に入る。
     psql(

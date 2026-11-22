@@ -1141,12 +1141,13 @@ pub fn execute_with_dependencies(
     };
     // 準備が完了した場合だけ、操作前の状態を保存する。取得できない場合は空のまま残す。
     let database_reads_before = match (&recipe.browser, session.as_ref(), browser.as_ref()) {
-        (Some(spec), Some(session), Some(browser)) if browser.prepared() => spec
-            .database
-            .iter()
-            .filter(|q| q.before_actions)
-            .map(|q| session.read_database(q, &test_value))
-            .collect(),
+        (Some(spec), Some(session), Some(browser)) if browser.prepared() => {
+            crate::browser::read_all(
+                spec.database.iter().filter(|q| q.before_actions),
+                &test_value,
+                |q, value| session.read_database(q, value),
+            )
+        }
         _ => vec![],
     };
     // 値の追跡。操作の前のDBの状態を調べておき、前からあった行を後で除く。
@@ -1387,10 +1388,9 @@ pub fn execute_with_dependencies(
                 .as_ref()
                 .is_some_and(|r| r.prepared && r.steps.iter().any(|s| s.phase == "action")) =>
         {
-            spec.database
-                .iter()
-                .map(|q| session.read_database(q, &test_value))
-                .collect()
+            crate::browser::read_all(&spec.database, &test_value, |q, value| {
+                session.read_database(q, value)
+            })
         }
         _ => vec![],
     };
@@ -2341,10 +2341,9 @@ fn recover_and_compare(
     outcome.database_query = session.query_database();
     let (database_after, http_after): (Vec<_>, Vec<_>) = match &recipe.browser {
         Some(spec) if acted => (
-            spec.database
-                .iter()
-                .map(|q| session.read_database(q, test_value))
-                .collect(),
+            crate::browser::read_all(&spec.database, test_value, |q, value| {
+                session.read_database(q, value)
+            }),
             spec.http_reads
                 .iter()
                 .map(|p| crate::http_probe::read(p, session))

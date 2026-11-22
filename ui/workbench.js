@@ -1126,7 +1126,7 @@ function previewBox(check, f, exec) {
       h('dt', {}, '保存先'), h('dd', {}, f.storage ? `作業ディレクトリの ${f.storage}` : '指定なし（麦漆による保存先の読み出しは行いません）'),
       h('dt', {}, '故障'), h('dd', {}, FAULT_LABEL[f.fault]),
       h('dt', {}, '後からの読み出し'), h('dd', {}, f.readback ? [codeText(launchCommand(f, f.readback.launch, f.readback.entrypoint, f.readback.args)), f.readback.launch === 'file' ? '' : `（${LAUNCH_LABEL[f.readback.launch]}）`] : '行いません'),
-      h('dt', {}, '判定の条件'), h('dd', {}, h('ul', { class: 'items' }, f.checks.map(c => h('li', {}, `${c.scope || '（範囲が未入力）'}: ${METHODS.find(m => m[0] === c.method)?.[1]} が ${{ zero: '0で終わる', nonzero: '0以外で終わる', contains: `「${c.text}」を含む`, not_contains: `「${c.text}」を含まない` }[c.expect]}（${METHODS.find(m => m[0] === c.method)?.[2]}）`)))),
+      h('dt', {}, '判定の条件'), h('dd', {}, h('ul', { class: 'items' }, f.checks.map(c => h('li', {}, `${c.scope || '（範囲が未入力）'}: ${METHODS.find(m => m[0] === c.method)?.[1]} が ${(c.method === 'database_rows' ? { zero: '0行（行が無い）', nonzero: '1行以上（行がある）' } : {})[c.expect] || { zero: '0で終わる', nonzero: '0以外で終わる', contains: `「${c.text}」を含む`, not_contains: `「${c.text}」を含まない` }[c.expect]}（${METHODS.find(m => m[0] === c.method)?.[2]}）`)))),
       h('dt', {}, '実行の方式'), h('dd', {}, `${exec?.mode || '不明'}方式。${exec?.mode === 'local' ? 'OSによる隔離は行いません。' : ''}固定コミットのファイルを読み取り専用で複製し、試行ごとの新しい作業ディレクトリで起動します。依存パッケージのインストールは行いません。既存の保存データは使わず、置き換えません。${f.server ? '先に起動するプロセスとの通信は 127.0.0.1 のポートで行います。' : ''}${f.containers_text?.trim() ? 'コンテナの待ち受けは 127.0.0.1 だけに公開し、試行の後に消します。' : ''}`)));
 }
 /// 画面の設定から実行要求の試験設定を作る。実行と、対応づけの指紋の計算に同じものを使う。

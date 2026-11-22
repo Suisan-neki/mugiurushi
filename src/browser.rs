@@ -114,8 +114,20 @@ pub struct DatabaseProbe {
     pub columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_value: Option<String>,
+    /// 試験値の代わりに、前に書いた読み出しの1行の列の値で行を絞る。外部キーでつながった行
+    /// （患者の行のIDから連絡先の行など）を読むために使う。`match_value` とは同時に指定できない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_from: Option<MatchFrom>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub before_actions: bool,
+}
+/// 別の読み出しの結果の列。参照先は、一覧で前にある読み出しに限る（順に読み、循環させない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchFrom {
+    pub read: String,
+    /// 参照先の `columns` の位置（0から）。
+    pub column: usize,
 }
 fn is_false(value: &bool) -> bool {
     !value
@@ -417,6 +429,23 @@ pub fn validate(spec: &BrowserSpec, containers: &ContainerSpec) -> io::Result<()
                 "DBの読取先は試験用DBと英数字・下線の識別子で指定してください",
             ));
         }
+        if let Some(from) = &q.match_from {
+            // 参照先は一覧で前にあるものに限る。自分自身や後ろを指す指定（循環を含む）は受け付けない。
+            let earlier = spec
+                .database
+                .iter()
+                .take_while(|p| !std::ptr::eq(*p, q))
+                .find(|p| p.id == from.read);
+            let ok = q.match_value.is_none()
+                && earlier.is_some_and(|p| {
+                    from.column < p.columns.len() && (!q.before_actions || p.before_actions)
+                });
+            if !ok {
+                return Err(invalid(
+                    "DBの読取先の match_from は、前にある読取先のIDと、その列の位置を指定してください（match_value とは同時に指定できず、操作前に読む場合は参照先も操作前に読むものに限ります）",
+                ));
+            }
+        }
         if q.schema.is_some()
             && !containers.services.iter().any(|s| {
                 s.name == q.service && s.engine == crate::database::DatabaseEngine::Postgres
@@ -452,23 +481,75 @@ pub fn rejection_observed(spec: &BrowserSpec, report: &BrowserReport) -> bool {
                 })
         })
 }
-/// 列名と検索値を別々に検査し、1件の試験値に一致する行だけを読む。任意のSQLは受け取らない。
-pub fn query(
-    engine: crate::database::DatabaseEngine,
-    q: &DatabaseProbe,
-    test_value: &str,
-) -> String {
-    let match_value = q.match_value.as_deref().map_or_else(
-        || test_value.to_owned(),
-        |value| crate::trial::substitute(value, test_value),
-    );
+/// 列名と検索値を別々に検査し、1件の検索値に一致する行だけを読む。任意のSQLは受け取らない。
+/// 検索値は `read_all` が決めたもの（試験値、`match_value`、`match_from` の参照先の値）。
+pub fn query(engine: crate::database::DatabaseEngine, q: &DatabaseProbe, value: &str) -> String {
     engine.rows_sql(
         q.schema.as_deref(),
         &q.table,
         &q.match_column,
         &q.columns,
-        &match_value,
+        value,
     )
+}
+
+/// 読み出しを一覧の順に行う。`match_from` の読み出しは、同じ回で先に読んだ参照先の結果から
+/// 検索値を取る。参照先が1行でない、または列が空・NULLのときは読まず、理由を残す
+/// （行が無いこととは扱わない）。
+pub fn read_all<'a>(
+    probes: impl IntoIterator<Item = &'a DatabaseProbe>,
+    test_value: &str,
+    mut read: impl FnMut(&DatabaseProbe, &str) -> DatabaseRead,
+) -> Vec<DatabaseRead> {
+    let mut done: Vec<DatabaseRead> = vec![];
+    for probe in probes {
+        let value = match &probe.match_from {
+            Some(from) => match done.iter().find(|r| r.id == from.read) {
+                Some(source) => single_value(source, from.column),
+                None => Err(format!(
+                    "参照先の読み出し {} を、この回で読んでいない",
+                    from.read
+                )),
+            },
+            None => Ok(probe.match_value.as_deref().map_or_else(
+                || test_value.to_owned(),
+                |value| crate::trial::substitute(value, test_value),
+            )),
+        };
+        done.push(match value {
+            Ok(value) => read(probe, &value),
+            Err(reason) => DatabaseRead {
+                id: probe.id.clone(),
+                performed: false,
+                exit_code: None,
+                text: String::new(),
+                detail: format!("DBの行を読み出していない：{reason}"),
+            },
+        });
+    }
+    done
+}
+
+/// 読み出しの結果がちょうど1行のとき、その行の指定した列の値を返す。
+fn single_value(read: &DatabaseRead, column: usize) -> Result<String, String> {
+    if !read.performed || read.exit_code != Some(0) {
+        return Err(format!("参照先の読み出し {} が失敗した", read.id));
+    }
+    let rows: Vec<_> = read.text.lines().filter(|l| !l.is_empty()).collect();
+    if rows.len() != 1 {
+        return Err(format!(
+            "参照先の読み出し {} の行が1行ではない（{}行）",
+            read.id,
+            rows.len()
+        ));
+    }
+    match rows[0].split('\t').nth(column) {
+        Some(value) if !value.is_empty() && value != "NULL" => Ok(value.to_owned()),
+        _ => Err(format!(
+            "参照先の読み出し {} の列 {column} が空かNULL",
+            read.id
+        )),
+    }
 }
 fn unavailable(run_id: &str, detail: &str) -> BrowserReport {
     BrowserReport {
@@ -1009,7 +1090,18 @@ pub fn evaluate(
             .database_reads
             .iter()
             .find(|q| q.id == target && q.performed && q.exit_code == Some(0))
-            .map(|q| result(q.text.contains(text)))
+            .map(|q| {
+                if matches!(check.expect, Expectation::Zero | Expectation::Nonzero) {
+                    let rows = q.text.lines().filter(|l| !l.is_empty()).count();
+                    let pass = (rows == 0) == (check.expect == Expectation::Zero);
+                    (
+                        if pass { Observed::Pass } else { Observed::Fail },
+                        format!("観測 {target} で読み出した行は{rows}行"),
+                    )
+                } else {
+                    result(q.text.contains(text))
+                }
+            })
             .unwrap_or_else(missing),
         _ => missing(),
     }
