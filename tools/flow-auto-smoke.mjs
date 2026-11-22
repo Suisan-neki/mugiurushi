@@ -145,6 +145,8 @@ try {
   assert.match(await page.locator('[data-test=t-access] [data-trial=auto]').innerText(), /python3 monshin\.py --dir \. --user P001 answer P001 "\{\{test_value\}\}"/);
   // 合否は対応づけた判定条件だけで決まる。合否に使わない条件を、了承の前に示す。候補が1つの試験では、候補の名前は繰り返さない。
   assert.match(await page.locator('[data-test=t-access] [data-trial-check=c1]').innerText(), /記録するだけで、合否には使いません/);
+  // 判定の条件では、試験の値の記号を言葉にする。実行のしかたのコマンドは、記号のまま示す。
+  assert.match(await page.locator('[data-test=t-access] [data-trial-check=c2]').innerText(), /受付の職員に回答が出ない：読み出しの出力が試験の値を含まない/);
   assert.equal(await page.locator('[data-test=t-access] [data-trial-check=c2] [data-unlinked]').count(), 0);
   assert.equal(await page.locator('[data-test=t-access] [data-trial-link]').count(), 0);
   assert.match(await page.locator('[data-test=t-access] [data-trial-note]').innerText(), /AIの注記：医師による表示は確かめない/);
@@ -167,6 +169,12 @@ try {
   assert.match(await page.locator('h1').innerText(), /満たさない項目が1件/);
   await page.locator('[data-finding=f-1] details summary').click();
   assert.match(await page.locator('[data-finding=f-1]').innerText(), /受付の職員に回答が出ない/);
+  // 結果の文は、試行ごとに変わる試験の値を「試験で入力した値」と書く。値そのものは、詳細の「記録」にだけ示す。
+  assert.equal(await page.locator('[data-finding=f-1] [data-happened]').innerText(), '「受付の職員に回答が出ない」：読み出しの出力に試験で入力した値が含まれる');
+  assert.match(await page.locator('[data-finding=f-2] [data-state-label]').innerText(), /試験で入力した値が含まれる/);
+  const rowText = await page.locator('[data-finding=f-1]').innerText();
+  assert.equal(rowText.match(/eel-test-[\d-]+/g)?.length, 1, '試験の値そのものは、記録に一度だけ示す');
+  assert.match(rowText, /試行 run-[\d-]+（試験で入力した値：eel-test-[\d-]+）/);
   await shot('6-result');
   await page.getByRole('button', { name: '修正用のプロンプトを作る' }).click();
   const prompt = await page.locator('[data-prompt]').innerText();
